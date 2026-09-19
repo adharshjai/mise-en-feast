@@ -1,0 +1,24 @@
+{
+  "name": "pantry-pal-new",
+  "version": "1.0.0",
+  "description": "A pantry that fills itself from grocery receipts and tells you what to cook.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adharshjai/pantry-pal.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/adharshjai/pantry-pal/issues"
+  },
+  "homepage": "https://github.com/adharshjai/pantry-pal#readme",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.116.0"
+  }
+}

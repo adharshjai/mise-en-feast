@@ -13,6 +13,6 @@
 
    Leave both empty to run Pantry in demo mode (state lives in localStorage). */
 window.PANTRY_CONFIG = {
-  supabaseUrl: '',
-  supabaseAnonKey: '',
+  supabaseUrl: 'https://kfzgofybljvahvrxdhav.supabase.co',
+  supabaseAnonKey: 'sb_publishable_L1BhUCvvzLvweoBm3WMecA_aq6PevHH',
 };
