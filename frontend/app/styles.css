@@ -12,7 +12,7 @@ body { overflow: hidden; }
   position: relative; z-index: 5;
   display: flex; align-items: center; justify-content: space-between; padding: 0 40px;
 }
-.wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 18px; letter-spacing: -.02em; }
+.wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; }
 .wordmark:hover { color: var(--text); }
 .pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; }
 /* Tonight: the dishes picked from the deck, left of the item count */

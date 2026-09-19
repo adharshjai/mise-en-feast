@@ -21,7 +21,7 @@ body { min-height: 100%; display: grid; grid-template-rows: 72px 1fr; grid-auto-
   animation: rise .5s var(--ease) both;
 }
 
-.wordmark { display: inline-flex; align-items: center; gap: 10px; align-self: flex-start; color: var(--text); font-weight: 700; font-size: 18px; letter-spacing: -.02em; margin-bottom: 18px; }
+.wordmark { display: inline-flex; align-items: center; gap: 10px; align-self: flex-start; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; margin-bottom: 18px; }
 .wordmark:hover { color: var(--text); }
 
 .auth h1 { font-size: 34px; line-height: 1.04; letter-spacing: -.03em; font-weight: 800; }
