@@ -288,7 +288,7 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 /* Sits in the empty middle of the top bar, where nothing is laid out. Always in the
    accessibility tree (never display:none) so role=status announcements land. */
 .toast {
-  position: fixed; left: 50%; top: 20px; bottom: auto; z-index: 40; transform: translateX(-50%) translateY(-12px); opacity: 0;
+  position: fixed; left: 50%; top: 96px; bottom: auto; z-index: 40; transform: translateX(-50%) translateY(-12px); opacity: 0;   /* just under the top bar, clear of the Tonight pill */
   pointer-events: none;
   display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 10px 20px 10px 12px; border-radius: 999px;
   font-size: 14px; font-weight: 500; transition: transform .35s var(--spring), opacity .2s ease;
