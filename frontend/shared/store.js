@@ -49,6 +49,7 @@ function normalizeItem(it) {
     key: str(it.key || it.name).toLowerCase(),
     qty: str(it.qty),
     raw: str(it.raw),
+    variant: str(it.variant || ''),
     initial: num(it.initial, 1),
     purchase,
     expiry: num(it.expiry, purchase + 7 * 86400000),

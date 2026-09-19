@@ -2,6 +2,10 @@
 .env*
 .DS_Store
 node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
 
 # secrets & local
 .env
@@ -10,3 +14,4 @@ dist/
 .vite/
 node_modules/
 .gstack/
+backend/.env

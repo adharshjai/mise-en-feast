@@ -1,18 +1,20 @@
-/* Pantry — Supabase connection settings.
-   Loaded as a classic <script> BEFORE any module that imports shared/supabase.js.
+/* Pantry — connection settings.
+   Loaded as a classic <script> BEFORE any module that imports shared/supabase.js
+   or shared/api.js.
 
-   Where to find both values:
-     Supabase dashboard -> your project -> Project Settings -> API
-       - "Project URL"            -> supabaseUrl   (looks like https://abcdefghijklmnop.supabase.co)
-       - "Project API keys: anon" -> supabaseAnonKey
+   Supabase (auth + pantry persistence):
+     Dashboard → Project Settings → API
+       - Project URL  → supabaseUrl
+       - anon public  → supabaseAnonKey
+     The anon key is safe in the browser; RLS protects every row.
+     Leave both empty to run in demo mode (localStorage only).
 
-   The anon key is safe to ship in a browser. It only identifies the project; every
-   table in supabase/schema.sql has Row Level Security enabled, so a request can only
-   read or write rows whose user_id matches the signed-in user. Never put the
-   service_role key here.
-
-   Leave both empty to run Pantry in demo mode (state lives in localStorage). */
+   FastAPI AI backend (receipt OCR + recipes):
+     Run pantry-pal/backend with uvicorn on port 8000, then keep apiBaseUrl below.
+     Leave apiBaseUrl empty to use the built-in sample receipt + hardcoded dishes. */
 window.PANTRY_CONFIG = {
   supabaseUrl: 'https://kfzgofybljvahvrxdhav.supabase.co',
   supabaseAnonKey: 'sb_publishable_L1BhUCvvzLvweoBm3WMecA_aq6PevHH',
+
+  apiBaseUrl: 'http://localhost:8000',
 };

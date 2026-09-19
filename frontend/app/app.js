@@ -7,6 +7,7 @@
 
 import { requireAuth, signOut, configured } from '../shared/supabase.js';
 import { loadState, saveState, logCook, logReceipt, clearLocal } from '../shared/store.js';
+import { scanReceipt, fetchRecipes, apiConfigured } from '../shared/api.js';
 
 const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
@@ -138,7 +139,13 @@ const DISHES = [
     ],
   },
 ];
-const dishById = id => DISHES.find(d => d.id === id);
+const DISH_IMAGES = DISHES.map(d => d.img);
+/** Live Gemini recipes when the API is up; null falls back to hardcoded DISHES. */
+let liveDishes = null;
+let recipeRefreshToken = 0;
+
+const dishById = id => (liveDishes || DISHES).find(d => d.id === id);
+const activeDishes = () => liveDishes || DISHES;
 
 const SAMPLE_RECEIPT = {
   store: 'Whole Foods Market', date: 'Sep 19', total: 64.18,
@@ -159,6 +166,148 @@ const SAMPLE_RECEIPT = {
     { raw: 'AA BATT 8PK', name: 'AA batteries', price: 7.65, nonFood: true },
   ],
 };
+
+/** Metadata for the receipt currently in the review sheet. */
+let lastReceipt = {
+  store: SAMPLE_RECEIPT.store,
+  date: SAMPLE_RECEIPT.date,
+  total: SAMPLE_RECEIPT.total,
+};
+
+function keyForName(name) {
+  const n = String(name || '').toLowerCase().trim();
+  if (!n) return 'item';
+  if (CATALOG[n]) return n;
+  const base = n.split(',')[0].trim();
+  if (CATALOG[base]) return base;
+  for (const k of Object.keys(CATALOG)) {
+    if (n.includes(k) || k.includes(base)) return k;
+  }
+  return base.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() || 'item';
+}
+
+function qtyLabel(item) {
+  if (item.unit && item.quantity != null) return `${item.quantity} ${item.unit}`.trim();
+  if (item.quantity != null) return String(item.quantity);
+  return '';
+}
+
+function formatReceiptDate(iso) {
+  if (!iso) return new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const d = new Date(iso + (iso.length <= 10 ? 'T12:00:00' : ''));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** Map a /scan item into a review-row + pantry seed fields. */
+function lineFromScanItem(item) {
+  const key = keyForName(item.group_key || item.name);
+  const purchaseMs = item.purchase_date ? Date.parse(item.purchase_date) : Date.now();
+  const expiryMs = item.expiration_date ? Date.parse(item.expiration_date) : purchaseMs + catalog(key).shelf * DAY;
+  return {
+    id: uid(),
+    raw: item.raw_text || item.name,
+    name: item.name,
+    key,
+    variant: item.variant || '',
+    qty: qtyLabel(item),
+    price: Number(item.price) || 0,
+    nonFood: item.is_food === false,
+    low: false,
+    dropped: false,
+    initial: Number(item.initial_servings || item.servings) || catalog(key).servings,
+    burn: Number(item.daily_burn_rate) || (item.burn_pattern === 'event' ? 0 : catalog(key).burn),
+    purchase: Number.isFinite(purchaseMs) ? purchaseMs : Date.now(),
+    expiry: Number.isFinite(expiryMs) ? expiryMs : Date.now() + catalog(key).shelf * DAY,
+  };
+}
+
+function slugify(title) {
+  return String(title || 'dish').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'dish';
+}
+
+function dishFromApi(recipe, index) {
+  const id = `ai-${slugify(recipe.title)}-${index}`;
+  return {
+    id,
+    name: recipe.title,
+    img: DISH_IMAGES[index % DISH_IMAGES.length],
+    time: `${recipe.cook_minutes || 20} min`,
+    servings: recipe.servings || 2,
+    difficulty: (recipe.difficulty || 'easy').replace(/^\w/, c => c.toUpperCase()),
+    ingredients: (recipe.ingredients || [])
+      .filter(ing => !ing.staple)
+      .map(ing => ({
+        name: ing.name,
+        key: keyForName(ing.matched_name || ing.name),
+        need: Math.max(0.5, Number(ing.servings_used) || 1),
+        amt: ing.amount || '',
+      })),
+    steps: Array.isArray(recipe.steps) ? recipe.steps : [],
+  };
+}
+
+function pantryForApi() {
+  // One aggregated row per food key so Gemini matches stacks, not individual lots.
+  const byKey = new Map();
+  for (const it of state.pantry) {
+    if (needsCheckin(it)) continue;
+    const qty = current(it);
+    if (qty <= 0) continue;
+    const prev = byKey.get(it.key);
+    const dl = Math.max(0, Math.round(daysLeft(it)));
+    if (!prev) {
+      byKey.set(it.key, {
+        id: it.id,
+        name: it.name,
+        category: 'other',
+        quantity_servings: qty,
+        days_left: dl,
+        deadline_reason: 'spoils',
+        is_food: true,
+      });
+    } else {
+      prev.quantity_servings += qty;
+      prev.days_left = Math.min(prev.days_left, dl);
+      if (it.name.length < prev.name.length) prev.name = it.name;
+    }
+  }
+  return [...byKey.values()];
+}
+
+async function refreshRecipes() {
+  if (!apiConfigured() || !state.pantry.length) {
+    liveDishes = null;
+    renderAll({ enter: true });
+    return [];
+  }
+  const token = ++recipeRefreshToken;
+  try {
+    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2 });
+    if (token !== recipeRefreshToken) return liveDishes || [];
+    let list = (data.recipes || []).map(dishFromApi);
+    // Soften the filter once if nothing made the cut
+    if (!list.length) {
+      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4 });
+      if (token !== recipeRefreshToken) return liveDishes || [];
+      list = (data.recipes || []).map(dishFromApi);
+    }
+    liveDishes = list.length ? list : null;
+    const ids = new Set((liveDishes || DISHES).map(d => d.id));
+    for (const set of [state.skipped, state.cooked, state.chosen]) {
+      for (const id of [...set]) if (!ids.has(id)) set.delete(id);
+    }
+    renderAll({ enter: true });
+    return liveDishes || [];
+  } catch (err) {
+    console.warn('[pantry] recipe refresh failed', err);
+    if (token === recipeRefreshToken) {
+      liveDishes = null;
+      renderAll({ enter: true });
+    }
+    return [];
+  }
+}
 
 /* ---------- the pantry model ---------- */
 function mk(name, key, qty, daysAgo, raw = '') {
@@ -188,30 +337,55 @@ function seedPantry() {
     mk('Milk', 'milk', '1 gal', 9),
   ];
 }
-// Buying something again merges into the row you already have, and the merge
-// corrects the old estimate. Both the receipt flow and add-by-hand go through here.
-function upsert(name, key, qty, raw = '') {
+// Each purchase is its own lot. Same group_key stacks in the panel with separate
+// expiry dates — never merge and overwrite an older banana's use-by.
+function addLot(name, key, qty, raw = '', extras = null) {
   const c = catalog(key);
-  const existing = state.pantry.find(it => it.key === key);
-  if (existing) {
-    existing.initial = current(existing) + c.servings;
-    existing.purchase = Date.now();
-    existing.expiry = Date.now() + c.shelf * DAY;
-    existing.deducted = 0;
-    existing.asking = false;
-    existing.qty = qty || existing.qty;
-    existing.name = name;
-    return { item: existing, merged: true };
-  }
-  const it = mk(name, key, qty || '', 0, raw);
+  const initial = extras && extras.initial != null ? extras.initial : c.servings;
+  const burn = extras && extras.burn != null ? extras.burn : c.burn;
+  const purchase = extras && extras.purchase != null ? extras.purchase : Date.now();
+  const expiry = extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY;
+  const it = {
+    id: uid(),
+    name,
+    key,
+    qty: qty || '',
+    raw,
+    variant: (extras && extras.variant) || '',
+    initial,
+    purchase,
+    expiry,
+    burn,
+    deducted: 0,
+  };
   state.pantry.push(it);
   return { item: it, merged: false };
 }
+// Hand-add still uses this name; always stacks as a new lot.
+const upsert = (name, key, qty, raw = '', extras = null) => addLot(name, key, qty, raw, extras);
 
 const current = it => Math.max(0, it.initial - it.burn * ((Date.now() - it.purchase) / DAY) - it.deducted);
 const daysLeft = it => (it.expiry - Date.now()) / DAY;
 const needsCheckin = it => current(it) <= OUT;
-const findItem = key => state.pantry.find(it => it.key === key && !needsCheckin(it));
+const lotsFor = key => state.pantry.filter(it => it.key === key).sort((a, b) => a.expiry - b.expiry);
+const available = key => lotsFor(key).filter(it => !needsCheckin(it)).reduce((s, it) => s + current(it), 0);
+/** Soonest-expiring lot that still has stock (FEFO). */
+const findItem = key => lotsFor(key).find(it => !needsCheckin(it) && current(it) > 0) || null;
+
+function deductServings(key, need) {
+  let left = need;
+  const used = [];
+  for (const item of lotsFor(key)) {
+    if (left <= 0) break;
+    const have = current(item);
+    if (have <= 0) continue;
+    const take = Math.min(have, left);
+    item.deducted += take;
+    left -= take;
+    used.push({ id: item.id, key, name: item.name, servings: take });
+  }
+  return used;
+}
 
 function timeLabel(dl) {
   if (dl < 0) return 'past its date';
@@ -249,7 +423,8 @@ function freshness(it) {
 function analyze(dish) {
   const ings = dish.ingredients.map(i => {
     const item = findItem(i.key);
-    return { ...i, item, have: !!item };
+    const avail = available(i.key);
+    return { ...i, item, avail, have: avail > 0 };
   });
   const have = ings.filter(i => i.have);
   const missing = ings.filter(i => !i.have);
@@ -273,6 +448,7 @@ const state = {
   skipped: new Set(),
   cooked: new Set(),
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
+  expanded: new Set(),      // pantry stack keys that are open
   sheet: null,
   panelOpen: false,
   leaving: false,
@@ -281,7 +457,7 @@ const state = {
 };
 
 function buildDeck() {
-  const all = DISHES.map(analyze).filter(eligible);
+  const all = activeDishes().map(analyze).filter(eligible);
   state.deck = all
     .filter(a => !state.skipped.has(a.dish.id) && !state.cooked.has(a.dish.id) && !state.chosen.has(a.dish.id))
     .sort((a, b) => (a.urgentDays - b.urgentDays) || (a.missing.length - b.missing.length));
@@ -530,7 +706,7 @@ function openScanUpload() {
         <small>Photos and PDFs · one receipt at a time</small>
       </label>
       <div class="sheet-note">
-        <span>Items, prices and the date are read for you.</span>
+        <span>${apiConfigured() ? 'Items, prices and dates are read with Gemini.' : 'Backend offline — use the sample receipt, or set apiBaseUrl.'}</span>
         <button class="linkish accent" type="button" data-sample>Use sample receipt</button>
       </div>
     </div>`);
@@ -553,11 +729,18 @@ function receiptHTML(file) {
   return `<div class="receipt-lines">${rows.join('')}</div>`;
 }
 async function startProcessing(file) {
-  const steps = [
-    ['Reading items', '17 lines found, 2 look like non-food'],
-    ['Estimating shelf life', 'Milk, spinach, chicken thighs…'],
-    ['Finding recipes', 'Dishes that use what expires first'],
-  ];
+  const usingSample = !file;
+  const steps = usingSample
+    ? [
+      ['Reading items', '17 lines found, 2 look like non-food'],
+      ['Estimating shelf life', 'Milk, spinach, chicken thighs…'],
+      ['Finding recipes', 'Dishes that use what expires first'],
+    ]
+    : [
+      ['Reading items', 'Sending your receipt to the AI parser'],
+      ['Estimating shelf life', 'Servings, burn rate, and use-by dates'],
+      ['Finding recipes', 'We’ll refresh the deck once it’s in your pantry'],
+    ];
   openSheet('processing', `
     <div class="sheet-head"><h2>Reading your receipt</h2>${closeBtn()}</div>
     <div class="sheet-body">
@@ -566,21 +749,70 @@ async function startProcessing(file) {
         <div class="steps">${steps.map(([t, s]) => `<div class="step"><span class="mark">${ICON.checkMd}</span><div><strong>${t}</strong><small>${s}</small></div></div>`).join('')}</div>
       </div>
       <div class="sheet-note">
-        <span>${file ? 'Prototype: parsing is simulated with the sample receipt.' : 'About ten seconds. The deck stays where it was.'}</span>
+        <span>${usingSample
+          ? (apiConfigured() ? 'Sample receipt — skip the camera when you just want to try the flow.' : 'Demo mode: sample receipt (API not configured).')
+          : 'Parsing with Gemini. Keep this tab open.'}</span>
         <button class="linkish" type="button" data-back-upload>Cancel</button>
       </div>
     </div>`);
   const stepEls = $$('.step', el.sheet);
-  for (let i = 0; i < stepEls.length; i++) {
+
+  if (usingSample) {
+    for (let i = 0; i < stepEls.length; i++) {
+      if (state.sheet !== 'processing') return;
+      stepEls[i].classList.add('active');
+      await wait(1100);
+      stepEls[i].classList.remove('active');
+      stepEls[i].classList.add('done');
+    }
     if (state.sheet !== 'processing') return;
-    stepEls[i].classList.add('active');
-    await wait(1100);
-    stepEls[i].classList.remove('active');
-    stepEls[i].classList.add('done');
+    await wait(250);
+    lastReceipt = { store: SAMPLE_RECEIPT.store, date: SAMPLE_RECEIPT.date, total: SAMPLE_RECEIPT.total };
+    openReview(SAMPLE_RECEIPT.lines.map(l => ({ ...l, id: uid(), dropped: false })));
+    return;
   }
-  if (state.sheet !== 'processing') return;
-  await wait(250);
-  openReview(SAMPLE_RECEIPT.lines.map(l => ({ ...l, id: uid(), dropped: false })));
+
+  if (!apiConfigured()) {
+    toast('Backend not configured', 'Set apiBaseUrl in shared/config.js');
+    return openScanUpload();
+  }
+
+  // Animate steps while the request runs
+  let stepIdx = 0;
+  stepEls[0]?.classList.add('active');
+  const tick = setInterval(() => {
+    if (state.sheet !== 'processing') return;
+    if (stepEls[stepIdx]) {
+      stepEls[stepIdx].classList.remove('active');
+      stepEls[stepIdx].classList.add('done');
+    }
+    stepIdx = Math.min(stepIdx + 1, stepEls.length - 1);
+    stepEls[stepIdx]?.classList.add('active');
+  }, 1400);
+
+  try {
+    const parsed = await scanReceipt(file);
+    clearInterval(tick);
+    if (state.sheet !== 'processing') return;
+    stepEls.forEach(s => { s.classList.remove('active'); s.classList.add('done'); });
+    await wait(200);
+    lastReceipt = {
+      store: parsed.store_name || 'Grocery store',
+      date: formatReceiptDate(parsed.purchase_date),
+      total: Number(parsed.total) || 0,
+    };
+    const lines = (parsed.items || []).map(lineFromScanItem);
+    if (!lines.length) {
+      toast('No food items found', 'Try a clearer photo');
+      return openScanUpload();
+    }
+    openReview(lines);
+  } catch (err) {
+    clearInterval(tick);
+    console.warn('[pantry] scan failed', err);
+    toast('Couldn’t read that receipt', String(err.message || err));
+    if (state.sheet === 'processing') openScanUpload();
+  }
 }
 
 /* ---------- scan: review ---------- */
@@ -589,10 +821,10 @@ function openReview(lines) {
   review = lines;
   openSheet('review', `
     <div class="sheet-head"><h2 id="review-title">Review items</h2>${closeBtn()}</div>
-    <div class="sheet-sub"><span>${esc(SAMPLE_RECEIPT.store)}</span><i></i><span>${esc(SAMPLE_RECEIPT.date)}</span><i></i><span>Click a row to edit it</span></div>
+    <div class="sheet-sub"><span>${esc(lastReceipt.store)}</span><i></i><span>${esc(lastReceipt.date)}</span><i></i><span>Click a row to edit it</span></div>
     <div class="rlist scroll" id="rlist"></div>
     <div class="sheet-foot" style="flex-direction:column;align-items:stretch">
-      <div class="summary"><span id="review-summary"></span><b>$${SAMPLE_RECEIPT.total.toFixed(2)}</b></div>
+      <div class="summary"><span id="review-summary"></span><b>$${Number(lastReceipt.total).toFixed(2)}</b></div>
       <button class="pill prominent full" type="button" data-add-pantry>${ICON.checkMd}<span>Add to pantry</span></button>
     </div>`);
   renderReview(true);
@@ -644,7 +876,7 @@ function renderReview(animate = false) {
     }
     return `<div class="rrow" data-id="${l.id}" ${delay()}>
       <button class="main" type="button" data-editrow="${l.id}">
-        <div class="name"><strong>${esc(l.name)}</strong><small>${esc(estimateLabel(l.key))}</small></div>
+        <div class="name"><strong>${esc(l.name)}</strong><small>${esc(estimateLabel(l.key, l))}</small></div>
         <span class="qty">${esc(l.qty || '')}</span>
       </button>
       <button class="circle sm glass del" type="button" data-drop="${l.id}" aria-label="Remove ${esc(l.name)}">${ICON.trash}</button>
@@ -665,7 +897,15 @@ function renderReview(animate = false) {
   if (focus) { focus.focus(); focus.select(); }
   else restoreFocusIn(list, '.rrow', mem, el.sheet);
 }
-function estimateLabel(key) {
+function estimateLabel(key, line) {
+  if (line && line.expiry) {
+    const dl = (line.expiry - Date.now()) / DAY;
+    if (dl <= 7) {
+      const d = new Date(line.expiry);
+      return `expires ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+    }
+    return timeLabel(dl);
+  }
   const c = catalog(key);
   const dl = c.shelf;
   if (dl <= 7) { const d = new Date(Date.now() + dl * DAY); return `expires ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`; }
@@ -675,19 +915,29 @@ function estimateLabel(key) {
 function countNewDishes(lines, before) {
   const saved = state.pantry;
   state.pantry = saved.concat(lines.filter(l => !findItem(l.key)).map(l => mk(l.name, l.key, l.qty, 0)));
-  const after = DISHES.map(analyze).filter(eligible).map(a => a.dish.id);
+  const after = activeDishes().map(analyze).filter(eligible).map(a => a.dish.id);
   state.pantry = saved;
   return after.filter(id => !before.has(id)).length;
 }
 function addToPantry() {
   const food = review.filter(l => !l.nonFood && !l.dropped);
-  const before = new Set(buildDeck().map(a => a.dish.id));
-  for (const l of food) upsert(l.name, l.key, l.qty, l.raw);
+  for (const l of food) {
+    addLot(l.name, l.key, l.qty, l.raw, {
+      initial: l.initial,
+      burn: l.burn,
+      purchase: l.purchase,
+      expiry: l.expiry,
+      variant: l.variant,
+    });
+  }
   closeSheet();
   renderAll({ enter: true });
-  const fresh = buildDeck().filter(a => !before.has(a.dish.id)).length;
-  toast(`${plural(food.length, 'item')} added`, `${plural(fresh, 'new dish', 'new dishes')}`);
-  logReceipt({ store: SAMPLE_RECEIPT.store, total: SAMPLE_RECEIPT.total, scannedAt: Date.now(), itemCount: food.length });
+  logReceipt({ store: lastReceipt.store, total: lastReceipt.total, scannedAt: Date.now(), itemCount: food.length });
+  toast(`${plural(food.length, 'item')} added`, apiConfigured() ? 'Finding recipes…' : 'Deck updated');
+  refreshRecipes().then(list => {
+    if (list.length) toast(`${plural(food.length, 'item')} added`, `${plural(list.length, 'recipe')} ready`);
+    else toast(`${plural(food.length, 'item')} added`, 'Deck updated');
+  });
 }
 
 /* ---------- recipe detail and Made It ---------- */
@@ -743,12 +993,14 @@ function openTonight() {
 function openMadeIt(dishId) {
   const a = analyze(dishById(dishId));
   const rows = a.have.map(i => {
-    const cur = current(i.item);
+    const cur = i.avail;
     const after = cur - i.need;
     const last = after <= OUT;
+    const lots = lotsFor(i.key).filter(it => !needsCheckin(it) && current(it) > 0);
     let note;
     if (i.item.burn > 0 && i.item.initial >= 20) note = 'Staple, barely moves';
     else if (last) note = 'This uses the last of it';
+    else if (lots.length > 1) note = `Uses oldest pack first · ${Math.round(after)} left after`;
     else note = `${Math.round(after)} left after this`;
     return { ...i, cur, last, note };
   });
@@ -782,11 +1034,10 @@ function finishMadeIt(dishId) {
   const used = [];
   for (const i of dish.ingredients) {
     if (!checked.includes(i.key)) continue;
-    const item = findItem(i.key);
-    if (!item) continue;
-    item.deducted += i.need;
-    used.push({ id: item.id, key: i.key, name: item.name, servings: i.need });
-    if (needsCheckin(item)) ranOut.push(item.name.toLowerCase());
+    const batch = deductServings(i.key, i.need);
+    if (!batch.length) continue;
+    used.push(...batch);
+    if (available(i.key) <= OUT) ranOut.push(i.name.toLowerCase());
   }
   state.chosen.delete(dishId);
   state.cooked.add(dishId);
@@ -794,6 +1045,7 @@ function finishMadeIt(dishId) {
   renderAll({ enter: true });
   toast('Pantry updated', `${plural(checked.length, 'item')} used`, ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '');
   logCook({ recipeId: dish.id, title: dish.name, items: used });
+  refreshRecipes();
 }
 
 /* ---------- pantry panel ---------- */
@@ -824,30 +1076,79 @@ function closePanel() {
   const back = state.panelReturn; state.panelReturn = null;
   if (back && back.isConnected && (el.panel.contains(document.activeElement) || document.activeElement === document.body)) back.focus({ preventScroll: true });
 }
-function prowHTML(it) {
+function boughtLabel(it) {
+  const d = new Date(it.purchase);
+  return `bought ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+}
+function lotLabel(it) {
+  const bits = [];
+  if (it.variant) bits.push(it.variant);
+  bits.push(boughtLabel(it));
+  if (it.qty) bits.push(it.qty);
+  return bits.join(' · ');
+}
+function stackDisplayName(lots) {
+  const names = [...new Set(lots.map(l => l.name))];
+  if (names.length === 1) return names[0];
+  // Prefer the shortest / most generic label for the stack header
+  return names.sort((a, b) => a.length - b.length)[0];
+}
+function prowHTML(it, { lot = false } = {}) {
   const f = freshness(it);
   const cur = current(it);
-  return `<div class="prow" data-id="${it.id}">
-    <div class="name"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}about ${plural(Math.max(1, Math.round(cur)), 'serving')}</small></div>
+  const sub = lot
+    ? `${esc(lotLabel(it))} · about ${plural(Math.max(1, Math.round(cur)), 'serving')}`
+    : `${esc(it.qty)}${it.qty ? ' · ' : ''}about ${plural(Math.max(1, Math.round(cur)), 'serving')}`;
+  return `<div class="prow${lot ? ' lot' : ''}" data-id="${it.id}">
+    <div class="name"><strong>${esc(lot && it.variant ? it.variant : it.name)}</strong><small>${sub}</small></div>
     <div class="fresh"><div class="bar ${f.level}"><i style="width:${Math.max(4, Math.round(f.pct * 100))}%"></i></div><small>${esc(f.label)}</small></div>
     <button class="circle sm glass del" type="button" data-remove="${it.id}" aria-label="Remove ${esc(it.name)}">${ICON.xSm}</button>
   </div>`;
 }
+function stackHTML(lots) {
+  if (lots.length === 1) return prowHTML(lots[0]);
+  const key = lots[0].key;
+  const open = state.expanded.has(key);
+  const primary = lots.slice().sort((a, b) => a.expiry - b.expiry)[0];
+  const f = freshness(primary);
+  const total = lots.reduce((s, it) => s + current(it), 0);
+  const name = stackDisplayName(lots);
+  return `<div class="prow stack${open ? ' open' : ''}" data-key="${esc(key)}">
+    <button class="stack-main" type="button" data-toggle-stack="${esc(key)}" aria-expanded="${open}">
+      <span class="chev">${ICON.chevron}</span>
+      <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · about ${plural(Math.max(1, Math.round(total)), 'serving')}</small></div>
+      <div class="fresh"><div class="bar ${f.level}"><i style="width:${Math.max(4, Math.round(f.pct * 100))}%"></i></div><small>${esc(f.label)}</small></div>
+    </button>
+  </div>
+  <div class="lots">${lots.map(it => prowHTML(it, { lot: true })).join('')}</div>`;
+}
+function groupLots(items) {
+  const map = new Map();
+  for (const it of items) {
+    if (!map.has(it.key)) map.set(it.key, []);
+    map.get(it.key).push(it);
+  }
+  return [...map.values()].map(lots => lots.sort((a, b) => a.expiry - b.expiry));
+}
 function renderPanel() {
   const mem = focusIndexIn(el.panelBody, '.checkin, .prow');
-  const groups = { checkin: [], soon: [], fresh: [], low: [] };
-  for (const it of state.pantry) {
-    if (needsCheckin(it)) { groups.checkin.push(it); continue; }
-    const f = freshness(it);
-    if (f.mode === 'time' && f.level !== 'green') groups.soon.push(it);
-    else if (f.mode === 'amount' && f.level !== 'green') groups.low.push(it);
-    else groups.fresh.push(it);
+  const buckets = { checkin: [], soon: [], fresh: [], low: [] };
+  // Place each food stack in the section of its most urgent lot
+  for (const lots of groupLots(state.pantry.filter(it => !needsCheckin(it)))) {
+    const primary = lots[0];
+    const f = freshness(primary);
+    if (f.mode === 'time' && f.level !== 'green') buckets.soon.push(lots);
+    else if (f.mode === 'amount' && f.level !== 'green') buckets.low.push(lots);
+    else buckets.fresh.push(lots);
   }
-  const byUrgency = (a, b) => freshness(a).urgency - freshness(b).urgency;
-  groups.soon.sort(byUrgency); groups.low.sort(byUrgency); groups.fresh.sort((a, b) => daysLeft(a) - daysLeft(b));
-  const section = (title, items) => items.length ? `<section class="psection"><div class="phead"><span class="eyebrow">${title}</span><small>${items.length}</small></div>${items.map(prowHTML).join('')}</section>` : '';
-  const checkin = groups.checkin.map(it => {
-    // days since the estimate crossed the same "out" threshold the check-in uses, never positive
+  buckets.checkin = state.pantry.filter(needsCheckin);
+  const byStackUrgency = (a, b) => freshness(a[0]).urgency - freshness(b[0]).urgency;
+  buckets.soon.sort(byStackUrgency); buckets.low.sort(byStackUrgency);
+  buckets.fresh.sort((a, b) => daysLeft(a[0]) - daysLeft(b[0]));
+  const section = (title, stacks) => stacks.length
+    ? `<section class="psection"><div class="phead"><span class="eyebrow">${title}</span><small>${stacks.length}</small></div>${stacks.map(stackHTML).join('')}</section>`
+    : '';
+  const checkin = buckets.checkin.map(it => {
     const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / it.burn) - (Date.now() - it.purchase) / DAY)) : 0;
     const when = it.deducted > 0 ? 'used up cooking' : ranOut === 0 ? 'we estimate it ran out today' : ranOut === -1 ? 'we estimate it ran out yesterday' : `we estimate it ran out ${-ranOut} days ago`;
     if (it.asking) {
@@ -869,7 +1170,7 @@ function renderPanel() {
         <button class="pill prominent sm" type="button" data-ask="${it.id}">Still have some</button>
       </div></div>`;
   }).join('');
-  el.panelBody.innerHTML = checkin + section('Use soon', groups.soon) + section('Running low', groups.low) + section('Fresh', groups.fresh)
+  el.panelBody.innerHTML = checkin + section('Use soon', buckets.soon) + section('Running low', buckets.low) + section('Fresh', buckets.fresh)
     || '<p class="empty-note">Nothing here yet. Scan a receipt or add something by hand.</p>';
   restoreFocusIn(el.panelBody, '.checkin, .prow', mem, el.panel);
 }
@@ -907,6 +1208,7 @@ $('#btn-reset').addEventListener('click', () => {
   closeSheet(); closePanel();
   renderAll({ enter: true });
   toast(fresh ? 'Demo pantry loaded' : 'Pantry cleared', fresh ? plural(state.pantry.length, 'item') : '');
+  refreshRecipes();
 });
 $('#btn-signout').hidden = !configured;
 $('#btn-signout').addEventListener('click', () => signOut().then(() => location.replace('../login/')));
@@ -966,8 +1268,14 @@ el.panel.addEventListener('click', e => {
   const t = e.target.closest('button');
   if (!t) return;
   const item = id => state.pantry.find(x => x.id === id);
-  if (t.dataset.remove) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.remove); return renderAll(); }
-  if (t.dataset.gone) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.gone); return renderAll(); }
+  if (t.dataset.toggleStack) {
+    const key = t.dataset.toggleStack;
+    if (state.expanded.has(key)) state.expanded.delete(key);
+    else state.expanded.add(key);
+    return renderPanel();
+  }
+  if (t.dataset.remove) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.remove); renderAll(); return refreshRecipes(); }
+  if (t.dataset.gone) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.gone); renderAll(); return refreshRecipes(); }
   if (t.dataset.ask) { const it = item(t.dataset.ask); if (it) it.asking = true; return renderPanel(); }
   if (t.dataset.unask) { const it = item(t.dataset.unask); if (it) it.asking = false; return renderPanel(); }
   if (t.dataset.some) {
@@ -978,7 +1286,8 @@ el.panel.addEventListener('click', e => {
       it.purchase = Date.now(); it.deducted = 0; it.asking = false;
       it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
     }
-    return renderAll();
+    renderAll();
+    return refreshRecipes();
   }
 });
 $('#btn-add').addEventListener('click', () => {
@@ -992,10 +1301,11 @@ $('#add-form').addEventListener('submit', e => {
   const name = $('#add-name').value.trim();
   if (!name) return;
   const key = name.toLowerCase();
-  const { merged } = upsert(name.charAt(0).toUpperCase() + name.slice(1), key, $('#add-qty').value.trim());
+  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, $('#add-qty').value.trim());
   $('#add-name').value = ''; $('#add-qty').value = '';
   renderAll();
-  toast(`${name} ${merged ? 'updated' : 'added'}`);
+  toast(`${name} added`);
+  refreshRecipes();
 });
 
 // Keyboard: arrows drive the deck, Escape closes whatever is open (even from inside a field)
@@ -1042,4 +1352,5 @@ if (saved) {
   state.pantry = seedPantry();
 }
 renderAll({ enter: true });
+refreshRecipes();
 window.pantry = { state, drag, session };   // module scope hides these; handy in the console

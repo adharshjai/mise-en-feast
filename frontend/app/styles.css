@@ -271,8 +271,8 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .checkin .item strong { font-size: 15px; font-weight: 500; }
 .checkin .item small { font-size: 13px; color: var(--text-2); }
 .checkin .opts { display: flex; flex-wrap: wrap; gap: 8px; }
-.psection { display: flex; flex-direction: column; }
-.phead { position: sticky; top: 0; z-index: 1; display: flex; align-items: baseline; gap: 8px; padding: 14px 0 6px; background: rgba(28,25,23,.86); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.psection { display: flex; flex-direction: column; gap: 2px; margin-bottom: 18px; }
+.phead { display: flex; align-items: baseline; gap: 8px; padding: 8px 0 10px; background: transparent; }
 .phead small { font-size: 12px; color: var(--text-3); }
 .prow { display: flex; align-items: center; gap: 12px; padding: 10px 10px; margin: 0 -10px; border-radius: 12px; transition: background .15s ease; }
 .prow:hover, .prow:focus-within { background: rgba(255,255,255,.045); }
@@ -281,6 +281,12 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .prow .name small { font-size: 13px; color: var(--text-2); }
 .prow .fresh { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
 .prow .fresh small { font-size: 11px; color: var(--text-2); }
+.prow .stack-main { flex-grow: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.prow .stack-main .chev { flex-shrink: 0; color: var(--text-3); transition: transform .2s var(--ease); }
+.prow.stack.open .stack-main .chev { transform: rotate(90deg); }
+.prow.lot { padding-left: 36px; opacity: .92; }
+.lots { display: none; flex-direction: column; }
+.prow.stack.open + .lots { display: flex; }
 .bar { width: 72px; height: 6px; border-radius: 999px; background: rgba(244,239,232,.10); overflow: hidden; }
 .bar i { display: block; height: 100%; border-radius: 999px; transition: width .4s var(--ease); }
 .bar.red i { background: var(--red); } .bar.yellow i { background: var(--yellow); } .bar.green i { background: var(--green); }
