@@ -10,11 +10,20 @@ body { overflow: hidden; }
 /* ---------- top bar ---------- */
 .topbar {
   position: relative; z-index: 5;
-  display: flex; align-items: center; justify-content: space-between; padding: 0 40px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 40px;
 }
 .wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; }
 .wordmark:hover { color: var(--text); }
-.pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; }
+/* the nav capsule keeps the right edge; the avatar sits after it */
+.pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; margin-left: auto; }
+/* Account avatar: a glass ring around the photo, or the initial / a person icon on the glass */
+.avatar {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 40px; height: 40px; border-radius: 50%; overflow: hidden; color: var(--text);
+  font-size: 16px; font-weight: 700; letter-spacing: -.01em;
+}
+.avatar img { position: absolute; inset: 2px; width: calc(100% - 4px); height: calc(100% - 4px); border-radius: 50%; object-fit: cover; pointer-events: none; }
+.avatar.lg { width: 48px; height: 48px; font-size: 19px; }
 /* Tonight: the dishes picked from the deck, left of the item count */
 .pill.tonight { max-width: 240px; padding: 0 14px 0 12px; }
 .pill.tonight span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -250,6 +259,38 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 }
 .chk:checked { background: var(--accent); border-color: var(--accent); }
 .chk:checked::before { content: ""; width: 11px; height: 6px; border: 2.5px solid var(--on-accent); border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
+
+/* profile */
+/* the sheet head is the person: avatar, name (the dialog's title), email */
+.profile-head { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1 1 auto; }
+.profile-head .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.profile-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-head small { font-size: 14px; color: var(--text-2); overflow-wrap: anywhere; }   /* wraps on phones instead of clipping the sentence or the email */
+.prefs { display: flex; flex-direction: column; gap: 18px; }
+.pref { display: flex; flex-direction: column; gap: 10px; }
+.pref-label { font-size: 14px; font-weight: 500; color: var(--text-2); }
+.prefs .field { width: 100%; }
+/* choice chips: the card's ingredient chips, as buttons. Dashed = off, filled = on. */
+.choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.choice {
+  display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 999px;
+  font-size: 13px; font-weight: 500; cursor: pointer;
+  background: none; border: 1px dashed rgba(168,162,158,.55); color: var(--text-2);
+  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .18s var(--spring);
+}
+.choice:hover { color: var(--text); border-color: rgba(244,239,232,.5); background: rgba(255,255,255,.04); transform: translateY(-1px); }
+.choice:active { transform: none; }
+.choice.on { background: rgba(244,239,232,.10); border: 1px solid transparent; color: var(--text); padding-left: 9px; }
+.choice.on:hover { background: rgba(244,239,232,.15); }
+.choice svg { display: none; }
+.choice.on svg { display: block; }
+/* household stepper: two small glass circles either side of the number */
+.stepper { display: inline-flex; align-items: center; gap: 8px; }
+.stepper .circle.sm { width: 36px; height: 36px; }
+.stepper .num { min-width: 44px; height: 36px; padding: 0 12px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: rgba(244,239,232,.10); font-size: 15px; font-weight: 600; }
+.stepper [aria-disabled="true"] { opacity: .4; cursor: default; }
+.stepper [aria-disabled="true"]:hover { transform: none; }
+a.prominent, a.prominent:hover { color: var(--on-accent); }
 
 /* ---------- pantry panel ---------- */
 .panel {

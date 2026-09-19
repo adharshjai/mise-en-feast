@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pantry</title>
 <link rel="icon" type="image/svg+xml" href="shared/mark.svg">
+<script>
+/* Supabase sends OAuth and magic-link returns to the project's Site URL (this page)
+   whenever the requested redirect isn't on its allow-list. The session tokens arrive
+   in the URL; hand them to the app, which knows how to read them. */
+(function () {
+  var h = location.hash || '', q = location.search || '';
+  if (/(^|[#&])(access_token|refresh_token|error|error_description)=/.test(h) || /[?&]code=/.test(q)) {
+    location.replace('app/' + q + h);
+  }
+})();
+</script>
 <meta name="description" content="Pantry fills itself from your grocery receipts and tells you what to cook, ordered by what is expiring first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

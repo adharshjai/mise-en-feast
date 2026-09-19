@@ -5,8 +5,8 @@
    Runs as an ES module so it can share the auth and storage layers.
    ========================================================================= */
 
-import { requireAuth, signOut, configured } from '../shared/supabase.js';
-import { loadState, saveState, logCook, logReceipt, clearLocal } from '../shared/store.js';
+import { requireAuth, signOut, configured, onAuthChange } from '../shared/supabase.js';
+import { loadState, saveState, logCook, logReceipt, clearLocal, loadPrefs, savePrefs, prefsToRequest, normalizePrefs, DEFAULT_PREFS, DIETS } from '../shared/store.js';
 import { scanReceipt, fetchRecipes, apiConfigured } from '../shared/api.js';
 
 const DAY = 86400000;
@@ -35,6 +35,10 @@ const ICON = {
   upload: svg('<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>', 30, 2),
   chevron: svg('<path d="M9 6l6 6-6 6"/>', 16),
   trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>', 16, 2),
+  person: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/>', 20),
+  personBig: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/>', 24, 2),
+  minus: svg('<path d="M5 12h14"/>', 16, 2.4),
+  plus: svg('<path d="M12 5v14M5 12h14"/>', 16, 2.4),
 };
 
 /* ---------- reference data: shelf life and household burn rate ---------- */
@@ -298,13 +302,14 @@ async function refreshRecipes() {
     return [];
   }
   const token = ++recipeRefreshToken;
+  const request = prefsToRequest(state.prefs);   // diet, household, time, dislikes — '' when all default
   try {
-    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2 });
+    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2, request });
     if (token !== recipeRefreshToken) return liveDishes || [];
     let list = (data.recipes || []).map(dishFromApi);
     // Soften the filter once if nothing made the cut
     if (!list.length) {
-      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4 });
+      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4, request });
       if (token !== recipeRefreshToken) return liveDishes || [];
       list = (data.recipes || []).map(dishFromApi);
     }
@@ -465,6 +470,7 @@ const state = {
   cooked: new Set(),
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
   expanded: new Set(),      // pantry stack keys that are open
+  prefs: normalizePrefs(DEFAULT_PREFS),   // cooking preferences; replaced by loadPrefs() at boot
   sheet: null,
   panelOpen: false,
   leaving: false,
@@ -486,7 +492,7 @@ const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
    ========================================================================= */
 const el = {
   deck: $('#deck'), caption: $('#deck-caption'), status: $('#deck-status'), deckScreen: $('#deck-screen'), endScreen: $('#end-screen'), emptyScreen: $('#empty-screen'),
-  count: $('#btn-pantry'), tonight: $('#btn-tonight'), reset: $('#btn-reset'),
+  count: $('#btn-pantry'), tonight: $('#btn-tonight'), reset: $('#btn-reset'), profile: $('#btn-profile'),
   veil: $('#veil'), sheet: $('#sheet'), panel: $('#panel'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
   toast: $('#toast'), file: $('#file-input'),
 };
@@ -697,6 +703,7 @@ function openSheet(kind, html, cls = '') {
 }
 function closeSheet() {
   if (!state.sheet) return;
+  if (state.sheet === 'profile') draft = null;   // unsaved preference edits are dropped with the sheet
   state.sheet = null;
   syncInert();
   el.sheet.classList.remove('in');
@@ -1201,10 +1208,143 @@ function toast(main, sub = '', line2 = '') {
   toastTimer = setTimeout(() => { el.toast.classList.remove('in'); hideTimer = setTimeout(() => { el.toast.innerHTML = ''; }, 300); }, 4500);
 }
 
+/* ---------- profile: who is signed in, and how they like to cook ---------- */
+let user = null;          // the Supabase auth user; null in demo mode
+let draft = null;         // preferences being edited while the profile sheet is open
+let avatarKey = null;     // what the avatar button currently shows, so auth events don't repaint it needlessly
+const DIET_LABELS = { vegetarian: 'Vegetarian', vegan: 'Vegan', pescatarian: 'Pescatarian', 'gluten-free': 'Gluten-free', 'dairy-free': 'Dairy-free' };
+const TIME_OPTIONS = [[0, 'Any'], [20, '20 min'], [30, '30 min'], [45, '45 min']];
+const HOUSEHOLD_MIN = 1, HOUSEHOLD_MAX = 8;
+
+const meta = u => (u && u.user_metadata) || {};
+function displayName(u) {
+  const m = meta(u);
+  const email = (u && u.email) || m.email || '';
+  return String(m.full_name || m.name || email.split('@')[0] || '').trim() || 'You';
+}
+function photoUrl(u) {
+  const url = String(meta(u).avatar_url || meta(u).picture || '');
+  return /^https?:\/\//i.test(url) ? url : '';
+}
+// What goes inside an avatar circle: the Google photo, else the initial, else a person icon (demo mode).
+function avatarHTML(u, { photo = true, icon = ICON.person } = {}) {
+  const url = photo ? photoUrl(u) : '';
+  if (url) return `<img src="${esc(url)}" alt="" referrerpolicy="no-referrer" draggable="false">`;
+  const letter = u ? displayName(u).charAt(0).toUpperCase() : '';
+  return letter ? `<span aria-hidden="true">${esc(letter)}</span>` : icon;
+}
+function renderAvatar() {
+  const key = user ? `${user.id}|${photoUrl(user)}|${displayName(user)}` : 'demo';
+  if (key === avatarKey) return;
+  avatarKey = key;
+  el.profile.innerHTML = avatarHTML(user);
+  const img = $('img', el.profile);
+  // a photo that won't load (blocked, expired) falls back to the initial
+  if (img) img.addEventListener('error', () => { el.profile.innerHTML = avatarHTML(user, { photo: false }); }, { once: true });
+}
+
+function openProfile() {
+  if (state.sheet) return;
+  draft = normalizePrefs(state.prefs);
+  const demo = !user;
+  const provider = user && user.app_metadata && user.app_metadata.provider;
+  const head = demo
+    ? `<div class="profile-head">
+        <span class="avatar glass lg" aria-hidden="true">${ICON.personBig}</span>
+        <div class="who"><h2>Demo mode</h2><small>Your pantry stays in this browser.</small></div>
+      </div>`
+    : `<div class="profile-head">
+        <span class="avatar glass lg" aria-hidden="true">${avatarHTML(user, { icon: ICON.personBig })}</span>
+        <div class="who"><h2>${esc(displayName(user))}</h2><small>${esc(user.email || meta(user).email || '')}</small></div>
+      </div>`;
+  // Account line under the save button: Sign out with an account, Sign in in demo mode
+  // (only when there is a Supabase project to sign in to).
+  const account = demo
+    ? (configured ? `<div class="sheet-note"><span>Sign in to keep your pantry on every device.</span><a class="pill prominent sm" href="../login/">Sign in</a></div>` : '')
+    : `<div class="sheet-note"><span>${provider === 'google' ? 'Signed in with Google' : 'Signed in with email'}</span><button class="linkish" type="button" data-signout>Sign out</button></div>`;
+  openSheet('profile', `
+    <div class="sheet-head">${head}${closeBtn()}</div>
+    <div class="sheet-body">
+      <form class="prefs" id="prefs-form" novalidate aria-label="Cooking preferences"></form>
+    </div>
+    <div class="sheet-foot" style="flex-direction:column;align-items:stretch;gap:10px">
+      <button class="pill prominent full" type="submit" form="prefs-form">${ICON.checkMd}<span>Save preferences</span></button>
+      ${account}
+    </div>`, 'w-520');
+  renderPrefs();
+}
+function prefsHTML(p) {
+  const chip = (attrs, on, label) => `<button class="choice${on ? ' on' : ''}" type="button" aria-pressed="${on}" ${attrs}>${ICON.checkSm}<span>${esc(label)}</span></button>`;
+  return `
+    <div class="eyebrow">Cooking preferences</div>
+    <div class="pref">
+      <span class="pref-label" id="pref-diet-label">Diet</span>
+      <div class="choices" role="group" aria-labelledby="pref-diet-label">
+        ${chip('data-diet="" data-focus="diet"', p.diet.length === 0, 'No restrictions')}
+        ${DIETS.map(d => chip(`data-diet="${d}" data-focus="diet-${d}"`, p.diet.includes(d), DIET_LABELS[d] || d)).join('')}
+      </div>
+    </div>
+    <div class="pref">
+      <span class="pref-label" id="pref-household-label">Household size</span>
+      <div class="stepper" role="group" aria-labelledby="pref-household-label">
+        <button class="circle sm glass" type="button" data-step="-1" data-focus="step-down" aria-label="Fewer people" aria-disabled="${p.household <= HOUSEHOLD_MIN}">${ICON.minus}</button>
+        <output class="num" id="pref-household" aria-live="polite">${p.household}</output>
+        <button class="circle sm glass" type="button" data-step="1" data-focus="step-up" aria-label="More people" aria-disabled="${p.household >= HOUSEHOLD_MAX}">${ICON.plus}</button>
+      </div>
+    </div>
+    <div class="pref">
+      <span class="pref-label" id="pref-time-label">Max cook time</span>
+      <div class="choices" role="group" aria-labelledby="pref-time-label">
+        ${TIME_OPTIONS.map(([m, label]) => chip(`data-minutes="${m}" data-focus="time-${m}"`, p.maxMinutes === m, label)).join('')}
+      </div>
+    </div>
+    <div class="pref">
+      <label class="pref-label" for="pref-avoid">Avoid</label>
+      <input class="field" id="pref-avoid" name="avoid" data-focus="avoid" value="${esc(p.avoid)}" placeholder="cilantro, shellfish…" autocomplete="off" spellcheck="false">
+    </div>`;
+}
+// Rebuild the form from the draft. Every control carries a data-focus key so a keyboard
+// user lands back on the same control after the rebuild (same idea as restoreFocusIn).
+function renderPrefs() {
+  const form = $('#prefs-form');
+  if (!form || !draft) return;
+  const active = document.activeElement;
+  const mem = form.contains(active) ? { key: active.dataset.focus, keyboard: active.matches(':focus-visible') } : null;
+  form.innerHTML = prefsHTML(draft);
+  if (!mem) return;
+  const target = mem.keyboard && mem.key ? $(`[data-focus="${mem.key}"]`, form) : null;
+  (target || el.sheet).focus({ preventScroll: true });
+}
+function toggleDiet(d) {
+  if (!d) draft.diet = [];                                                   // "No restrictions" clears the rest
+  else if (draft.diet.includes(d)) draft.diet = draft.diet.filter(x => x !== d);
+  else draft.diet = [...draft.diet, d];
+}
+function saveProfile() {
+  if (!draft) return;
+  const avoid = $('#pref-avoid');
+  if (avoid) draft.avoid = avoid.value;
+  const before = prefsToRequest(state.prefs);
+  state.prefs = normalizePrefs(draft);
+  draft = null;
+  savePrefs(state.prefs);
+  const changed = prefsToRequest(state.prefs) !== before;
+  toast('Preferences saved', changed && apiConfigured() && state.pantry.length ? 'Finding recipes…' : '');
+  closeSheet();
+  if (changed) refreshRecipes();   // the deck regenerates with the new request; nothing to redo otherwise
+}
+async function doSignOut(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Signing out…';
+  await signOut();
+  location.replace('../login/');
+}
+
 /* =========================================================================
    Wiring
    ========================================================================= */
 $('#btn-scan').addEventListener('click', openScanUpload);
+el.profile.addEventListener('click', openProfile);
 $('#btn-scan-2').addEventListener('click', openScanUpload);
 $('#empty-drop').addEventListener('click', () => el.file.click());   // "click to browse" means the file picker
 $('#empty-sample').addEventListener('click', () => startProcessing(null));
@@ -1226,20 +1366,6 @@ $('#btn-reset').addEventListener('click', () => {
   toast(fresh ? 'Demo pantry loaded' : 'Pantry cleared', fresh ? plural(state.pantry.length, 'item') : '');
   refreshRecipes();
 });
-// Footer account button: "Sign out" with an account, "Sign in" in demo mode, hidden when
-// Supabase isn't configured at all. Wired once the session is known (see bottom of file).
-function wireAccountButton(session) {
-  const b = $('#btn-signout');
-  b.hidden = !configured;
-  if (!configured) return;
-  if (session) {
-    b.textContent = 'Sign out';
-    b.addEventListener('click', () => signOut().then(() => location.replace('../login/')));
-  } else {
-    b.textContent = 'Sign in';
-    b.addEventListener('click', () => location.assign('../login/'));
-  }
-}
 // Hover preview of the swipe overlays: mouse only, a touch tap would leave it stuck
 ['cook', 'skip'].forEach(k => {
   const b = $(`#btn-${k}`);
@@ -1275,8 +1401,16 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
+  // profile sheet
+  if (draft && t.dataset.diet !== undefined) { toggleDiet(t.dataset.diet); return renderPrefs(); }
+  if (draft && t.dataset.minutes !== undefined) { draft.maxMinutes = Number(t.dataset.minutes); return renderPrefs(); }
+  if (draft && t.dataset.step) { draft.household = clamp(draft.household + Number(t.dataset.step), HOUSEHOLD_MIN, HOUSEHOLD_MAX); return renderPrefs(); }
+  if (t.hasAttribute('data-signout')) return doSignOut(t);
 });
+// Typing in "Avoid" updates the draft without a rebuild, so the caret stays put
+el.sheet.addEventListener('input', e => { if (draft && e.target.id === 'pref-avoid') draft.avoid = e.target.value; });
 el.sheet.addEventListener('submit', e => {
+  if (e.target.id === 'prefs-form') { e.preventDefault(); return saveProfile(); }   // Enter in "Avoid" saves too
   const form = e.target.closest('form[data-edit]');
   if (!form) return;
   e.preventDefault();
@@ -1370,8 +1504,17 @@ fit();
 /* ---------- go ---------- */
 syncInert();
 const session = await requireAuth('../login/');   // bounces to the login page when configured and signed out, unless ?demo
-wireAccountButton(session);
-const saved = await loadState();
+// A sign-in that returned through the landing page arrives with the tokens still in
+// the URL; the client has read them by now, so take them out of the address bar.
+if (/(^|[#&])(access_token|refresh_token)=/.test(location.hash) || /[?&]code=/.test(location.search)) {
+  history.replaceState(null, '', location.pathname);
+}
+user = session && session.user ? session.user : null;
+renderAvatar();
+// Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
+onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
+const [saved, prefs] = await Promise.all([loadState(), loadPrefs()]);
+state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
 if (saved) {
   state.pantry = saved.pantry;
   state.skipped = new Set(saved.skipped);
@@ -1382,4 +1525,4 @@ if (saved) {
 }
 renderAll({ enter: true });
 refreshRecipes();
-window.pantry = { state, drag, session };   // module scope hides these; handy in the console
+window.pantry = { state, drag, session, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console

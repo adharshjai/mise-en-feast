@@ -49,6 +49,36 @@ function goToApp() {
   location.replace(nextPath());
 }
 
+/* ---------- errors carried back on the URL ----------
+   When an OAuth or magic-link return fails, Supabase sends the browser back with
+   #error=...&error_code=...&error_description=... (or the same keys in ?search).
+   Read them once, then take them off the URL so a reload doesn't repeat the message
+   and the auth client, which is created later, never sees or acts on them. */
+
+const URL_ERROR_KEYS = ['error', 'error_code', 'error_description'];
+
+function readUrlError() {
+  const fromHash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const fromSearch = new URLSearchParams(location.search);
+  const pick = k => (fromHash.get(k) || fromSearch.get(k) || '').trim();   // URLSearchParams decodes and turns '+' into spaces
+  const found = { error: pick('error'), code: pick('error_code'), description: pick('error_description') };
+  if (!found.error && !found.code && !found.description) return null;
+
+  URL_ERROR_KEYS.forEach(k => { fromHash.delete(k); fromSearch.delete(k); });
+  const search = fromSearch.toString();
+  const hash = fromHash.toString();
+  const clean = location.pathname + (search ? '?' + search : '') + (hash ? '#' + hash : '');
+  try { history.replaceState(history.state, '', clean); } catch { /* a stricter origin policy; the message still shows */ }
+  return found;
+}
+
+function friendlyUrlError({ error, code, description }) {
+  if (description) return friendly({ message: description });
+  if (error === 'access_denied') return 'Sign-in was cancelled before it finished. Try again when you’re ready.';
+  if (code || error) return `Sign-in didn’t finish (${code || error}). Please try again.`;
+  return 'Sign-in didn’t finish. Please try again.';
+}
+
 /* ---------- ui helpers ---------- */
 
 function setError(msg) {
@@ -96,6 +126,7 @@ function friendly(err) {
   if (/invalid login credentials/i.test(m)) return 'That email and password don’t match.';
   if (/email not confirmed/i.test(m)) return 'Confirm your email first, then sign in. Check your inbox for the link.';
   if (/already registered/i.test(m)) return 'There’s already an account with that email. Try signing in.';
+  if (/link is invalid or has expired/i.test(m)) return 'That link is invalid or has expired. Request a new one.';
   if (/provider is not enabled|unsupported provider/i.test(m)) return 'Google sign-in isn’t switched on for this project yet. Use your email and password or a magic link instead.';
   if (/rate limit/i.test(m)) return 'Too many attempts. Give it a minute and try again.';
   if (/failed to fetch|network/i.test(m)) return 'Couldn’t reach the sign-in service. Check your connection and try again.';
@@ -130,7 +161,17 @@ async function submit(e) {
     if (mode === 'signup') {
       const { data, error } = await client.auth.signUp({ email, password, options: { emailRedirectTo: APP_URL } });
       if (error) throw error;
-      if (data.session) { goToApp(); return; }
+      const user = data && data.user;
+      if (data && data.session) { goToApp(); return; }
+      if (user && Array.isArray(user.identities) && user.identities.length === 0) {
+        // Supabase answers a sign-up for an email that already has an account with a
+        // user that has no identities and no session, not with an error. Don't pretend
+        // a confirmation email went out: send them to sign in, email kept.
+        setMode('signin');   // clears the error, so the message goes on afterwards
+        setError('There’s already an account with that email. Try signing in.');
+        el.password.focus();
+        return;
+      }
       showSent('Confirm your email', `We sent a confirmation link to <b>${escapeHtml(email)}</b>. Open it and you’ll land in your pantry.`);
     } else {
       const { error } = await client.auth.signInWithPassword({ email, password });
@@ -144,6 +185,8 @@ async function submit(e) {
   }
 }
 
+let leftForGoogle = false;   // set by pagehide once the browser actually unloads for the OAuth redirect
+
 async function google() {
   setError('');
   setBusy(el.btnGoogle, true);
@@ -156,7 +199,14 @@ async function google() {
     }
     const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: APP_URL } });
     if (error) throw error;
-    // The browser is now leaving for Google; keep the button busy.
+    // The browser is now leaving for Google; the button stays busy until it does.
+    // If it never leaves (a blocked redirect, a stalled request), give the button back.
+    leftForGoogle = false;
+    setTimeout(() => {
+      if (leftForGoogle || navigating) return;
+      setBusy(el.btnGoogle, false);
+      setError('Google didn’t open. Check for a blocked redirect or pop-up and try again.');
+    }, 15000);
   } catch (err) {
     setError(friendly(err));
     setBusy(el.btnGoogle, false);
@@ -192,15 +242,32 @@ el.btnMagic.addEventListener('click', magicLink);
 el.sentBack.addEventListener('click', showForm);
 [el.email, el.password].forEach(i => i.addEventListener('input', () => { i.setAttribute('aria-invalid', 'false'); setError(''); }));
 
+window.addEventListener('pagehide', () => { leftForGoogle = true; });
+
+// Coming back through the back/forward cache (Back pressed on Google's screen, or from
+// the app): the page resumes with its old state, so release the buttons and, if a
+// session now exists, go straight through.
+window.addEventListener('pageshow', e => {
+  if (!e.persisted) return;
+  navigating = false;
+  setBusy(el.btnGoogle, false);
+  setBusy(el.btnContinue, false);
+  if (configured) getSession().then(session => { if (session) goToApp(); });
+});
+
 if (new URLSearchParams(location.search).get('mode') === 'signup') setMode('signup');
+
+// Read (and remove) any error Supabase sent back on the URL before the client is created.
+const urlError = readUrlError();
+if (urlError) setError(friendlyUrlError(urlError));
 
 if (!configured) {
   el.notConfigured.hidden = false;
   el.fields.disabled = true;
   el.lede.textContent = 'Demo mode keeps your pantry in this browser only.';
 } else {
-  // Already signed in? Straight through. Also catch the session landing via a
-  // magic link or OAuth redirect that ends up on this page.
+  // Already signed in? Straight through (nextPath honours ?next=/app/...). Also catch the
+  // session landing via a magic link or OAuth redirect that ends up on this page.
   getSession().then(session => { if (session) goToApp(); });
   onAuthChange((event, session) => { if (session && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION')) goToApp(); });
 }

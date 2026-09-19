@@ -29,6 +29,10 @@
       <span>Scan</span>
     </button>
   </nav>
+  <!-- Account: a photo or initial once signed in; app.js fills it in when the session is known -->
+  <button class="circle glass avatar" id="btn-profile" type="button" aria-label="Profile" aria-haspopup="dialog">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/></svg>
+  </button>
 </header>
 
 <main class="stage">
@@ -97,7 +101,6 @@
 </main>
 
 <footer class="foot">
-  <button class="linkish dim" id="btn-signout" type="button" hidden>Sign out</button>
   <button class="linkish dim" id="btn-reset" type="button">Start over</button>
 </footer>
 </div>

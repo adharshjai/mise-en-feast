@@ -7,11 +7,16 @@
      { id, name, key, qty, raw, initial, purchase, expiry, burn, deducted }
 
    State shape:
-     { pantry: Item[], skipped: string[], cooked: string[], chosen: string[] } */
+     { pantry: Item[], skipped: string[], cooked: string[], chosen: string[] }
 
-import { configured, getClient, getSession } from './supabase.js';
+   Cooking preferences (see loadPrefs / savePrefs) live in the auth user's metadata
+   when signed in, so they need no table, and in localStorage otherwise:
+     { diet: string[], household: number, maxMinutes: number, avoid: string } */
+
+import { configured, getClient, getSession, getUser } from './supabase.js';
 
 export const LOCAL_KEY = 'pantry.state.v1';
+export const PREFS_KEY = 'pantry.prefs.v1';
 const DEBOUNCE_MS = 400;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -239,7 +244,110 @@ export function saveState(state) {
 
 // Don't lose the last edit when the tab closes mid-debounce.
 if (typeof window !== 'undefined') {
-  window.addEventListener('pagehide', () => { try { flush(); } catch (err) { console.warn('[pantry] flush on pagehide failed', err); } });
+  window.addEventListener('pagehide', () => {
+    try { flush(); } catch (err) { console.warn('[pantry] flush on pagehide failed', err); }
+    try { flushPrefs(); } catch (err) { console.warn('[pantry] prefs flush on pagehide failed', err); }
+  });
+}
+
+/* ---------- cooking preferences ----------
+   Signed in: kept in the auth user's metadata (user_metadata.pantry_prefs), which
+   needs no schema change and travels with the account. Always mirrored to
+   localStorage so demo mode and an offline reload see the same answers. */
+
+export const DIETS = ['vegetarian', 'vegan', 'pescatarian', 'gluten-free', 'dairy-free'];
+export const DEFAULT_PREFS = Object.freeze({ diet: [], household: 2, maxMinutes: 0, avoid: '' });
+const HOUSEHOLD_MIN = 1, HOUSEHOLD_MAX = 8;
+
+/** Coerce anything into a well-formed prefs object (always a fresh copy). */
+export function normalizePrefs(p) {
+  const src = p && typeof p === 'object' ? p : {};
+  const diet = [...new Set(list(src.diet).map(d => d.trim().toLowerCase()).filter(d => DIETS.includes(d)))];
+  const household = Math.min(HOUSEHOLD_MAX, Math.max(HOUSEHOLD_MIN, Math.round(num(src.household, DEFAULT_PREFS.household))));
+  const maxMinutes = Math.max(0, Math.round(num(src.maxMinutes, 0)));
+  const avoid = str(src.avoid).split(',').map(s => s.trim()).filter(Boolean).join(', ').slice(0, 200);
+  return { diet, household, maxMinutes, avoid };
+}
+
+function readLocalPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    return raw ? normalizePrefs(JSON.parse(raw)) : null;
+  } catch (err) {
+    console.warn('[pantry] could not read local prefs', err);
+    return null;
+  }
+}
+
+function writeLocalPrefs(prefs) {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (err) { console.warn('[pantry] could not write local prefs', err); }
+}
+
+/** Resolve to the saved preferences: the account's when signed in, else this
+    browser's, else the defaults. Never rejects. */
+export async function loadPrefs() {
+  try {
+    if (configured) {
+      const user = await getUser();
+      const remote = user && user.user_metadata && user.user_metadata.pantry_prefs;
+      if (remote && typeof remote === 'object') return normalizePrefs(remote);
+    }
+    return readLocalPrefs() || normalizePrefs(DEFAULT_PREFS);
+  } catch (err) {
+    console.warn('[pantry] loadPrefs failed', err);
+    return readLocalPrefs() || normalizePrefs(DEFAULT_PREFS);
+  }
+}
+
+let prefsPending = null;
+let prefsTimer = null;
+let prefsInflight = Promise.resolve();
+
+async function persistPrefs(prefs) {
+  const user = await signedInUser();
+  if (!user) return;
+  const client = await getClient();
+  const { error } = await client.auth.updateUser({ data: { pantry_prefs: prefs } });
+  if (error) throw error;
+}
+
+function flushPrefs() {
+  if (prefsTimer) { clearTimeout(prefsTimer); prefsTimer = null; }
+  const prefs = prefsPending;
+  prefsPending = null;
+  if (!prefs) return;
+  prefsInflight = prefsInflight
+    .then(() => persistPrefs(prefs))
+    .catch(err => console.warn('[pantry] savePrefs failed', err));
+}
+
+/** Queue a save of the preferences (~400ms debounce; latest call wins). The local
+    copy is written straight away. Never throws. */
+export function savePrefs(prefs) {
+  try {
+    const snapshot = normalizePrefs(prefs);
+    writeLocalPrefs(snapshot);
+    prefsPending = snapshot;
+    if (prefsTimer) clearTimeout(prefsTimer);
+    prefsTimer = setTimeout(flushPrefs, DEBOUNCE_MS);
+  } catch (err) {
+    console.warn('[pantry] savePrefs failed', err);
+  }
+}
+
+const joinAnd = xs => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+
+/** One short plain-English line for the recipe model, e.g.
+    "vegetarian and gluten-free; cooking for 4; under 30 minutes; avoid cilantro, shellfish".
+    Empty when everything is still at its default. */
+export function prefsToRequest(prefs) {
+  const p = normalizePrefs(prefs);
+  const parts = [];
+  if (p.diet.length) parts.push(joinAnd(p.diet));
+  if (p.household !== DEFAULT_PREFS.household) parts.push(`cooking for ${p.household}`);
+  if (p.maxMinutes > 0) parts.push(`under ${p.maxMinutes} minutes`);
+  if (p.avoid) parts.push(`avoid ${p.avoid}`);
+  return parts.join('; ');
 }
 
 /* ---------- logs (signed-in only) ---------- */
