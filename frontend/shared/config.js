@@ -10,11 +10,13 @@
      Leave both empty to run in demo mode (localStorage only).
 
    FastAPI AI backend (receipt OCR + recipes):
-     Run pantry-pal/backend with uvicorn on port 8000, then keep apiBaseUrl below.
+     Deployed: the FastAPI app runs as a Vercel function under /api (see api/index.py),
+     so '/api' is same-origin. Locally: run backend/ with uvicorn on port 8000; a relative
+     apiBaseUrl on localhost automatically points there.
      Leave apiBaseUrl empty to use the built-in sample receipt + hardcoded dishes. */
 window.PANTRY_CONFIG = {
   supabaseUrl: 'https://kfzgofybljvahvrxdhav.supabase.co',
   supabaseAnonKey: 'sb_publishable_L1BhUCvvzLvweoBm3WMecA_aq6PevHH',
 
-  apiBaseUrl: 'http://localhost:8000',
+  apiBaseUrl: '/api',   // same origin on Vercel; on localhost the frontend talks to http://localhost:8000 instead
 };

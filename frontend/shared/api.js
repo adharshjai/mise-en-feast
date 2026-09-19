@@ -8,8 +8,14 @@ export const apiConfigured = () => {
   return typeof base === 'string' && base.trim().length > 0;
 };
 
+const LOCAL_API = 'http://localhost:8000';   // uvicorn, when the page itself comes from a plain static server
+
 function baseUrl() {
-  return (cfg().apiBaseUrl || '').replace(/\/$/, '');
+  const base = (cfg().apiBaseUrl || '').trim().replace(/\/$/, '');
+  // '/api' means "same origin" (the Vercel Python function). A python http.server on
+  // localhost has no /api, so fall back to the local backend there.
+  if (base.startsWith('/') && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return LOCAL_API;
+  return base;
 }
 
 async function readError(res) {

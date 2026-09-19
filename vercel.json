@@ -2,7 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "trailingSlash": true,
+  "functions": {
+    "api/index.py": { "includeFiles": "backend/**", "maxDuration": 60 }
+  },
   "rewrites": [
-    { "source": "/((?!frontend/).*)", "destination": "/frontend/$1" }
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/((?!frontend/|api/).*)", "destination": "/frontend/$1" }
   ]
 }

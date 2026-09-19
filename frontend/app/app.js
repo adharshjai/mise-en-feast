@@ -140,6 +140,22 @@ const DISHES = [
   },
 ];
 const DISH_IMAGES = DISHES.map(d => d.img);
+// Until recipes come with their own photos, pick the stock shot that fits the dish best.
+const PHOTO_RULES = [
+  ['pasta', /pasta|spaghetti|noodle|linguine|penne|fettuccine|orzo|lasagna|mac/],
+  ['friedrice', /fried rice|rice bowl|stir[- ]?fry|pilaf|biryani|rice/],
+  ['shakshuka', /shakshuka|egg|frittata|omelet|omelette|tomato/],
+  ['soup', /soup|stew|chili|broth|curry|ramen|dal|chowder/],
+  ['salad', /salad|slaw|greens|cucumber|tabbouleh/],
+  ['risotto', /risotto|mushroom|creamy|polenta|porridge|oat/],
+];
+function pickPhoto(recipe, index) {
+  const title = String(recipe.title || '').toLowerCase();
+  const all = `${title} ${(recipe.ingredients || []).map(i => i.name).join(' ')}`.toLowerCase();
+  for (const [file, re] of PHOTO_RULES) if (re.test(title)) return `../img/${file}.jpg`;
+  for (const [file, re] of PHOTO_RULES) if (re.test(all)) return `../img/${file}.jpg`;
+  return DISH_IMAGES[index % DISH_IMAGES.length];
+}
 /** Live Gemini recipes when the API is up; null falls back to hardcoded DISHES. */
 let liveDishes = null;
 let recipeRefreshToken = 0;
@@ -231,7 +247,7 @@ function dishFromApi(recipe, index) {
   return {
     id,
     name: recipe.title,
-    img: DISH_IMAGES[index % DISH_IMAGES.length],
+    img: pickPhoto(recipe, index),
     time: `${recipe.cook_minutes || 20} min`,
     servings: recipe.servings || 2,
     difficulty: (recipe.difficulty || 'easy').replace(/^\w/, c => c.toUpperCase()),

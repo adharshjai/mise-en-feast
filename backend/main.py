@@ -31,13 +31,18 @@ load_dotenv()  # must run before the client is built
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise RuntimeError(
-        "GEMINI_API_KEY is missing. Copy .env.example to .env and paste your key in."
-    )
+_client = None
 
-client = genai.Client(api_key=api_key)
+
+def gemini():
+    """The Gemini client, built on first use so a missing key is a clear 503, not a crash at import."""
+    global _client
+    if _client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(503, "GEMINI_API_KEY is not set. Add it to backend/.env (local) or the Vercel project's environment variables.")
+        _client = genai.Client(api_key=api_key)
+    return _client
 
 app = FastAPI(title="Pantry AI")
 
@@ -53,6 +58,7 @@ _origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins or ["*"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$|https://[a-z0-9.-]+\.vercel\.app$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -231,7 +237,7 @@ def enrich(parsed: ParsedReceipt) -> dict:
 
 
 def call_gemini(image_bytes: bytes, mime_type: str) -> ParsedReceipt:
-    response = client.models.generate_content(
+    response = gemini().models.generate_content(
         model=MODEL,
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
@@ -266,6 +272,8 @@ async def scan_receipt(file: UploadFile = File(...)):
     for _ in range(2):  # one retry, parsing occasionally comes back malformed
         try:
             return enrich(call_gemini(image_bytes, mime_type))
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             last_error = exc
 
@@ -276,12 +284,14 @@ async def scan_receipt(file: UploadFile = File(...)):
 def get_recipes(req: rx.RecipeRequest):
     """Generate dishes from pantry contents. Send the items array from /scan."""
     try:
-        generated = rx.generate(req, client)
+        generated = rx.generate(req, gemini(), MODEL)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()  # the terminal is where you'll actually read this
         raise HTTPException(502, f"Recipe generation failed: {exc}") from exc
 
-    ranked = rx.rank(generated, req.max_missing)
+    ranked = rx.rank(generated, req.max_missing, req.items)
     return {
         "count": len(ranked),
         "recipes": ranked,
@@ -315,7 +325,7 @@ def cook(req: CookRequest):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY"))}
 
 
 @app.get("/")
