@@ -343,3 +343,13 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
   .linkish { min-height: 44px; padding: 0 8px; }
   .pill.sm, .circle.sm, .rrow .del, .prow .del { min-width: 44px; min-height: 44px; }
 }
+
+/* deck sort control + recipe stats (nutrition & cost) */
+.deck-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.sortsel { height: 32px; padding: 0 12px; font-size: 13px; width: auto; flex: 0 0 auto; cursor: pointer; }
+.stats { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-3); }
+.stats i { width: 3px; height: 3px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
+.nutri { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 14px 0; }
+.nstat { flex: 1 1 84px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 8px; border-radius: 12px; background: rgba(255,255,255,.045); }
+.nstat strong { font-size: 16px; font-weight: 600; }
+.nstat small { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .03em; }

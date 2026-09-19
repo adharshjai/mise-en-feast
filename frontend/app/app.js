@@ -72,6 +72,56 @@ const CATALOG = {
 const DEFAULT_CAT = { shelf: 7, burn: 0.3, servings: 4 };
 const catalog = key => CATALOG[key] || DEFAULT_CAT;
 
+/* ---------- per-serving nutrition + cost (approximate, for sorting/labels) ---------- */
+// kcal, protein/fat/carbs in grams, cost in USD — one "serving" as recipes count them.
+const NUTRI_DEFAULT = { kcal: 60, protein: 2, fat: 1, carbs: 10, cost: 0.6 };
+const NUTRITION = {
+  'spinach':        { kcal: 25,  protein: 3,  fat: 0,  carbs: 4,  cost: 0.7 },
+  'spring mix':     { kcal: 20,  protein: 2,  fat: 0,  carbs: 3,  cost: 0.8 },
+  'milk':           { kcal: 120, protein: 8,  fat: 5,  carbs: 12, cost: 0.35 },
+  'eggs':           { kcal: 78,  protein: 6,  fat: 5,  carbs: 1,  cost: 0.30 },
+  'chicken thighs': { kcal: 210, protein: 26, fat: 12, carbs: 0,  cost: 1.6 },
+  'garlic':         { kcal: 5,   protein: 0,  fat: 0,  carbs: 1,  cost: 0.10 },
+  'spaghetti':      { kcal: 200, protein: 7,  fat: 1,  carbs: 42, cost: 0.35 },
+  'tomatoes':       { kcal: 22,  protein: 1,  fat: 0,  carbs: 5,  cost: 0.50 },
+  'basil':          { kcal: 2,   protein: 0,  fat: 0,  carbs: 0,  cost: 0.40 },
+  'jasmine rice':   { kcal: 205, protein: 4,  fat: 0,  carbs: 45, cost: 0.30 },
+  'parmesan':       { kcal: 110, protein: 10, fat: 7,  carbs: 1,  cost: 1.1 },
+  'cucumber':       { kcal: 16,  protein: 1,  fat: 0,  carbs: 4,  cost: 0.50 },
+  'olive oil':      { kcal: 120, protein: 0,  fat: 14, carbs: 0,  cost: 0.25 },
+  'chili flakes':   { kcal: 6,   protein: 0,  fat: 0,  carbs: 1,  cost: 0.05 },
+  'onion':          { kcal: 44,  protein: 1,  fat: 0,  carbs: 10, cost: 0.30 },
+  'red onion':      { kcal: 44,  protein: 1,  fat: 0,  carbs: 10, cost: 0.35 },
+  'mushrooms':      { kcal: 22,  protein: 3,  fat: 0,  carbs: 3,  cost: 0.9 },
+  'arborio rice':   { kcal: 210, protein: 4,  fat: 0,  carbs: 46, cost: 0.50 },
+  'stock':          { kcal: 15,  protein: 1,  fat: 0,  carbs: 2,  cost: 0.40 },
+  'soy sauce':      { kcal: 10,  protein: 1,  fat: 0,  carbs: 1,  cost: 0.10 },
+  'cream':          { kcal: 100, protein: 1,  fat: 11, carbs: 1,  cost: 0.50 },
+  'olives':         { kcal: 40,  protein: 0,  fat: 4,  carbs: 1,  cost: 0.60 },
+  'cumin':          { kcal: 8,   protein: 0,  fat: 0,  carbs: 1,  cost: 0.05 },
+  'paprika':        { kcal: 6,   protein: 0,  fat: 0,  carbs: 1,  cost: 0.05 },
+  'feta':           { kcal: 75,  protein: 4,  fat: 6,  carbs: 1,  cost: 0.9 },
+  'scallions':      { kcal: 8,   protein: 0,  fat: 0,  carbs: 2,  cost: 0.30 },
+  'white wine':     { kcal: 85,  protein: 0,  fat: 0,  carbs: 3,  cost: 0.9 },
+};
+const nutriFor = key => NUTRITION[key] || NUTRI_DEFAULT;
+const timeMinutes = dish => parseInt(dish.time, 10) || 999;
+// Whole-dish totals summed over ingredients, plus per-serving figures.
+function dishStats(dish) {
+  const t = { kcal: 0, protein: 0, fat: 0, carbs: 0, cost: 0 };
+  for (const i of (dish.ingredients || [])) {
+    const n = nutriFor(i.key), q = Math.max(0, i.need || 1);
+    t.kcal += n.kcal * q; t.protein += n.protein * q; t.fat += n.fat * q; t.carbs += n.carbs * q; t.cost += n.cost * q;
+  }
+  const per = Math.max(1, dish.servings || 1);
+  return {
+    kcal: Math.round(t.kcal / per / 10) * 10, protein: Math.round(t.protein / per),
+    fat: Math.round(t.fat / per), carbs: Math.round(t.carbs / per),
+    cost: t.cost / per, costTotal: t.cost, servings: per,
+  };
+}
+const money = v => `$${v.toFixed(2)}`;
+
 const ing = (name, key, need, amt) => ({ name, key, need, amt });
 const DISHES = [
   {
@@ -454,9 +504,19 @@ function analyze(dish) {
   const badge = urgent && urgent.dl <= 5
     ? { text: `Uses your ${urgent.item.name.toLowerCase()} · ${shortDays(urgent.dl)}`, level: levelForDays(urgent.dl) }
     : null;
-  return { dish, ings, have, missing, urgentDays, badge };
+  return { dish, ings, have, missing, urgentDays, badge, stats: dishStats(dish) };
 }
 const eligible = a => a.missing.length <= 2;
+
+// Deck ordering modes for the sort control.
+const SORTS = {
+  urgent:   { label: 'Expiring first', cmp: (a, b) => (a.urgentDays - b.urgentDays) || (a.missing.length - b.missing.length) },
+  missing:  { label: 'Fewest missing', cmp: (a, b) => (a.missing.length - b.missing.length) || (a.urgentDays - b.urgentDays) },
+  calories: { label: 'Fewest calories', cmp: (a, b) => a.stats.kcal - b.stats.kcal },
+  protein:  { label: 'Most protein', cmp: (a, b) => b.stats.protein - a.stats.protein },
+  cost:     { label: 'Cheapest', cmp: (a, b) => a.stats.cost - b.stats.cost },
+  time:     { label: 'Quickest', cmp: (a, b) => timeMinutes(a.dish) - timeMinutes(b.dish) },
+};
 
 /* ---------- state ---------- */
 const state = {
@@ -467,6 +527,7 @@ const state = {
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
   expanded: new Set(),      // pantry stack keys that are open
   sheet: null,
+  sortMode: 'urgent',       // deck ordering, see SORTS
   panelOpen: false,
   leaving: false,
   sheetReturn: null,        // where keyboard focus goes back to when the sheet closes
@@ -475,9 +536,10 @@ const state = {
 
 function buildDeck() {
   const all = activeDishes().map(analyze).filter(eligible);
+  const cmp = (SORTS[state.sortMode] || SORTS.urgent).cmp;
   state.deck = all
     .filter(a => !state.skipped.has(a.dish.id) && !state.cooked.has(a.dish.id) && !state.chosen.has(a.dish.id))
-    .sort((a, b) => (a.urgentDays - b.urgentDays) || (a.missing.length - b.missing.length));
+    .sort(cmp);
   return all;
 }
 const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
@@ -516,6 +578,7 @@ function cardHTML(a) {
     <div class="card-body">
       <h2>${esc(d.name)}</h2>
       <div class="meta"><span>${d.time}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i><span>${d.difficulty}</span></div>
+      <div class="stats"><span>${a.stats.kcal} cal</span><i></i><span>${a.stats.protein}g protein</span><i></i><span>${money(a.stats.cost)}/serving</span></div>
       <div class="chips">${a.ings.map(i => i.have
         ? `<span class="chip have">${ICON.checkSm}<span>${esc(i.name)}</span></span>`
         : `<span class="chip missing">${esc(i.name)}</span>`).join('')}</div>
@@ -550,7 +613,7 @@ function renderDeck(opts = {}) {
   if (top) top.addEventListener('pointerdown', onPointerDown);
   const n = state.deck.length;
   const left = n === 1 ? '1 dish left' : plural(n, 'dish', 'dishes');
-  el.caption.textContent = `Sorted by what’s expiring first · ${left}`;
+  el.caption.textContent = `${(SORTS[state.sortMode] || SORTS.urgent).label} · ${left}`;
   // one short line for screen readers, and only when it actually changed
   const msg = !hasPantry ? 'Pantry is empty' : n ? `Now showing ${state.deck[0].dish.name}, ${left}` : 'No dishes left';
   if (msg !== el.status.textContent) el.status.textContent = msg;
@@ -975,6 +1038,14 @@ function openDetail(a) {
       </div>
     </div>
     <div class="detail-body scroll">
+      <div class="nutri">
+        <div class="nstat"><strong>${a.stats.kcal}</strong><small>cal</small></div>
+        <div class="nstat"><strong>${a.stats.protein}g</strong><small>protein</small></div>
+        <div class="nstat"><strong>${a.stats.fat}g</strong><small>fat</small></div>
+        <div class="nstat"><strong>${a.stats.carbs}g</strong><small>carbs</small></div>
+        <div class="nstat"><strong>${money(a.stats.cost)}</strong><small>per serving</small></div>
+        <div class="nstat"><strong>${money(a.stats.costTotal)}</strong><small>whole dish</small></div>
+      </div>
       <div class="ings">
         <div class="eyebrow">Ingredients</div>
         ${a.have.map(i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`).join('')}
@@ -1333,6 +1404,12 @@ function populateFoodOptions() {
   const dl = $('#food-options');
   if (dl) dl.innerHTML = foodSuggestions().map(n => `<option value="${esc(n)}"></option>`).join('');
 }
+
+$('#sort-mode').addEventListener('change', e => {
+  state.sortMode = SORTS[e.target.value] ? e.target.value : 'urgent';
+  buildDeck();
+  renderDeck({ enter: true });
+});
 
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');

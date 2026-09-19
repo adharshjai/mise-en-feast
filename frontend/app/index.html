@@ -34,7 +34,18 @@
 <main class="stage">
   <!-- Home: the swipe deck -->
   <section id="deck-screen" class="screen">
-    <p class="caption" id="deck-caption">Sorted by what’s expiring first</p>
+    <div class="deck-top">
+      <p class="caption" id="deck-caption">Sorted by what’s expiring first</p>
+      <label class="sr-only" for="sort-mode">Sort dishes by</label>
+      <select id="sort-mode" class="field sortsel" aria-label="Sort dishes by">
+        <option value="urgent">Expiring first</option>
+        <option value="missing">Fewest missing</option>
+        <option value="calories">Fewest calories</option>
+        <option value="protein">Most protein</option>
+        <option value="cost">Cheapest</option>
+        <option value="time">Quickest</option>
+      </select>
+    </div>
     <div class="deck" id="deck"></div>
     <div class="actions">
       <div class="action">
