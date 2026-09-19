@@ -1246,9 +1246,9 @@ function closePanel() {
   const back = state.panelReturn; state.panelReturn = null;
   if (back && back.isConnected && (el.panel.contains(document.activeElement) || document.activeElement === document.body)) back.focus({ preventScroll: true });
 }
+const shortDate = ms => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 function boughtLabel(it) {
-  const d = new Date(it.purchase);
-  return `bought ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+  return `bought ${shortDate(it.purchase)}`;
 }
 function lotLabel(it) {
   const bits = [];
@@ -1266,12 +1266,12 @@ function stackDisplayName(lots) {
 function prowHTML(it, { lot = false } = {}) {
   const f = freshness(it);
   const cur = current(it);
-  const sub = lot
-    ? `${esc(lotLabel(it))} · about ${plural(Math.max(1, Math.round(cur)), 'serving')}`
-    : `${esc(it.qty)}${it.qty ? ' · ' : ''}about ${plural(Math.max(1, Math.round(cur)), 'serving')}`;
+  const pctLeft = it.initial > 0 ? clamp(cur / it.initial, 0, 1) : 0;
+  const amt = `${Math.round(pctLeft * 100)}% left · ~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
+  const sub = lot ? `${esc(lotLabel(it))} · ${amt}` : `${esc(it.qty)}${it.qty ? ' · ' : ''}${amt}`;
   return `<div class="prow${lot ? ' lot' : ''}" data-id="${it.id}">
     <div class="name"><strong>${esc(lot && it.variant ? it.variant : it.name)}</strong><small>${sub}</small></div>
-    <div class="fresh"><div class="bar ${f.level}"><i style="width:${Math.max(4, Math.round(f.pct * 100))}%"></i></div><small>${esc(f.label)}</small></div>
+    <div class="fresh"><div class="bar ${f.level}" title="${Math.round(pctLeft * 100)}% remaining"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div><small>exp ${esc(shortDate(it.expiry))}</small></div>
     <button class="circle sm glass del" type="button" data-remove="${it.id}" aria-label="Remove ${esc(it.name)}">${ICON.xSm}</button>
   </div>`;
 }
@@ -1282,12 +1282,14 @@ function stackHTML(lots) {
   const primary = lots.slice().sort((a, b) => a.expiry - b.expiry)[0];
   const f = freshness(primary);
   const total = lots.reduce((s, it) => s + current(it), 0);
+  const totalInitial = lots.reduce((s, it) => s + it.initial, 0);
+  const pctLeft = totalInitial > 0 ? clamp(total / totalInitial, 0, 1) : 0;
   const name = stackDisplayName(lots);
   return `<div class="prow stack${open ? ' open' : ''}" data-key="${esc(key)}">
     <button class="stack-main" type="button" data-toggle-stack="${esc(key)}" aria-expanded="${open}">
       <span class="chev">${ICON.chevron}</span>
-      <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · about ${plural(Math.max(1, Math.round(total)), 'serving')}</small></div>
-      <div class="fresh"><div class="bar ${f.level}"><i style="width:${Math.max(4, Math.round(f.pct * 100))}%"></i></div><small>${esc(f.label)}</small></div>
+      <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · ~${plural(Math.max(1, Math.round(total)), 'serving')} left</small></div>
+      <div class="fresh"><div class="bar ${f.level}" title="${Math.round(pctLeft * 100)}% remaining"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div><small>exp ${esc(shortDate(primary.expiry))}</small></div>
     </button>
   </div>
   <div class="lots">${lots.map(it => prowHTML(it, { lot: true })).join('')}</div>`;
@@ -1324,11 +1326,12 @@ function renderPanel() {
     if (it.asking) {
       return `<div class="checkin" data-id="${it.id}">
         <div class="eyebrow">How much ${esc(it.name.toLowerCase())} is left?</div>
+        <div class="slider-row">
+          <input type="range" class="amt-slider" min="0" max="100" step="5" value="50" data-slider="${it.id}" aria-label="Percent of ${esc(it.name)} remaining">
+          <output class="amt-out" data-out="${it.id}">50% left</output>
+        </div>
         <div class="opts">
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".5">About half</button>
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".25">About a quarter</button>
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".1">Almost none</button>
-          <button class="pill glass sm" type="button" data-gone="${it.id}">None, it’s gone</button>
+          <button class="pill prominent sm" type="button" data-setamt="${it.id}">Save</button>
           <button class="linkish" type="button" data-unask="${it.id}">Back</button>
         </div></div>`;
     }
@@ -1474,17 +1477,29 @@ el.panel.addEventListener('click', e => {
   if (t.dataset.gone) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.gone); renderAll(); return refreshRecipes(); }
   if (t.dataset.ask) { const it = item(t.dataset.ask); if (it) it.asking = true; return renderPanel(); }
   if (t.dataset.unask) { const it = item(t.dataset.unask); if (it) it.asking = false; return renderPanel(); }
-  if (t.dataset.some) {
-    const it = item(t.dataset.some);
+  if (t.dataset.setamt) {
+    const it = item(t.dataset.setamt);
     if (it) {
-      // The check-in is a correction: reset the estimate from what they told us.
-      it.initial = Math.max(1, catalog(it.key).servings * parseFloat(t.dataset.frac));
-      it.purchase = Date.now(); it.deducted = 0; it.asking = false;
-      it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
+      const slider = el.panel.querySelector(`.amt-slider[data-slider="${it.id}"]`);
+      const pct = slider ? clamp(Number(slider.value), 0, 100) : 50;
+      if (pct <= 0) {
+        state.pantry = state.pantry.filter(x => x.id !== it.id);   // slid to empty = gone
+      } else {
+        // The check-in is a correction: reset the estimate from what they told us.
+        it.initial = Math.max(0.1, catalog(it.key).servings * (pct / 100));
+        it.purchase = Date.now(); it.deducted = 0; it.asking = false;
+        it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
+      }
     }
     renderAll();
     return refreshRecipes();
   }
+});
+// Live label while dragging the "how much is left" slider (no re-render, keeps the thumb)
+el.panel.addEventListener('input', e => {
+  if (!e.target.classList.contains('amt-slider')) return;
+  const out = el.panel.querySelector(`.amt-out[data-out="${e.target.dataset.slider}"]`);
+  if (out) out.textContent = Number(e.target.value) <= 0 ? 'empty' : `${e.target.value}% left`;
 });
 /* ---------- autocomplete: foods we know about, for the add form ---------- */
 const sentenceCase = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
@@ -1501,8 +1516,35 @@ function populateFoodOptions() {
   if (dl) dl.innerHTML = foodSuggestions().map(n => `<option value="${esc(n)}"></option>`).join('');
 }
 
-$('#sort-mode').addEventListener('change', e => {
-  state.sortMode = SORTS[e.target.value] ? e.target.value : 'urgent';
+/* ---------- themed dropdown (replaces native <select>) ---------- */
+function initDropdown(el, onChange) {
+  if (!el) return;
+  const btn = el.querySelector('.dd-btn'), menu = el.querySelector('.dd-menu'), label = el.querySelector('.dd-label');
+  const opts = () => Array.from(menu.querySelectorAll('.dd-opt'));
+  opts().forEach(o => { o.tabIndex = -1; });
+  const close = () => { menu.hidden = true; el.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); };
+  const open = () => {
+    document.querySelectorAll('.dd.open').forEach(d => { if (d !== el && d.__close) d.__close(); });
+    menu.hidden = false; el.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
+    opts().forEach(o => o.setAttribute('aria-selected', String(o.dataset.value === el.dataset.value)));
+    (menu.querySelector('.dd-opt[aria-selected="true"]') || opts()[0])?.focus();
+  };
+  el.__close = close;
+  const pick = o => { el.dataset.value = o.dataset.value; label.textContent = o.textContent; close(); btn.focus(); onChange && onChange(o.dataset.value); };
+  btn.addEventListener('click', () => (menu.hidden ? open() : close()));
+  menu.addEventListener('click', e => { const o = e.target.closest('.dd-opt'); if (o) pick(o); });
+  menu.addEventListener('keydown', e => {
+    const list = opts(), i = list.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); (list[i + 1] || list[0]).focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); (list[i - 1] || list[list.length - 1]).focus(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (document.activeElement.classList.contains('dd-opt')) pick(document.activeElement); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); btn.focus(); }
+  });
+}
+document.addEventListener('click', e => { document.querySelectorAll('.dd.open').forEach(d => { if (!d.contains(e.target)) d.__close(); }); });
+initDropdown($('#dd-unit'));
+initDropdown($('#dd-sort'), v => {
+  state.sortMode = SORTS[v] ? v : 'urgent';
   buildDeck();
   renderDeck({ enter: true });
 });
@@ -1613,7 +1655,9 @@ chatEl.log.addEventListener('click', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
 
 const isoDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-const resetAddDefaults = () => { $('#add-expiry').value = isoDay(Date.now() + 7 * DAY); };   // default use-by is 7 days out
+// Default use-by tracks the food's own shelf life (7 days only for unknown items).
+const shelfExpiryStr = name => isoDay(Date.now() + catalog(keyForName(name || '')).shelf * DAY);
+const resetAddDefaults = () => { $('#add-expiry').value = shelfExpiryStr($('#add-name').value); };
 
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
@@ -1621,13 +1665,15 @@ $('#btn-add').addEventListener('click', () => {
   $('#btn-add').setAttribute('aria-expanded', String(!f.hidden));
   if (!f.hidden) { resetAddDefaults(); $('#add-name').focus(); }
 });
+// As the food name changes, re-estimate the expiry from its shelf life.
+$('#add-name').addEventListener('input', () => { $('#add-expiry').value = shelfExpiryStr($('#add-name').value); });
 $('#add-form').addEventListener('submit', e => {
   e.preventDefault();
   const name = $('#add-name').value.trim();
   const amount = $('#add-qty').value.trim();
   if (!name || !amount) return;   // name and quantity are both required
   const key = keyForName(name);
-  const unit = $('#add-unit').value;
+  const unit = $('#dd-unit').dataset.value;
   const qty = `${amount} ${unit}`;
   const expVal = $('#add-expiry').value;
   const expiry = expVal ? new Date(`${expVal}T12:00:00`).getTime() : Date.now() + 7 * DAY;

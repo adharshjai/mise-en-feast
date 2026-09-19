@@ -36,15 +36,17 @@
   <section id="deck-screen" class="screen">
     <div class="deck-top">
       <p class="caption" id="deck-caption">Sorted by what’s expiring first</p>
-      <label class="sr-only" for="sort-mode">Sort dishes by</label>
-      <select id="sort-mode" class="field sortsel" aria-label="Sort dishes by">
-        <option value="urgent">Expiring first</option>
-        <option value="missing">Fewest missing</option>
-        <option value="calories">Fewest calories</option>
-        <option value="protein">Most protein</option>
-        <option value="cost">Cheapest</option>
-        <option value="time">Quickest</option>
-      </select>
+      <div class="dd sort-dd" id="dd-sort" data-value="urgent">
+        <button type="button" class="dd-btn field" aria-haspopup="listbox" aria-expanded="false" aria-label="Sort dishes by"><span class="dd-label">Expiring first</span><svg class="dd-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+        <ul class="dd-menu glass" role="listbox" hidden>
+          <li class="dd-opt" role="option" data-value="urgent">Expiring first</li>
+          <li class="dd-opt" role="option" data-value="missing">Fewest missing</li>
+          <li class="dd-opt" role="option" data-value="calories">Fewest calories</li>
+          <li class="dd-opt" role="option" data-value="protein">Most protein</li>
+          <li class="dd-opt" role="option" data-value="cost">Cheapest</li>
+          <li class="dd-opt" role="option" data-value="time">Quickest</li>
+        </ul>
+      </div>
     </div>
     <div class="deck" id="deck"></div>
     <div class="actions">
@@ -137,15 +139,17 @@
     <input id="add-name" class="field" list="food-options" placeholder="Item, e.g. lemons" autocomplete="off" required>
     <label class="sr-only" for="add-qty">Amount</label>
     <input id="add-qty" class="field short" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="Amt" autocomplete="off" required>
-    <label class="sr-only" for="add-unit">Unit</label>
-    <select id="add-unit" class="field unit" aria-label="Unit">
-      <option value="oz">oz</option>
-      <option value="lb">lb</option>
-      <option value="g">g</option>
-      <option value="ml">ml</option>
-      <option value="ct">count</option>
-      <option value="pack">pack</option>
-    </select>
+    <div class="dd unit-dd" id="dd-unit" data-value="oz">
+      <button type="button" class="dd-btn field" aria-haspopup="listbox" aria-expanded="false" aria-label="Unit"><span class="dd-label">oz</span><svg class="dd-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+      <ul class="dd-menu glass" role="listbox" hidden>
+        <li class="dd-opt" role="option" data-value="oz">oz</li>
+        <li class="dd-opt" role="option" data-value="lb">lb</li>
+        <li class="dd-opt" role="option" data-value="g">g</li>
+        <li class="dd-opt" role="option" data-value="ml">ml</li>
+        <li class="dd-opt" role="option" data-value="ct">count</li>
+        <li class="dd-opt" role="option" data-value="pack">pack</li>
+      </ul>
+    </div>
     <label class="sr-only" for="add-expiry">Expiration date</label>
     <input id="add-expiry" class="field date" type="date" aria-label="Expiration date" required>
     <button class="pill prominent" type="submit">Add</button>

@@ -406,3 +406,27 @@ select.field option { background: #1C1917; color: var(--text); }
 .ob-chip { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.04); color: var(--text-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; transition: background .15s ease, color .15s ease, border-color .15s ease; }
 .ob-chip:hover { border-color: rgba(255,255,255,.28); }
 .ob-chip.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+
+/* themed dropdown (custom <select> replacement) */
+.dd { position: relative; }
+.dd .dd-btn { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; cursor: pointer; text-align: left; }
+.dd .dd-btn:hover { border-color: rgba(255,255,255,.22); }
+.dd .dd-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd .dd-chev { flex-shrink: 0; color: var(--text-2); transition: transform .18s ease; }
+.dd.open .dd-chev { transform: rotate(180deg); }
+.dd-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 100%; z-index: 40; list-style: none; margin: 0; padding: 6px; border-radius: 14px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.dd-opt { padding: 9px 12px; border-radius: 10px; font-size: 14px; color: var(--text); cursor: pointer; white-space: nowrap; outline: none; }
+.dd-opt:hover, .dd-opt:focus-visible { background: rgba(255,255,255,.09); }
+.dd-opt[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+.unit-dd { width: 92px; flex: 0 0 auto; }
+.sort-dd { flex: 0 0 auto; }
+.sort-dd .dd-btn { height: 32px; font-size: 13px; padding: 0 10px 0 12px; }
+.sort-dd .dd-menu { left: auto; right: 0; }
+
+/* "how much is left" slider */
+.slider-row { display: flex; align-items: center; gap: 12px; padding: 6px 0 2px; }
+.amt-slider { flex: 1 1 auto; -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; background: rgba(255,255,255,.16); outline: none; cursor: pointer; }
+.amt-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); border: 2px solid var(--on-accent); cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.4); }
+.amt-slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); border: 2px solid var(--on-accent); cursor: pointer; }
+.amt-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.amt-out { min-width: 66px; text-align: right; font-size: 13px; font-weight: 600; color: var(--accent); }
