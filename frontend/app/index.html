@@ -24,6 +24,7 @@
       <span>Tonight</span>
     </button>
     <button class="pill ghost" id="btn-pantry" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="panel">0 items</button>
+    <button class="pill ghost" id="btn-shopping" type="button" aria-haspopup="dialog" aria-controls="panel">List <span id="shopping-count">0</span></button>
     <button class="pill prominent" id="btn-scan" type="button">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
       <span>Scan</span>
@@ -32,6 +33,7 @@
 </header>
 
 <main class="stage">
+  <div class="load-error" id="load-error" role="alert" hidden><p id="load-error-message"></p><button class="pill prominent" id="btn-retry-load" type="button">Retry loading</button></div>
   <!-- Home: the swipe deck -->
   <section id="deck-screen" class="screen">
     <p class="caption" id="deck-caption">Sorted by what’s expiring first</p>
@@ -97,6 +99,8 @@
 </main>
 
 <footer class="foot">
+  <div class="save-status"><span data-save-label role="status">Loading pantry…</span><button class="linkish" data-retry-save type="button" hidden>Retry</button></div>
+  <button class="linkish" id="btn-undo" type="button" hidden>Undo last meal</button>
   <button class="linkish dim" id="btn-signout" type="button" hidden>Sign out</button>
   <button class="linkish dim" id="btn-reset" type="button">Start over</button>
 </footer>
@@ -121,15 +125,30 @@
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
     </button>
   </div>
+  <div class="panel-tabs" role="tablist" aria-label="Pantry and shopping">
+    <button id="tab-pantry" type="button" role="tab" aria-selected="true" aria-controls="panel-body">Pantry</button>
+    <button id="tab-shopping" type="button" role="tab" aria-selected="false" aria-controls="panel-body">Shopping list</button>
+  </div>
+  <div class="pantry-toolbar" id="pantry-toolbar"><p>Grouped by food. Each purchase keeps its own date.</p><button class="linkish" id="btn-depleted" type="button">Add depleted foods to list</button></div>
   <form class="add-form" id="add-form" hidden>
-    <label class="sr-only" for="add-name">Item name</label>
-    <input id="add-name" class="field" placeholder="Item, e.g. lemons" autocomplete="off" required>
-    <label class="sr-only" for="add-qty">Quantity</label>
-    <input id="add-qty" class="field short" placeholder="Qty" autocomplete="off">
-    <button class="pill prominent" type="submit">Add</button>
+    <label class="wide">Food<input id="add-name" class="field" list="food-options" placeholder="Bananas, milk, spinach…" autocomplete="off" maxlength="100" required></label>
+    <label class="wide">Variety<input id="add-variety" class="field" placeholder="Regular, organic, whole…" value="Regular" maxlength="80"></label>
+    <label>Amount<input id="add-qty" class="field" type="number" min="0.1" step="0.1" value="1" required></label>
+    <label>Unit<select id="add-unit" class="field"><option value="items">Items</option><option value="servings">Servings</option></select></label>
+    <label class="wide">Expiration date<input id="add-expiry" class="field" type="date" required></label>
+    <p class="batch-note wide" id="food-hint"></p>
+    <button class="pill prominent wide" type="submit">Add batch</button>
   </form>
-  <div class="panel-body scroll" id="panel-body"></div>
+  <form id="shopping-form" class="shopping-form" hidden>
+    <label class="wide">Add to your list<input id="shop-name" class="field" list="food-options" maxlength="100" placeholder="What do you need?" required></label>
+    <label>Amount<input id="shop-amount" class="field" type="number" min="0.1" step="0.1" value="1" required></label>
+    <label>Unit<select id="shop-unit" class="field"><option value="items">Items</option><option value="servings">Servings</option></select></label>
+    <button class="pill prominent wide" type="submit">Add to list</button>
+  </form>
+  <div class="panel-body scroll" id="panel-body" role="tabpanel" aria-labelledby="tab-pantry"></div>
+  <div class="panel-footer"><p id="catalog-status"></p><div class="save-status"><span data-save-label role="status"></span><button class="linkish" data-retry-save type="button" hidden>Retry</button></div></div>
 </aside>
+<datalist id="food-options"></datalist>
 
 <div class="toast glass" id="toast" role="status" aria-live="polite"></div>
 

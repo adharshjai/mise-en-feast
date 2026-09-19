@@ -6,11 +6,11 @@
    ========================================================================= */
 
 import { requireAuth, signOut, configured } from '../shared/supabase.js';
-import { loadState, saveState, logCook, logReceipt, clearLocal } from '../shared/store.js';
+import { loadState, saveState, flushState, retrySave, checkIn, loadFoods, subscribe, clearLocal } from '../shared/store.js';
+import { createFoodCatalog } from '../shared/foods.js';
+import { DAY, OUT, currentAmount, calendarDaysLeft, dateValue, expiryFromDate, formatAmount, availableBatches, allocateIngredient, groupPantry, undoCook, addShoppingItem } from '../shared/pantry-model.js';
 
-const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
-const OUT = 0.5;                // servings at or below this count as "out"
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -39,37 +39,8 @@ const ICON = {
 /* ---------- reference data: shelf life and household burn rate ---------- */
 // shelf = days until it goes bad, burn = servings a household uses per day
 // (0 = only recipes touch it), servings = what one purchase holds.
-const CATALOG = {
-  'spinach':        { shelf: 5,   burn: 0.35, servings: 4 },
-  'spring mix':     { shelf: 4,   burn: 0.5,  servings: 4 },
-  'milk':           { shelf: 7,   burn: 1.0,  servings: 8 },
-  'eggs':           { shelf: 21,  burn: 0.6,  servings: 12 },
-  'chicken thighs': { shelf: 1.5, burn: 0,    servings: 3 },
-  'garlic':         { shelf: 60,  burn: 0.15, servings: 10 },
-  'spaghetti':      { shelf: 365, burn: 0,    servings: 4 },
-  'tomatoes':       { shelf: 5,   burn: 0.3,  servings: 6 },
-  'basil':          { shelf: 3,   burn: 0,    servings: 3 },
-  'jasmine rice':   { shelf: 365, burn: 0,    servings: 8 },
-  'parmesan':       { shelf: 21,  burn: 0.2,  servings: 8 },
-  'cucumber':       { shelf: 6,   burn: 0.3,  servings: 2 },
-  'olive oil':      { shelf: 365, burn: 0.15, servings: 40 },
-  'chili flakes':   { shelf: 365, burn: 0.02, servings: 30 },
-  'onion':          { shelf: 21,  burn: 0.2,  servings: 4 },
-  'red onion':      { shelf: 21,  burn: 0.1,  servings: 3 },
-  'mushrooms':      { shelf: 5,   burn: 0,    servings: 3 },
-  'arborio rice':   { shelf: 365, burn: 0,    servings: 6 },
-  'stock':          { shelf: 5,   burn: 0,    servings: 4 },
-  'soy sauce':      { shelf: 365, burn: 0.05, servings: 40 },
-  'cream':          { shelf: 7,   burn: 0.3,  servings: 6 },
-  'olives':         { shelf: 30,  burn: 0.1,  servings: 8 },
-  'cumin':          { shelf: 365, burn: 0.02, servings: 40 },
-  'paprika':        { shelf: 365, burn: 0.02, servings: 40 },
-  'feta':           { shelf: 14,  burn: 0.2,  servings: 6 },
-  'scallions':      { shelf: 7,   burn: 0.2,  servings: 4 },
-  'white wine':     { shelf: 5,   burn: 0.5,  servings: 5 },
-};
-const DEFAULT_CAT = { shelf: 7, burn: 0.3, servings: 4 };
-const catalog = key => CATALOG[key] || DEFAULT_CAT;
+let foodCatalog = createFoodCatalog();
+const catalog = key => foodCatalog.describe(key);
 
 const ing = (name, key, need, amt) => ({ name, key, need, amt });
 const DISHES = [
@@ -143,7 +114,7 @@ const dishById = id => DISHES.find(d => d.id === id);
 const SAMPLE_RECEIPT = {
   store: 'Whole Foods Market', date: 'Sep 19', total: 64.18,
   lines: [
-    { raw: 'ORG SPINACH 5OZ', name: 'Spinach', key: 'spinach', qty: '5 oz', price: 3.49 },
+    { raw: 'ORG SPINACH 5OZ', name: 'Spinach', key: 'spinach', variety: 'Organic', qty: '5 oz', price: 3.49 },
     { raw: 'GV MLK 1GAL', name: 'Milk', key: 'milk', qty: '1 gal', price: 3.98 },
     { raw: 'EGGS LG DZ', name: 'Eggs', key: 'eggs', qty: '12', price: 4.29 },
     { raw: 'CHKN THIGH 1.4LB', name: 'Chicken thighs', key: 'chicken thighs', qty: '1.4 lb', price: 8.12 },
@@ -164,7 +135,7 @@ const SAMPLE_RECEIPT = {
 function mk(name, key, qty, daysAgo, raw = '') {
   const c = catalog(key);
   const purchase = Date.now() - daysAgo * DAY;
-  return { id: uid(), name, key, qty, raw, initial: c.servings, purchase, expiry: purchase + c.shelf * DAY, burn: c.burn, deducted: 0 };
+  return { id: uid(), name: c.name, key: c.key, qty, raw, initial: c.servings, purchase, expiry: expiryFromDate(dateValue(purchase + c.shelf * DAY)), burn: c.burn, deducted: 0, variety: c.variety, unit: c.unit, foodId: c.foodId };
 }
 function seedPantry() {
   return [
@@ -185,33 +156,24 @@ function seedPantry() {
     mk('Cucumber', 'cucumber', '1', 1),
     mk('Cumin', 'cumin', '1 jar', 120),
     mk('Paprika', 'paprika', '1 jar', 120),
-    mk('Milk', 'milk', '1 gal', 9),
+    mk('Milk', 'milk', '1 gal', 18),
+    ...[{variety:'Regular',amount:2,days:2},{variety:'Organic',amount:3,days:2},{variety:'Organic',amount:2,days:4}].map(b=>({...mk('Bananas','bananas','',0),variety:b.variety,initial:b.amount,burn:0,unit:'items',expiry:expiryFromDate(dateValue(Date.now()+b.days*DAY))})),
   ];
 }
-// Buying something again merges into the row you already have, and the merge
-// corrects the old estimate. Both the receipt flow and add-by-hand go through here.
-function upsert(name, key, qty, raw = '') {
-  const c = catalog(key);
-  const existing = state.pantry.find(it => it.key === key);
-  if (existing) {
-    existing.initial = current(existing) + c.servings;
-    existing.purchase = Date.now();
-    existing.expiry = Date.now() + c.shelf * DAY;
-    existing.deducted = 0;
-    existing.asking = false;
-    existing.qty = qty || existing.qty;
-    existing.name = name;
-    return { item: existing, merged: true };
-  }
-  const it = mk(name, key, qty || '', 0, raw);
-  state.pantry.push(it);
-  return { item: it, merged: false };
+// Each purchase keeps its own quantity, variety and expiration date.
+function upsert(name, key, qty, raw = '', options = {}) {
+  const c = catalog(key || name);
+  const item = {...mk(name,key || name,qty || c.qty,0,raw),
+    variety:options.variety || catalog(name).variety,
+    initial:options.amount ?? (c.unit==='items' && /^\d+(?:\.\d+)?$/.test(qty) ? Number(qty) : c.servings),
+    unit:options.unit || c.unit, expiry:options.expiry || expiryFromDate(dateValue(Date.now()+c.shelf*DAY))};
+  state.pantry.push(item);
+  return {item,merged:false};
 }
-
-const current = it => Math.max(0, it.initial - it.burn * ((Date.now() - it.purchase) / DAY) - it.deducted);
-const daysLeft = it => (it.expiry - Date.now()) / DAY;
+const current = it => currentAmount(it);
+const daysLeft = it => calendarDaysLeft(it.expiry);
 const needsCheckin = it => current(it) <= OUT;
-const findItem = key => state.pantry.find(it => it.key === key && !needsCheckin(it));
+const findItem = key => availableBatches(state.pantry,foodCatalog.key(key))[0];
 
 function timeLabel(dl) {
   if (dl < 0) return 'past its date';
@@ -233,7 +195,7 @@ const levelForDays = dl => (dl <= 2 ? 'red' : dl <= 5 ? 'yellow' : 'green');
 // Show whichever is more urgent and say which one it is.
 function freshness(it) {
   const cur = current(it);
-  const pct = clamp(cur / it.initial, 0, 1);
+  const pct = clamp(it.initial ? cur / it.initial : 0, 0, 1);
   const dl = daysLeft(it);
   const shelfDays = (it.expiry - it.purchase) / DAY;
   const tLevel = levelForDays(dl);
@@ -248,8 +210,10 @@ function freshness(it) {
 /* ---------- dishes against the pantry ---------- */
 function analyze(dish) {
   const ings = dish.ingredients.map(i => {
-    const item = findItem(i.key);
-    return { ...i, item, have: !!item };
+    const key = foodCatalog.key(i.key);
+    const allocation = allocateIngredient(state.pantry,key,i.need);
+    const item = allocation.allocations[0]?.item;
+    return { ...i, key, ...allocation, item, have: allocation.missing < 0.01 };
   });
   const have = ings.filter(i => i.have);
   const missing = ings.filter(i => !i.have);
@@ -269,6 +233,12 @@ const eligible = a => a.missing.length <= 2;
 /* ---------- state ---------- */
 const state = {
   pantry: [],
+  shopping: [],
+  cookLogs: [],
+  receipts: [],
+  panelTab: 'pantry',
+  busy: false,
+  ready: false,
   deck: [],
   skipped: new Set(),
   cooked: new Set(),
@@ -302,15 +272,17 @@ const el = {
 // The choke point after every mutation: everything derived is rebuilt here, then saved.
 function renderAll(opts = {}) {
   buildDeck();
-  const n = state.pantry.length;
-  el.count.textContent = plural(n, 'item');
-  el.count.setAttribute('aria-label', `Pantry, ${plural(n, 'item')}`);
-  el.panelCount.textContent = plural(n, 'item');
+  const n = groupPantry(state.pantry).length;
+  el.count.textContent = plural(n, 'food');
+  el.count.setAttribute('aria-label', `Pantry, ${plural(n, 'food')}`);
+  el.panelCount.textContent = `${n} foods · ${state.pantry.length} batches`;
+  $('#shopping-count').textContent = state.shopping.filter(x=>!x.checked).length;
+  $('#btn-undo').hidden = !state.cookLogs.some(x=>!x.undone_at && x.items_deducted?.some(y=>y.purchase != null));
   el.reset.textContent = n ? 'Clear pantry' : 'Load demo pantry';
   renderTonight();
   renderDeck(opts);
   if (state.panelOpen) renderPanel();
-  saveState({ pantry: state.pantry, skipped: [...state.skipped], cooked: [...state.cooked], chosen: [...state.chosen] });
+  if (state.ready && opts.save !== false) saveState(state);
 }
 
 function cardHTML(a) {
@@ -479,9 +451,10 @@ function commit(dir, fromDx = 0) {
 /* ---------- sheets (modals) ---------- */
 // While a sheet or the panel is open the rest of the page is inert: no Tab into it, no clicks.
 function syncInert() {
-  const modal = !!(state.sheet || state.panelOpen);
+  const modal = !!(state.sheet || state.panelOpen || state.busy || !state.ready);
   for (const n of $$('.topbar, .stage, .foot')) n.inert = modal;
-  el.panel.inert = !state.panelOpen;
+  el.panel.inert = !state.panelOpen || state.busy;
+  el.sheet.inert = !state.sheet || state.busy;
 }
 // The file input lives in the dropzone while the upload sheet is open; park it before the sheet's markup is replaced.
 function parkFileInput() {
@@ -586,7 +559,7 @@ async function startProcessing(file) {
 /* ---------- scan: review ---------- */
 let review = [];
 function openReview(lines) {
-  review = lines;
+  review = lines.map(l=>({...l,key:catalog(l.key || l.name).key,variety:l.variety || catalog(l.raw || l.name).variety,expiry:l.expiry || dateValue(Date.now()+catalog(l.key || l.name).shelf*DAY)}));
   openSheet('review', `
     <div class="sheet-head"><h2 id="review-title">Review items</h2>${closeBtn()}</div>
     <div class="sheet-sub"><span>${esc(SAMPLE_RECEIPT.store)}</span><i></i><span>${esc(SAMPLE_RECEIPT.date)}</span><i></i><span>Click a row to edit it</span></div>
@@ -623,9 +596,13 @@ function renderReview(animate = false) {
       return `<div class="rrow edit" data-id="${l.id}">
         <form class="editor" data-edit="${l.id}">
           <label class="sr-only" for="e-name-${l.id}">Name</label>
-          <input id="e-name-${l.id}" class="field" name="name" value="${esc(l.name)}" autofocus>
+          <input id="e-name-${l.id}" class="field" name="name" list="food-options" value="${esc(l.name)}" required autofocus>
           <label class="sr-only" for="e-qty-${l.id}">Quantity</label>
           <input id="e-qty-${l.id}" class="field short" name="qty" value="${esc(l.qty || '')}">
+          <label class="sr-only" for="e-variety-${l.id}">Variety</label>
+          <input id="e-variety-${l.id}" class="field" name="variety" value="${esc(l.variety)}" placeholder="Variety">
+          <label class="sr-only" for="e-expiry-${l.id}">Expiration date</label>
+          <input id="e-expiry-${l.id}" class="field" name="expiry" type="date" value="${esc(l.expiry)}" required>
           <button class="pill prominent sm" type="submit">Save</button>
           <button class="linkish" type="button" data-canceledit="${l.id}">Cancel</button>
         </form></div>`;
@@ -644,7 +621,7 @@ function renderReview(animate = false) {
     }
     return `<div class="rrow" data-id="${l.id}" ${delay()}>
       <button class="main" type="button" data-editrow="${l.id}">
-        <div class="name"><strong>${esc(l.name)}</strong><small>${esc(estimateLabel(l.key))}</small></div>
+        <div class="name"><strong>${esc(l.name)}</strong><small>${esc(l.variety)} · ${esc(l.expiry)}</small></div>
         <span class="qty">${esc(l.qty || '')}</span>
       </button>
       <button class="circle sm glass del" type="button" data-drop="${l.id}" aria-label="Remove ${esc(l.name)}">${ICON.trash}</button>
@@ -674,7 +651,7 @@ function estimateLabel(key) {
 // How many dishes would become makeable if these lines were added (dry run).
 function countNewDishes(lines, before) {
   const saved = state.pantry;
-  state.pantry = saved.concat(lines.filter(l => !findItem(l.key)).map(l => mk(l.name, l.key, l.qty, 0)));
+  state.pantry = saved.concat(lines.map(l => mk(l.name, l.key, l.qty, 0)));
   const after = DISHES.map(analyze).filter(eligible).map(a => a.dish.id);
   state.pantry = saved;
   return after.filter(id => !before.has(id)).length;
@@ -682,12 +659,12 @@ function countNewDishes(lines, before) {
 function addToPantry() {
   const food = review.filter(l => !l.nonFood && !l.dropped);
   const before = new Set(buildDeck().map(a => a.dish.id));
-  for (const l of food) upsert(l.name, l.key, l.qty, l.raw);
+  for (const l of food) upsert(l.name, l.key, l.qty, l.raw, {variety:l.variety,expiry:expiryFromDate(l.expiry)});
+  state.receipts.push({id:uid(),store_name:SAMPLE_RECEIPT.store,total:SAMPLE_RECEIPT.total,scanned_at:new Date().toISOString(),item_count:food.length});
   closeSheet();
   renderAll({ enter: true });
   const fresh = buildDeck().filter(a => !before.has(a.dish.id)).length;
   toast(`${plural(food.length, 'item')} added`, `${plural(fresh, 'new dish', 'new dishes')}`);
-  logReceipt({ store: SAMPLE_RECEIPT.store, total: SAMPLE_RECEIPT.total, scannedAt: Date.now(), itemCount: food.length });
 }
 
 /* ---------- recipe detail and Made It ---------- */
@@ -711,7 +688,7 @@ function openDetail(a) {
       <div class="ings">
         <div class="eyebrow">Ingredients</div>
         ${a.have.map(i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`).join('')}
-        ${a.missing.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`).join('') : ''}
+        ${a.missing.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}${i.available > 0 ? ` · short ${formatAmount(i.missing)} servings` : ''}</span></div>`).join('') + `<button class="pill glass sm" type="button" data-shop-missing="${d.id}">Add missing ingredients to shopping list</button>` : ''}
       </div>
       <div class="ings">
         <div class="eyebrow">Steps</div>
@@ -741,59 +718,47 @@ function openTonight() {
     <div class="sheet-foot"><button class="linkish" type="button" data-close>Back to deck</button></div>`, 'w-520');
 }
 function openMadeIt(dishId) {
-  const a = analyze(dishById(dishId));
-  const rows = a.have.map(i => {
-    const cur = current(i.item);
-    const after = cur - i.need;
-    const last = after <= OUT;
-    let note;
-    if (i.item.burn > 0 && i.item.initial >= 20) note = 'Staple, barely moves';
-    else if (last) note = 'This uses the last of it';
-    else note = `${Math.round(after)} left after this`;
-    return { ...i, cur, last, note };
-  });
+  const a=analyze(dishById(dishId));
+  const usable=a.ings.filter(i=>i.allocations.length);
   openSheet('madeit', `
     <div class="sheet-head"><h2>Update your pantry</h2>${closeBtn()}</div>
-    <div class="sheet-sub"><span>${esc(a.dish.name)}</span><i></i><span>uncheck anything you skipped</span></div>
-    <div class="sheet-body">
-      <div class="deduct" id="deduct">
-        ${rows.map(r => `<label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
-          <span class="name"><strong>${esc(r.name)}</strong><small class="${r.last ? 'warn' : ''}">${esc(r.note)}</small></span>
-          <span class="amt">${r.need} of ${Math.round(r.cur)}</span></label>`).join('')}
-      </div>
+    <div class="sheet-sub"><span>${esc(a.dish.name)}</span></div>
+    <div class="sheet-body"><p class="batch-note">We’ll use the batches expiring soonest. Uncheck anything you didn’t use.</p>
+      <div class="deduct" id="deduct">${usable.map(i=>`<label><input class="chk" type="checkbox" checked data-key="${esc(i.key)}">
+        <span class="name"><strong>${esc(i.name)}</strong><small>${i.allocations.map(x=>`${formatAmount(x.servings)} from ${esc(x.item.variety.toLowerCase())} · ${esc(dateValue(x.item.expiry))}`).join('<br>')}${i.missing>.01 ? `<br>Only ${formatAmount(i.need-i.missing)} of ${i.need} available` : ''}</small></span>
+        <span class="amt">${formatAmount(i.need-i.missing)}</span></label>`).join('')}</div>
     </div>
-    <div class="sheet-foot" style="flex-direction:column;align-items:stretch;gap:12px">
-      <div class="sheet-note"><span id="deduct-summary"></span></div>
+    <div class="sheet-foot madeit-foot"><p class="sheet-note" id="deduct-summary"></p>
       <button class="pill prominent full" type="button" data-done="${a.dish.id}">${ICON.checkMd}<span>Done</span></button>
     </div>`, 'w-520');
   updateDeductSummary();
 }
 function updateDeductSummary() {
-  const boxes = $$('#deduct input');
-  const on = boxes.filter(b => b.checked);
-  const out = on.filter(b => b.dataset.last === '1').map(b => $('strong', b.parentElement).textContent.toLowerCase());
-  boxes.forEach(b => { const s = $('small', b.parentElement); if (b.dataset.last === '1') s.classList.toggle('warn', b.checked); });
-  $('#deduct-summary').textContent = `${plural(on.length, 'item')} will be updated` + (out.length ? `. You’ll be out of ${out.join(', ')}.` : '.');
+  $('#deduct-summary').textContent=`${plural($$('#deduct input:checked').length,'ingredient')} will be deducted. You can undo this meal afterward.`;
 }
 function finishMadeIt(dishId) {
-  const dish = dishById(dishId);
-  const checked = $$('#deduct input').filter(b => b.checked).map(b => b.dataset.key);
-  const ranOut = [];
-  const used = [];
-  for (const i of dish.ingredients) {
-    if (!checked.includes(i.key)) continue;
-    const item = findItem(i.key);
-    if (!item) continue;
-    item.deducted += i.need;
-    used.push({ id: item.id, key: i.key, name: item.name, servings: i.need });
-    if (needsCheckin(item)) ranOut.push(item.name.toLowerCase());
+  if(state.cooked.has(dishId))return;
+  const dish=dishById(dishId), checked=new Set($$('#deduct input:checked').map(b=>b.dataset.key)), used=[];
+  for(const ingredient of dish.ingredients) {
+    const key=foodCatalog.key(ingredient.key);
+    if(!checked.has(key))continue;
+    for(const {item,servings} of allocateIngredient(state.pantry,key,ingredient.need).allocations) {
+      item.deducted+=servings;
+      used.push({id:item.id,key:item.key,name:item.name,variety:item.variety,servings,purchase:item.purchase});
+    }
   }
-  state.chosen.delete(dishId);
-  state.cooked.add(dishId);
-  closeSheet();
-  renderAll({ enter: true });
-  toast('Pantry updated', `${plural(checked.length, 'item')} used`, ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '');
-  logCook({ recipeId: dish.id, title: dish.name, items: used });
+  state.cookLogs.unshift({id:uid(),recipe_id:dish.id,title:dish.name,cooked_at:new Date().toISOString(),items_deducted:used,undone_at:null});
+  state.chosen.delete(dishId);state.cooked.add(dishId);
+  closeSheet();renderAll({enter:true});
+  toast('Pantry updated',`${plural(used.length,'batch')} used`,'Undo is available at the bottom of the screen.');
+}
+function undoLastCook() {
+  const log=state.cookLogs.find(x=>!x.undone_at && x.items_deducted?.some(y=>y.purchase!=null));
+  try {
+    undoCook(state.pantry,log);
+    if(!state.cookLogs.some(x=>x.recipe_id===log.recipe_id && !x.undone_at))state.cooked.delete(log.recipe_id);
+    renderAll({enter:true});toast('Cooking undone',log.title,'The ingredients are back in their original batches.');
+  }catch(error){toast('Couldn’t undo',error.message);}
 }
 
 /* ---------- pantry panel ---------- */
@@ -824,54 +789,78 @@ function closePanel() {
   const back = state.panelReturn; state.panelReturn = null;
   if (back && back.isConnected && (el.panel.contains(document.activeElement) || document.activeElement === document.body)) back.focus({ preventScroll: true });
 }
-function prowHTML(it) {
-  const f = freshness(it);
-  const cur = current(it);
-  return `<div class="prow" data-id="${it.id}">
-    <div class="name"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}about ${plural(Math.max(1, Math.round(cur)), 'serving')}</small></div>
-    <div class="fresh"><div class="bar ${f.level}"><i style="width:${Math.max(4, Math.round(f.pct * 100))}%"></i></div><small>${esc(f.label)}</small></div>
-    <button class="circle sm glass del" type="button" data-remove="${it.id}" aria-label="Remove ${esc(it.name)}">${ICON.xSm}</button>
-  </div>`;
+function batchHTML(it) {
+  const amount=current(it),dl=daysLeft(it);
+  const quantity=`${it.burn>0 ? 'About ' : ''}${formatAmount(amount)} ${it.unit==='items' ? (Math.round(amount)===1 ? 'item' : 'items') : 'servings'}`;
+  const check=needsCheckin(it),label=`${it.name}, ${it.variety}, ${dateValue(it.expiry)}`;
+  const options=it.asking ? `<form class="batch-checkin" data-checkin="${it.id}">
+    <label for="remaining-${it.id}">How many ${it.unit==='items' ? 'items' : 'servings'} are left?</label>
+    <div class="form-inline"><input class="field" id="remaining-${it.id}" name="remaining" type="number" min="0" step="${it.unit==='items' ? '1' : '.1'}" required value="${Math.round(amount)}"><button class="pill prominent sm" type="submit">Update</button></div>
+    ${it.unit!=='items' ? `<div class="batch-actions"><button class="linkish" type="button" data-some="${it.id}" data-frac=".5">Half the original amount</button><button class="linkish" type="button" data-some="${it.id}" data-frac=".25">A quarter</button></div>` : ''}
+    <div class="batch-actions"><button class="linkish" type="button" data-gone="${it.id}">All gone</button><button class="linkish" type="button" data-unask="${it.id}">Cancel</button></div>
+  </form>` : '';
+  return `<div class="batch-row" data-id="${it.id}">
+    <div class="batch-line"><strong>${esc(it.variety)}</strong><span class="batch-amount">${quantity}</span></div>
+    <div class="batch-line batch-date"><span class="freshness-dot ${levelForDays(dl)}"></span><span>${esc(timeLabel(dl))}</span><time datetime="${dateValue(it.expiry)}">${new Date(it.expiry).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}</time></div>
+    ${check ? '<p class="checkin-note">Estimated empty. Still have some?</p>' : ''}
+    <div class="batch-actions"><button class="linkish" type="button" data-ask="${it.id}" aria-label="Check quantity: ${esc(label)}">${check ? 'Still have some' : 'Check quantity'}</button>
+      ${check ? `<button class="linkish" type="button" data-gone="${it.id}">All gone</button><button class="linkish" type="button" data-shop-batch="${it.id}">Add to list</button>` : ''}
+      <button class="circle sm del" type="button" data-remove="${it.id}" aria-label="Remove batch: ${esc(label)}">${ICON.xSm}</button>
+    </div>${options}</div>`;
 }
 function renderPanel() {
-  const mem = focusIndexIn(el.panelBody, '.checkin, .prow');
-  const groups = { checkin: [], soon: [], fresh: [], low: [] };
-  for (const it of state.pantry) {
-    if (needsCheckin(it)) { groups.checkin.push(it); continue; }
-    const f = freshness(it);
-    if (f.mode === 'time' && f.level !== 'green') groups.soon.push(it);
-    else if (f.mode === 'amount' && f.level !== 'green') groups.low.push(it);
-    else groups.fresh.push(it);
+  for(const tab of ['pantry','shopping']) {
+    const button=$('#tab-'+tab),active=state.panelTab===tab;
+    button.setAttribute('aria-selected',String(active));button.tabIndex=active ? 0 : -1;
   }
-  const byUrgency = (a, b) => freshness(a).urgency - freshness(b).urgency;
-  groups.soon.sort(byUrgency); groups.low.sort(byUrgency); groups.fresh.sort((a, b) => daysLeft(a) - daysLeft(b));
-  const section = (title, items) => items.length ? `<section class="psection"><div class="phead"><span class="eyebrow">${title}</span><small>${items.length}</small></div>${items.map(prowHTML).join('')}</section>` : '';
-  const checkin = groups.checkin.map(it => {
-    // days since the estimate crossed the same "out" threshold the check-in uses, never positive
-    const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / it.burn) - (Date.now() - it.purchase) / DAY)) : 0;
-    const when = it.deducted > 0 ? 'used up cooking' : ranOut === 0 ? 'we estimate it ran out today' : ranOut === -1 ? 'we estimate it ran out yesterday' : `we estimate it ran out ${-ranOut} days ago`;
-    if (it.asking) {
-      return `<div class="checkin" data-id="${it.id}">
-        <div class="eyebrow">How much ${esc(it.name.toLowerCase())} is left?</div>
-        <div class="opts">
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".5">About half</button>
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".25">About a quarter</button>
-          <button class="pill glass sm" type="button" data-some="${it.id}" data-frac=".1">Almost none</button>
-          <button class="pill glass sm" type="button" data-gone="${it.id}">None, it’s gone</button>
-          <button class="linkish" type="button" data-unask="${it.id}">Back</button>
-        </div></div>`;
-    }
-    return `<div class="checkin" data-id="${it.id}">
-      <div class="eyebrow">Still have this?</div>
-      <div class="item"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}${when}</small></div>
-      <div class="opts">
-        <button class="pill glass sm" type="button" data-gone="${it.id}">All gone</button>
-        <button class="pill prominent sm" type="button" data-ask="${it.id}">Still have some</button>
-      </div></div>`;
-  }).join('');
-  el.panelBody.innerHTML = checkin + section('Use soon', groups.soon) + section('Running low', groups.low) + section('Fresh', groups.fresh)
-    || '<p class="empty-note">Nothing here yet. Scan a receipt or add something by hand.</p>';
-  restoreFocusIn(el.panelBody, '.checkin, .prow', mem, el.panel);
+  el.panelBody.setAttribute('aria-labelledby','tab-'+state.panelTab);
+  $('#btn-add').hidden=state.panelTab!=='pantry';
+  $('#pantry-toolbar').hidden=state.panelTab!=='pantry';
+  $('#shopping-form').hidden=state.panelTab!=='shopping';
+  if(state.panelTab==='shopping')return renderShopping();
+  const mem=focusIndexIn(el.panelBody,'.batch-row');
+  el.panelBody.innerHTML=groupPantry(state.pantry).map(group=>{
+    const sameUnit=new Set(group.batches.map(x=>x.unit)).size===1,total=group.batches.reduce((n,x)=>n+current(x),0);
+    return `<section class="food-group" aria-label="${esc(group.name)}">
+      <div class="food-heading"><h3>${esc(group.name)}</h3><span>${sameUnit ? `${group.batches.some(x=>x.burn>0) ? '≈ ' : ''}${formatAmount(total)} ${group.batches[0].unit} · ` : ''}${plural(group.batches.length,'batch','batches')}</span></div>
+      ${group.batches.map(batchHTML).join('')}</section>`;
+  }).join('') || '<p class="empty-note">No food yet. Add a batch or scan a receipt.</p>';
+  restoreFocusIn(el.panelBody,'.batch-row',mem,el.panel);
+}
+function renderShopping() {
+  const mem=focusIndexIn(el.panelBody,'.shopping-row');
+  const items=[...state.shopping].sort((a,b)=>Number(a.checked)-Number(b.checked));
+  el.panelBody.innerHTML=items.length ? `<p class="batch-note">${state.shopping.filter(x=>!x.checked).length} to buy. Check items off as you shop.</p>`+items.map(item=>`<div class="shopping-row ${item.checked ? 'checked' : ''}" data-id="${item.id}">
+    <label><input class="chk" type="checkbox" data-shop-check="${item.id}" ${item.checked ? 'checked' : ''}><span><strong>${esc(item.name)}</strong><small>${formatAmount(item.amount)} ${esc(item.unit)}</small></span></label>
+    <button class="circle sm" type="button" data-shop-remove="${item.id}" aria-label="Remove ${esc(item.name)} from shopping list">${ICON.xSm}</button>
+  </div>`).join('')+`<button class="linkish clear-checked" type="button" data-clear-checked>Clear checked items</button>` : '<p class="empty-note">Your list is clear. Add an item above, or add missing ingredients from a recipe.</p>';
+  restoreFocusIn(el.panelBody,'.shopping-row',mem,el.panel);
+}
+function addToShopping(key,name,amount=1,unit='servings') {
+  return addShoppingItem(state.shopping,{key:foodCatalog.key(key),name,amount:Math.max(.1,Number(amount.toFixed(1))),unit});
+}
+function addMissing(dishId) {
+  let added=0;
+  for(const item of analyze(dishById(dishId)).missing)added+=Number(addToShopping(item.key,item.name,item.missing));
+  renderAll();toast(added ? `${plural(added,'ingredient')} added to list` : 'Already on your shopping list');
+}
+function addDepleted() {
+  let added=0;
+  for(const group of groupPantry(state.pantry))if(group.batches.every(it=>needsCheckin(it)||daysLeft(it)<0)) {
+    const c=catalog(group.key);added+=Number(addToShopping(group.key,group.name,c.servings,c.unit));
+  }
+  renderAll();toast(added ? `${plural(added,'food')} added to list` : 'Nothing new to add');
+}
+async function submitCheckin(id,style,value) {
+  if(state.busy)return;
+  const item=state.pantry.find(x=>x.id===id);if(!item)return;
+  state.busy=true;document.body.dataset.busy='true';syncInert();
+  try {
+    const updated=await checkIn(item,style,value);
+    state.pantry=state.pantry.flatMap(x=>x.id===id ? updated ? [updated] : [] : [x]);
+    renderAll();toast('Quantity updated',updated ? 'Your estimate will adjust from this check-in.' : 'Batch marked as gone.');
+  }catch(error){toast('Couldn’t update quantity',error.message,'Your batch has not been changed here.');}
+  finally{state.busy=false;document.body.dataset.busy='false';syncInert();}
 }
 
 /* ---------- toast ---------- */
@@ -891,7 +880,7 @@ $('#btn-scan').addEventListener('click', openScanUpload);
 $('#btn-scan-2').addEventListener('click', openScanUpload);
 $('#empty-drop').addEventListener('click', () => el.file.click());   // "click to browse" means the file picker
 $('#empty-sample').addEventListener('click', () => startProcessing(null));
-$('#btn-pantry').addEventListener('click', () => (state.panelOpen ? closePanel() : openPanel()));
+$('#btn-pantry').addEventListener('click', () => {state.panelTab='pantry';state.panelOpen ? closePanel() : openPanel();});
 $('#btn-close-panel').addEventListener('click', closePanel);
 $('#btn-tonight').addEventListener('click', openTonight);
 $('#btn-skip').addEventListener('click', () => commit('skip'));
@@ -909,7 +898,7 @@ $('#btn-reset').addEventListener('click', () => {
   toast(fresh ? 'Demo pantry loaded' : 'Pantry cleared', fresh ? plural(state.pantry.length, 'item') : '');
 });
 $('#btn-signout').hidden = !configured;
-$('#btn-signout').addEventListener('click', () => signOut().then(() => location.replace('../login/')));
+$('#btn-signout').addEventListener('click', async () => {try {await flushState();await signOut();location.replace('../login/');} catch {toast('Not signed out','Retry saving your changes before signing out.');}});
 // Hover preview of the swipe overlays: mouse only, a touch tap would leave it stuck
 ['cook', 'skip'].forEach(k => {
   const b = $(`#btn-${k}`);
@@ -945,6 +934,7 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
+  if (t.dataset.shopMissing) return addMissing(t.dataset.shopMissing);
 });
 el.sheet.addEventListener('submit', e => {
   const form = e.target.closest('form[data-edit]');
@@ -954,49 +944,74 @@ el.sheet.addEventListener('submit', e => {
   if (l) {
     l.name = form.name.value.trim() || l.name;
     l.qty = form.qty.value.trim();
-    l.key = CATALOG[l.name.toLowerCase()] ? l.name.toLowerCase() : l.key;
+    l.key = catalog(l.name).key;
+    l.variety = form.variety.value.trim() || 'Regular';
+    l.expiry = form.expiry.value;
     l.editing = false; l.fixed = true;
   }
   renderReview();
 });
 el.sheet.addEventListener('change', e => { if (e.target.matches('#deduct input')) updateDeductSummary(); });
 
-// Panel
-el.panel.addEventListener('click', e => {
-  const t = e.target.closest('button');
-  if (!t) return;
-  const item = id => state.pantry.find(x => x.id === id);
-  if (t.dataset.remove) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.remove); return renderAll(); }
-  if (t.dataset.gone) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.gone); return renderAll(); }
-  if (t.dataset.ask) { const it = item(t.dataset.ask); if (it) it.asking = true; return renderPanel(); }
-  if (t.dataset.unask) { const it = item(t.dataset.unask); if (it) it.asking = false; return renderPanel(); }
-  if (t.dataset.some) {
-    const it = item(t.dataset.some);
-    if (it) {
-      // The check-in is a correction: reset the estimate from what they told us.
-      it.initial = Math.max(1, catalog(it.key).servings * parseFloat(t.dataset.frac));
-      it.purchase = Date.now(); it.deducted = 0; it.asking = false;
-      it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
-    }
-    return renderAll();
-  }
+// Pantry and shopping controls share the same side panel.
+el.panel.addEventListener('click',e=>{
+  const t=e.target.closest('button');if(!t || state.busy)return;
+  const item=id=>state.pantry.find(x=>x.id===id);
+  if(t.dataset.remove){state.pantry=state.pantry.filter(x=>x.id!==t.dataset.remove);return renderAll();}
+  if(t.dataset.gone)return submitCheckin(t.dataset.gone,'empty');
+  if(t.dataset.ask){const it=item(t.dataset.ask);if(it)it.asking=true;renderPanel();$('#remaining-'+t.dataset.ask)?.focus();return;}
+  if(t.dataset.unask){const it=item(t.dataset.unask);if(it)it.asking=false;return renderPanel();}
+  if(t.dataset.some)return submitCheckin(t.dataset.some,'percent',Number(t.dataset.frac));
+  if(t.dataset.shopBatch){const it=item(t.dataset.shopBatch),c=catalog(it.key);addToShopping(it.key,it.name,c.servings,c.unit);renderAll();return toast('Added to shopping list');}
+  if(t.dataset.shopRemove){state.shopping=state.shopping.filter(x=>x.id!==t.dataset.shopRemove);return renderAll();}
+  if(t.hasAttribute('data-clear-checked')){state.shopping=state.shopping.filter(x=>!x.checked);return renderAll();}
 });
-$('#btn-add').addEventListener('click', () => {
-  const f = $('#add-form');
-  f.hidden = !f.hidden;
-  $('#btn-add').setAttribute('aria-expanded', String(!f.hidden));
-  if (!f.hidden) $('#add-name').focus();
+el.panel.addEventListener('change',e=>{
+  if(e.target.dataset.shopCheck){const it=state.shopping.find(x=>x.id===e.target.dataset.shopCheck);if(it)it.checked=e.target.checked;renderAll();}
 });
-$('#add-form').addEventListener('submit', e => {
-  e.preventDefault();
-  const name = $('#add-name').value.trim();
-  if (!name) return;
-  const key = name.toLowerCase();
-  const { merged } = upsert(name.charAt(0).toUpperCase() + name.slice(1), key, $('#add-qty').value.trim());
-  $('#add-name').value = ''; $('#add-qty').value = '';
-  renderAll();
-  toast(`${name} ${merged ? 'updated' : 'added'}`);
+el.panel.addEventListener('submit',e=>{
+  const form=e.target.closest('[data-checkin]');if(!form)return;
+  e.preventDefault();submitCheckin(form.dataset.checkin,'count',Number(form.remaining.value));
 });
+function selectPanelTab(tab){state.panelTab=tab;$('#add-form').hidden=true;$('#btn-add').setAttribute('aria-expanded','false');renderPanel();}
+for(const tab of ['pantry','shopping']) {
+  $('#tab-'+tab).addEventListener('click',()=>selectPanelTab(tab));
+  $('#tab-'+tab).addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const next=e.key==='Home' ? 'pantry' : e.key==='End' ? 'shopping' : tab==='pantry' ? 'shopping' : 'pantry';selectPanelTab(next);$('#tab-'+next).focus();}});
+}
+$('#btn-shopping').addEventListener('click',()=>{state.panelTab='shopping';openPanel();});
+$('#btn-depleted').addEventListener('click',addDepleted);
+$('#btn-undo').addEventListener('click',undoLastCook);
+$('#btn-add').addEventListener('click',()=>{
+  const f=$('#add-form');f.hidden=!f.hidden;$('#btn-add').setAttribute('aria-expanded',String(!f.hidden));
+  if(!f.hidden){prefillFood();$('#add-name').focus();}
+});
+function prefillFood(){
+  const c=catalog($('#add-name').value);
+  $('#add-qty').value=c.servings;$('#add-unit').value=c.unit;
+  $('#add-variety').value=c.variety;$('#add-expiry').value=dateValue(Date.now()+c.shelf*DAY);
+  $('#food-hint').textContent=c.food ? `Suggested from ${c.food.name.toLowerCase()}. Adjust the amount and date to match this batch.` : 'Custom food. Set the amount and expiration date for this batch.';
+}
+$('#add-name').addEventListener('change',prefillFood);
+$('#add-form').addEventListener('submit',e=>{
+  e.preventDefault();const name=$('#add-name').value.trim();if(!name)return;
+  const amount=Number($('#add-qty').value),expiry=expiryFromDate($('#add-expiry').value);
+  if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(expiry))return;
+  const c=catalog(name);
+  upsert(name,c.key,c.qty,'',{amount,unit:$('#add-unit').value,variety:$('#add-variety').value.trim()||'Regular',expiry});
+  $('#add-form').reset();$('#add-form').hidden=true;$('#btn-add').setAttribute('aria-expanded','false');
+  renderAll();toast('Batch added',c.name);
+});
+$('#shopping-form').addEventListener('submit',e=>{
+  e.preventDefault();const name=$('#shop-name').value.trim();if(!name)return;
+  const c=catalog(name),added=addToShopping(c.key,c.name,Number($('#shop-amount').value),$('#shop-unit').value);
+  $('#shopping-form').reset();renderAll();$('#shop-name').focus();if(!added)toast('Already on your shopping list');
+});
+subscribe(status=>{
+  for(const label of $$('[data-save-label]'))label.textContent=status.message;
+  for(const button of $$('[data-retry-save]'))button.hidden=status.phase!=='error';
+  document.body.dataset.saveState=status.phase;
+});
+for(const button of $$('[data-retry-save]'))button.addEventListener('click',()=>retrySave().catch(()=>{}));
 
 // Keyboard: arrows drive the deck, Escape closes whatever is open (even from inside a field)
 document.addEventListener('keydown', e => {
@@ -1031,15 +1046,22 @@ fit();
 
 /* ---------- go ---------- */
 syncInert();
-const session = await requireAuth('../login/');   // bounces to the login page when configured and signed out
-const saved = await loadState();
-if (saved) {
-  state.pantry = saved.pantry;
-  state.skipped = new Set(saved.skipped);
-  state.cooked = new Set(saved.cooked);
-  state.chosen = new Set(saved.chosen);
-} else {
-  state.pantry = seedPantry();
+async function init(){
+  try {
+    const session=await requireAuth('../login/');
+    if(configured && !session)return;
+    const saved=await loadState();
+    try{foodCatalog=createFoodCatalog(await loadFoods());}
+    catch{$('#catalog-status').textContent='Food suggestions are using offline defaults.';}
+    $('#food-options').innerHTML=foodCatalog.foods.map(f=>`<option value="${esc(f.name)}"></option>`).join('');
+    if(saved){
+      state.pantry=saved.pantry.map(it=>({...it,key:foodCatalog.key(it.key),name:catalog(it.key).name,foodId:it.foodId || catalog(it.key).foodId}));
+      state.skipped=new Set(saved.skipped);state.cooked=new Set(saved.cooked);state.chosen=new Set(saved.chosen);
+      state.shopping=saved.shopping || [];state.cookLogs=saved.cookLogs || [];state.receipts=saved.receipts || [];
+    }else state.pantry=seedPantry();
+    state.ready=true;$('#load-error').hidden=true;renderAll({enter:true,save:!saved});syncInert();document.body.dataset.appReady='true';
+    window.pantry={state,drag,session};
+  }catch(error){$('#load-error').hidden=false;$('#load-error-message').textContent='Your pantry could not be loaded. Retry when your connection is back.';console.warn('[pantry] Load failed',error);}
 }
-renderAll({ enter: true });
-window.pantry = { state, drag, session };   // module scope hides these; handy in the console
+$('#btn-retry-load').addEventListener('click',init);
+await init();
