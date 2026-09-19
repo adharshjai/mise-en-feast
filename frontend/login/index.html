@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Pantry</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="login.css">
+<script src="../shared/config.js"></script>
+</head>
+<body>
+<div class="ambient" aria-hidden="true"></div>
+
+<header class="topbar">
+  <a class="linkish back" href="../">&larr;&nbsp; Back</a>
+</header>
+
+<main class="stage">
+  <section class="auth glass" aria-labelledby="auth-title">
+    <a class="wordmark" href="../" aria-label="Pantry home">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF7A1A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11h18"/><path d="M4 11a8 8 0 0 0 16 0"/><path d="M15 3l-3 8"/></svg>
+      <span>Pantry</span>
+    </a>
+
+    <h1 id="auth-title">Welcome back</h1>
+    <p class="lede" id="auth-lede">Sign in and your pantry follows you.</p>
+
+    <!-- Shown only when shared/config.js is still empty -->
+    <div class="notice" id="not-configured" hidden>
+      <p>Supabase isn't connected yet. Add your project URL and anon key to <code>shared/config.js</code>.</p>
+      <a class="pill prominent full" href="../app/">Continue in demo mode</a>
+    </div>
+
+    <!-- Sign in / create account -->
+    <form id="auth-form" novalidate>
+      <fieldset id="auth-fields">
+        <legend class="sr-only">Sign in or create an account</legend>
+
+        <div class="seg" role="group" aria-label="Sign in or create account">
+          <button class="seg-btn" type="button" id="mode-signin" aria-pressed="true">Sign in</button>
+          <button class="seg-btn" type="button" id="mode-signup" aria-pressed="false">Create account</button>
+        </div>
+
+        <div class="fieldrow">
+          <label for="email">Email</label>
+          <input class="field tall" id="email" name="email" type="email" autocomplete="email" inputmode="email" spellcheck="false" placeholder="you@example.com" required>
+        </div>
+        <div class="fieldrow">
+          <label for="password">Password</label>
+          <input class="field tall" id="password" name="password" type="password" autocomplete="current-password" minlength="6" placeholder="At least 6 characters" required>
+        </div>
+
+        <p class="error" id="form-error" role="alert" hidden></p>
+
+        <button class="pill prominent full" id="btn-continue" type="submit">
+          <span class="label">Continue</span>
+        </button>
+
+        <div class="divider" aria-hidden="true"><span>or</span></div>
+
+        <button class="pill glass full" id="btn-google" type="button">
+          <span class="label">Continue with Google</span>
+        </button>
+        <button class="linkish accent magic" id="btn-magic" type="button">Email me a magic link</button>
+      </fieldset>
+    </form>
+
+    <!-- Inline confirmation after a magic link / sign-up email -->
+    <div class="sent" id="sent" hidden>
+      <div class="sent-mark" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+      </div>
+      <h2 id="sent-title">Check your inbox</h2>
+      <p id="sent-text">We sent a sign-in link to your email. Open it on this device to continue.</p>
+      <button class="linkish" id="btn-sent-back" type="button">Use a different email</button>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="login.js"></script>
+</body>
+</html>

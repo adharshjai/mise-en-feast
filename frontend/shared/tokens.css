@@ -1,0 +1,119 @@
+/* Pantry shared tokens: warm dark base, one accent, glass on the navigation layer only.
+   Imported by app/styles.css, the landing page and the login page. */
+
+:root {
+  --bg: #12100E;
+  --surface: #1C1917;
+  --text: #F4EFE8;
+  --text-2: #A8A29E;
+  --text-3: #8F8880;
+  --accent: #FF7A1A;
+  --on-accent: #1A0E05;
+  --slate: #64748B;
+  --green: #3DD68C;
+  --yellow: #F5C242;
+  --red: #FF5A4E;
+  --radius: 24px;
+  --font: "Outfit", "Avenir Next", "Helvetica Neue", sans-serif;
+  --spring: cubic-bezier(.2, .9, .25, 1.25);
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --card-w: 420px;
+  --card-h: 580px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+button { font: inherit; color: inherit; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: #FFA05A; }
+h1, h2, h3, p { margin: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.hidden { display: none !important; }
+[hidden] { display: none !important; }
+.grow { flex-grow: 1; }
+
+.ambient {
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(900px 620px at 12% -5%, rgba(92, 104, 130, .22), transparent 60%),
+    radial-gradient(760px 640px at 92% 105%, rgba(255, 122, 26, .14), transparent 60%);
+}
+
+/* ---------- materials ---------- */
+.glass {
+  background: linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.035) 45%, rgba(255,255,255,.07));
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
+  backdrop-filter: blur(28px) saturate(170%);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.22),
+    inset 0 -1px 0 rgba(0,0,0,.35),
+    inset 1px 0 0 rgba(255,255,255,.05),
+    0 1px 2px rgba(0,0,0,.35),
+    0 14px 40px rgba(0,0,0,.35);
+}
+.prominent {
+  background: linear-gradient(135deg, #FFA45C, #FF7A1A 55%, #F26A0C);
+  color: var(--on-accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.5),
+    inset 0 -2px 6px rgba(120,40,0,.35),
+    0 1px 2px rgba(0,0,0,.35),
+    0 12px 32px rgba(255,122,26,.35);
+}
+.card-shadow, .card {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    0 2px 4px rgba(0,0,0,.3),
+    0 14px 28px rgba(0,0,0,.35),
+    0 48px 90px rgba(0,0,0,.45);
+}
+
+/* ---------- controls ---------- */
+.pill, .circle {
+  border: 0; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  border-radius: 999px; transition: transform .18s var(--spring), box-shadow .18s ease, background .18s ease, color .18s ease;
+}
+.pill { height: 40px; padding: 0 16px; font-size: 14px; font-weight: 600; white-space: nowrap; }
+.pill.prominent { padding: 0 18px 0 14px; font-weight: 700; }
+.pill.ghost { background: transparent; color: var(--text); font-weight: 500; }
+.pill.lg { height: 48px; padding: 0 22px 0 18px; font-size: 15px; }
+.pill.sm { height: 34px; padding: 0 14px; font-size: 13px; }
+.pill.faux { pointer-events: none; height: 44px; margin-top: 8px; }
+.pill.glass { color: var(--text); }
+.circle { width: 56px; height: 56px; padding: 0; color: var(--text); }
+.circle.sm { width: 40px; height: 40px; }
+.circle.big { width: 68px; height: 68px; }
+.circle.muted { color: var(--text-2); }
+.pill:hover, .circle:hover { transform: translateY(-2px); }
+.glass.pill:hover, .glass.circle:hover, .glass:is(button):hover {
+  background: linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.07) 45%, rgba(255,255,255,.11));
+  color: var(--text);
+}
+.ghost:hover { background: rgba(255,255,255,.08); }
+.prominent:hover {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.55), inset 0 -2px 6px rgba(120,40,0,.35), 0 1px 2px rgba(0,0,0,.35), 0 16px 40px rgba(255,122,26,.5);
+}
+.pill:active, .circle:active { transform: translateY(0) scale(.97); }
+:is(button, a, input, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.linkish { background: none; border: 0; padding: 4px 6px; cursor: pointer; color: var(--text-2); font-size: 14px; font-weight: 500; border-radius: 8px; }
+.linkish:hover { color: var(--text); }
+.linkish.accent { color: var(--accent); font-weight: 600; }
+.linkish.accent:hover { color: #FFA05A; }
+.linkish.dim { color: var(--text-3); font-size: 13px; }
+.field {
+  height: 40px; padding: 0 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.25); color: var(--text); font: inherit; font-size: 14px; min-width: 0;
+}
+.field:focus { outline: none; border-color: var(--accent); }
+.field.short { width: 84px; }
+

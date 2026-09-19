@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pantry</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="ambient" aria-hidden="true"></div>
+
+<header class="topbar">
+  <a class="wordmark" href="../" id="home" aria-label="Pantry home">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF7A1A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11h18"/><path d="M4 11a8 8 0 0 0 16 0"/><path d="M15 3l-3 8"/></svg>
+    <span>Pantry</span>
+  </a>
+  <nav class="glass pillbar" aria-label="Primary">
+    <button class="pill glass tonight" id="btn-tonight" type="button" hidden>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+      <span>Tonight</span>
+    </button>
+    <button class="pill ghost" id="btn-pantry" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="panel">0 items</button>
+    <button class="pill prominent" id="btn-scan" type="button">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      <span>Scan</span>
+    </button>
+  </nav>
+</header>
+
+<main class="stage">
+  <!-- Home: the swipe deck -->
+  <section id="deck-screen" class="screen">
+    <p class="caption" id="deck-caption">Sorted by what’s expiring first</p>
+    <div class="deck" id="deck"></div>
+    <div class="actions">
+      <div class="action">
+        <button class="circle glass muted" id="btn-skip" type="button" aria-label="Skip this dish">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+        <span class="hint">&larr;&nbsp; skip</span>
+      </div>
+      <div class="action">
+        <button class="circle glass" id="btn-details" type="button" aria-label="Open recipe details">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.5"/></svg>
+        </button>
+        <span class="hint">&uarr;&nbsp; details</span>
+      </div>
+      <div class="action">
+        <button class="circle prominent big" id="btn-cook" type="button" aria-label="Cook this dish">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+        </button>
+        <span class="hint">&rarr;&nbsp; cook</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- End of deck -->
+  <section id="end-screen" class="screen hidden">
+    <div class="state">
+      <div class="state-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+      </div>
+      <h2>That’s everything we can make right now</h2>
+      <p>Scan another receipt for new dishes, or reshuffle to see the ones you skipped.</p>
+      <div class="row-btns">
+        <button class="pill prominent lg" id="btn-scan-2" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+          <span>Scan another receipt</span>
+        </button>
+        <button class="pill glass lg" id="btn-reshuffle" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+          <span>Reshuffle</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- First run: the card is the upload zone -->
+  <section id="empty-screen" class="screen hidden">
+    <button class="glass drop-card drop" id="empty-drop" type="button">
+      <span class="icon-ring">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+      </span>
+      <span class="drop-title">Scan a receipt and we’ll tell you what to cook.</span>
+      <span class="drop-sub">Drop a receipt here or click to browse. Photos and PDFs both work.</span>
+      <span class="pill prominent faux">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+        <span>Scan a receipt</span>
+      </span>
+    </button>
+    <button class="linkish" id="empty-sample" type="button">Or try a sample receipt</button>
+  </section>
+</main>
+
+<footer class="foot">
+  <button class="linkish dim" id="btn-signout" type="button" hidden>Sign out</button>
+  <button class="linkish dim" id="btn-reset" type="button">Start over</button>
+</footer>
+
+<!-- Screen-reader only: which dish is on top. Lives outside the screens so it is never display:none. -->
+<p class="sr-only" id="deck-status" role="status" aria-live="polite"></p>
+
+<!-- Overlays -->
+<div class="veil" id="veil" hidden></div>
+<div class="sheet glass" id="sheet" role="dialog" aria-modal="true" tabindex="-1" hidden></div>
+
+<aside class="panel glass" id="panel" role="dialog" aria-modal="true" aria-label="Pantry" aria-hidden="true" tabindex="-1" inert>
+  <div class="panel-head">
+    <h2>Pantry</h2>
+    <span class="count" id="panel-count">0 items</span>
+    <span class="grow"></span>
+    <button class="circle sm glass" id="btn-add" type="button" aria-label="Add an item by hand" aria-expanded="false">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="circle sm glass muted" id="btn-close-panel" type="button" aria-label="Close pantry">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <form class="add-form" id="add-form" hidden>
+    <label class="sr-only" for="add-name">Item name</label>
+    <input id="add-name" class="field" placeholder="Item, e.g. lemons" autocomplete="off" required>
+    <label class="sr-only" for="add-qty">Quantity</label>
+    <input id="add-qty" class="field short" placeholder="Qty" autocomplete="off">
+    <button class="pill prominent" type="submit">Add</button>
+  </form>
+  <div class="panel-body scroll" id="panel-body"></div>
+</aside>
+
+<div class="toast glass" id="toast" role="status" aria-live="polite"></div>
+
+<!-- Kept in the DOM and focusable; app.js moves it inside the dropzone while the upload sheet is open -->
+<input type="file" id="file-input" class="sr-only" accept="image/*,.pdf">
+
+<script src="../shared/config.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
