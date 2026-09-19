@@ -7,12 +7,11 @@
 <meta name="description" content="Pantry fills itself from your grocery receipts and tells you what to cook, ordered by what is expiring first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;1,8..60,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="shared/tokens.css">
 <link rel="stylesheet" href="landing.css">
 </head>
 <body>
-<div class="ambient" aria-hidden="true"></div>
 
 <header class="topbar wrap">
   <a class="wordmark" href="./" aria-label="Pantry home">
@@ -31,199 +30,169 @@
 <main>
   <!-- Hero -->
   <section class="hero wrap" aria-labelledby="hero-title">
-    <div class="hero-copy">
-      <h1 id="hero-title">A pantry that fills itself and tells you what to cook.</h1>
-      <p class="lede">Photograph a grocery receipt and Pantry reads what you bought, works out how long it lasts, and deals you dishes you can make right now, ordered by what is expiring first.</p>
-      <div class="row-btns">
-        <a class="pill prominent lg go" href="login/">
-          <span>Get started</span>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
-        </a>
-        <a class="pill glass lg plain" href="app/">Try the demo</a>
-      </div>
+    <h1 id="hero-title">A pantry that fills <em>itself</em>.</h1>
+    <p class="lede">Photograph a grocery receipt. Pantry reads what you bought, works out how long each item lasts, and tells you what to cook before it goes bad.</p>
+    <div class="row-btns">
+      <a class="pill prominent lg go" href="login/">
+        <span>Get started</span>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+      </a>
+      <a class="pill glass lg plain" href="app/">Try the demo</a>
     </div>
+  </section>
 
-    <div class="hero-visual">
-      <div class="preview" role="img" aria-label="Preview of the app's home screen: a dish card for Spinach and garlic pasta, 20 minutes, 2 servings, easy, flagged because your spinach has 2 days left, with all six ingredients on hand and the skip, details and cook buttons underneath. Two more dish cards wait behind it.">
-        <div class="deck-float">
-          <div class="deck">
-            <div class="card pos2">
-              <div class="card-img">
-                <img src="img/shakshuka.jpg" alt="" width="1260" height="960" draggable="false">
-              </div>
-              <div class="card-body">
-                <h2>Shakshuka</h2>
-                <div class="meta"><span>30 min</span><i></i><span>2 servings</span><i></i><span>Easy</span></div>
-              </div>
-            </div>
-            <div class="card pos1">
-              <div class="card-img">
-                <img src="img/friedrice.jpg" alt="" width="1260" height="960" draggable="false">
-              </div>
-              <div class="card-body">
-                <h2>Chicken fried rice</h2>
-                <div class="meta"><span>25 min</span><i></i><span>3 servings</span><i></i><span>Easy</span></div>
-              </div>
-            </div>
-            <div class="card pos0">
-              <div class="card-img">
-                <img src="img/pasta.jpg" alt="" width="1260" height="960" draggable="false">
-                <div class="badge glass red"><span class="dot"></span><span>Uses your spinach &middot; 2 days left</span></div>
-              </div>
-              <div class="card-body">
-                <h2>Spinach &amp; garlic pasta</h2>
-                <div class="meta"><span>20 min</span><i></i><span>2 servings</span><i></i><span>Easy</span></div>
-                <div class="chips">
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Spinach</span></span>
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Garlic</span></span>
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Spaghetti</span></span>
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Parmesan</span></span>
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Olive oil</span></span>
-                  <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Chili flakes</span></span>
-                </div>
-              </div>
+  <!-- The product, shown once: the real dish card from the app -->
+  <section class="product wrap" aria-label="The app's home screen">
+    <div class="preview" role="img" aria-label="Preview of the app's home screen: a dish card for Spinach and garlic pasta, 20 minutes, 2 servings, easy, flagged because your spinach has 2 days left, with all six ingredients on hand and the skip, details and cook buttons underneath. Two more dish cards wait behind it.">
+      <div class="deck">
+        <div class="card pos2">
+          <div class="card-img">
+            <img src="img/shakshuka.jpg" alt="" width="1260" height="960" draggable="false">
+          </div>
+          <div class="card-body">
+            <h2>Shakshuka</h2>
+            <div class="meta"><span>30 min</span><i></i><span>2 servings</span><i></i><span>Easy</span></div>
+          </div>
+        </div>
+        <div class="card pos1">
+          <div class="card-img">
+            <img src="img/friedrice.jpg" alt="" width="1260" height="960" draggable="false">
+          </div>
+          <div class="card-body">
+            <h2>Chicken fried rice</h2>
+            <div class="meta"><span>25 min</span><i></i><span>3 servings</span><i></i><span>Easy</span></div>
+          </div>
+        </div>
+        <div class="card pos0">
+          <div class="card-img">
+            <img src="img/pasta.jpg" alt="" width="1260" height="960" draggable="false">
+            <div class="badge glass red"><span class="dot"></span><span>Uses your spinach &middot; 2 days left</span></div>
+          </div>
+          <div class="card-body">
+            <h2>Spinach &amp; garlic pasta</h2>
+            <div class="meta"><span>20 min</span><i></i><span>2 servings</span><i></i><span>Easy</span></div>
+            <div class="chips">
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Spinach</span></span>
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Garlic</span></span>
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Spaghetti</span></span>
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Parmesan</span></span>
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Olive oil</span></span>
+              <span class="chip have"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Chili flakes</span></span>
             </div>
           </div>
         </div>
-        <div class="actions">
-          <div class="action">
-            <span class="circle glass muted faux">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-            </span>
-            <span class="hint">&larr;&nbsp; skip</span>
-          </div>
-          <div class="action">
-            <span class="circle glass faux">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.5"/></svg>
-            </span>
-            <span class="hint">&uarr;&nbsp; details</span>
-          </div>
-          <div class="action">
-            <span class="circle prominent big faux">
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
-            </span>
-            <span class="hint">&rarr;&nbsp; cook</span>
-          </div>
+      </div>
+      <div class="actions">
+        <div class="action">
+          <span class="circle glass muted faux">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </span>
+          <span class="hint">&larr;&nbsp; skip</span>
+        </div>
+        <div class="action">
+          <span class="circle glass faux">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.5"/></svg>
+          </span>
+          <span class="hint">&uarr;&nbsp; details</span>
+        </div>
+        <div class="action">
+          <span class="circle prominent big faux">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+          </span>
+          <span class="hint">&rarr;&nbsp; cook</span>
         </div>
       </div>
     </div>
   </section>
 
   <!-- How it works -->
-  <section class="section wrap" aria-labelledby="how-title">
-    <div class="section-head">
+  <section class="section rule wrap" id="how" aria-labelledby="how-title">
+    <div class="reading">
       <h2 class="title" id="how-title">How it works</h2>
-      <p class="sub">Receipt in, pantry out, dinner on screen.</p>
+      <ol class="steps">
+        <li class="step">
+          <span class="num" aria-hidden="true">01</span>
+          <div class="step-body">
+            <h3>Scan a receipt</h3>
+            <p>Photograph the receipt from your grocery run. Pantry reads the items, quantities, prices and the purchase date, so &ldquo;GV MLK 1GAL&rdquo; becomes &ldquo;Milk, 1 gal&rdquo;. Non-food lines are set aside, not deleted.</p>
+          </div>
+        </li>
+        <li class="step">
+          <span class="num" aria-hidden="true">02</span>
+          <div class="step-body">
+            <h3>Your pantry runs itself</h3>
+            <p>Every item gets an estimate of how long it lasts in a normal household and when it goes bad. Quantities fall on their own over time, so nobody logs anything. When an estimate hits zero, Pantry asks &ldquo;Still have this?&rdquo; instead of guessing, and buying the same thing again corrects the estimate.</p>
+            <figure class="panel" role="img" aria-label="Pantry rows with freshness bars: spinach, 5 ounces, 2 days left; milk, 1 gallon, 6 days left; jasmine rice, 2 pounds, about a year.">
+              <div class="prow">
+                <span class="name"><strong>Spinach</strong><small>5 oz</small></span>
+                <span class="fresh"><span class="bar red"><i style="width:14%"></i></span><small>2 days left</small></span>
+              </div>
+              <div class="prow">
+                <span class="name"><strong>Milk</strong><small>1 gal</small></span>
+                <span class="fresh"><span class="bar green"><i style="width:60%"></i></span><small>6 days left</small></span>
+              </div>
+              <div class="prow">
+                <span class="name"><strong>Jasmine rice</strong><small>2 lb</small></span>
+                <span class="fresh"><span class="bar green"><i style="width:96%"></i></span><small>about a year</small></span>
+              </div>
+            </figure>
+          </div>
+        </li>
+        <li class="step">
+          <span class="num" aria-hidden="true">03</span>
+          <div class="step-body">
+            <h3>Swipe to dinner</h3>
+            <p>From what is in the pantry, Pantry generates dishes you can make right now, ordered by what is expiring first. Swipe right to cook, left to skip. &ldquo;I made this&rdquo; takes the ingredients out, and you can untick anything you skipped.</p>
+          </div>
+        </li>
+      </ol>
     </div>
-    <ol class="steps">
-      <li class="card step">
-        <span class="num" aria-hidden="true">01</span>
-        <h3>Scan a receipt</h3>
-        <p>Photograph the receipt from your grocery run. Pantry reads the items, quantities, prices and the purchase date, so &ldquo;GV MLK 1GAL&rdquo; becomes &ldquo;Milk, 1 gal&rdquo;. Non-food lines are set aside, not deleted.</p>
-        <figure class="demo" role="img" aria-label="Receipt line GV MLK 1GAL, 3.48, becomes Milk, 1 gal. Receipt line PAPER TOWELS 6RL, 7.97, is set aside.">
-          <div class="rline">
-            <span class="raw"><span>GV MLK 1GAL</span><span>3.48</span></span>
-            <svg class="to" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-            <span class="parsed">Milk, 1 gal</span>
-          </div>
-          <div class="rline">
-            <span class="raw"><span>PAPER TOWELS 6RL</span><span>7.97</span></span>
-            <svg class="to" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-            <span class="parsed"><span class="chip missing">Set aside</span></span>
-          </div>
-        </figure>
-      </li>
-      <li class="card step">
-        <span class="num" aria-hidden="true">02</span>
-        <h3>Your pantry runs itself</h3>
-        <p>Every item gets an estimate of how long it lasts in a normal household and when it goes bad. The inventory drains on its own over time, so nobody logs anything. When an estimate hits zero, Pantry asks &ldquo;Still have this?&rdquo; instead of guessing, and buying the same thing again corrects the estimate.</p>
-        <figure class="demo" role="img" aria-label="Pantry rows with freshness bars: spinach, 5 ounces, 2 days left; milk, 1 gallon, 6 days left; jasmine rice, 2 pounds, 3 months left.">
-          <div class="prow">
-            <span class="name"><strong>Spinach</strong><small>5 oz</small></span>
-            <span class="fresh"><span class="bar red"><i style="width:14%"></i></span><small>2 days left</small></span>
-          </div>
-          <div class="prow">
-            <span class="name"><strong>Milk</strong><small>1 gal</small></span>
-            <span class="fresh"><span class="bar yellow"><i style="width:42%"></i></span><small>6 days left</small></span>
-          </div>
-          <div class="prow">
-            <span class="name"><strong>Jasmine rice</strong><small>2 lb</small></span>
-            <span class="fresh"><span class="bar green"><i style="width:92%"></i></span><small>3 months left</small></span>
-          </div>
-        </figure>
-      </li>
-      <li class="card step">
-        <span class="num" aria-hidden="true">03</span>
-        <h3>Swipe to dinner</h3>
-        <p>From what is in the pantry, Pantry generates dishes you can make right now, ordered by what is expiring first. Swipe right to cook, left to skip. &ldquo;I made this&rdquo; takes the ingredients out, and you can untick anything you skipped.</p>
-        <figure class="demo" role="img" aria-label="I made this: spinach and garlic are ticked and come out of the pantry; parmesan is unticked because it was skipped.">
-          <div class="drow">
-            <span class="chk on"></span>
-            <span class="name"><strong>Spinach</strong><small>5 oz</small></span>
-            <span class="amt">used</span>
-          </div>
-          <div class="drow">
-            <span class="chk on"></span>
-            <span class="name"><strong>Garlic</strong><small>2 cloves</small></span>
-            <span class="amt">used</span>
-          </div>
-          <div class="drow off">
-            <span class="chk"></span>
-            <span class="name"><strong>Parmesan</strong><small>1 oz</small></span>
-            <span class="amt">skipped</span>
-          </div>
-        </figure>
-      </li>
-    </ol>
   </section>
 
-  <!-- What makes it different -->
-  <section class="section wrap" aria-labelledby="diff-title">
-    <div class="section-head">
-      <h2 class="title" id="diff-title">What makes it different</h2>
-    </div>
-    <ul class="tiles">
-      <li class="card tile">
+  <!-- What it does differently -->
+  <section class="section rule wrap" aria-labelledby="diff-title">
+    <h2 class="title" id="diff-title">What it does differently</h2>
+    <ul class="grid3">
+      <li>
         <h3>Nothing to log</h3>
         <p>The pantry fills from your receipts and drains on its own over time. You never type in what you bought or what you used.</p>
       </li>
-      <li class="card tile">
+      <li>
         <h3>Expiring first</h3>
-        <p>Dishes are ordered by what is going bad soonest, so the thing with two days left is the first thing on the deck.</p>
+        <p>Dishes are ordered by what is going bad soonest. The thing with two days left is the first card on the deck.</p>
       </li>
-      <li class="card tile">
+      <li>
         <h3>Honest about uncertainty</h3>
-        <p>Shelf lives are estimates. When one hits zero, Pantry asks &ldquo;Still have this?&rdquo; instead of guessing, and buying the same thing again corrects the estimate.</p>
+        <p>Shelf lives are estimates, and Pantry treats them that way. When one runs out it asks &ldquo;Still have this?&rdquo; rather than guessing, and the next receipt corrects it.</p>
       </li>
     </ul>
   </section>
 
-  <!-- Closing CTA -->
-  <section class="section wrap" aria-labelledby="cta-title">
-    <div class="card cta-band">
-      <h2 class="title" id="cta-title">Dinner is already in your pantry.</h2>
-      <p>Scan one receipt and see what you can make tonight.</p>
-      <div class="row-btns">
-        <a class="pill prominent lg go" href="login/">
-          <span>Get started</span>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
-        </a>
-        <a class="pill glass lg plain" href="app/">Try the demo</a>
-      </div>
-    </div>
+  <!-- Closing -->
+  <section class="closing rule wrap" aria-labelledby="closing-title">
+    <h2 class="title" id="closing-title">Dinner is already in your kitchen.</h2>
+    <a class="pill prominent lg go" href="login/">
+      <span>Get started</span>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+    </a>
   </section>
 </main>
 
 <footer class="foot wrap">
-  <a class="wordmark" href="./" aria-label="Pantry home">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF7A1A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11h18"/><path d="M4 11a8 8 0 0 0 16 0"/><path d="M15 3l-3 8"/></svg>
-    <span>Pantry</span>
-  </a>
-  <nav class="foot-links" aria-label="Footer">
-    <a href="app/">Open the app</a>
-    <a href="login/">Sign in</a>
-  </nav>
-  <p class="built">Built for the [HACKATHON NAME] hackathon</p>
+  <div class="foot-row">
+    <a class="wordmark" href="./" aria-label="Pantry home">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF7A1A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11h18"/><path d="M4 11a8 8 0 0 0 16 0"/><path d="M15 3l-3 8"/></svg>
+      <span>Pantry</span>
+    </a>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="app/">Open the app</a>
+      <a href="login/">Sign in</a>
+    </nav>
+  </div>
+  <div class="foot-row small">
+    <p>Photos from Unsplash &mdash; credits in img/CREDITS.md</p>
+    <p>Built for the [HACKATHON NAME] hackathon</p>
+  </div>
 </footer>
 </body>
 </html>

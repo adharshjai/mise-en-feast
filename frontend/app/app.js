@@ -499,7 +499,8 @@ function openSheet(kind, html, cls = '') {
   el.sheet.hidden = false;
   el.veil.hidden = false;
   syncInert();
-  requestAnimationFrame(() => { el.sheet.classList.add('in'); el.veil.classList.add('in'); });
+  void el.sheet.offsetWidth;   // force a reflow so the transition runs even when animation frames are paused
+  el.sheet.classList.add('in'); el.veil.classList.add('in');
   setTimeout(() => el.sheet.focus({ preventScroll: true }), 50);   // focus the dialog itself; Tab moves into it
 }
 function closeSheet() {
@@ -804,7 +805,8 @@ function openPanel() {
   el.count.setAttribute('aria-expanded', 'true');
   el.veil.hidden = false;
   syncInert();
-  requestAnimationFrame(() => { el.panel.classList.add('in'); el.veil.classList.add('in'); });
+  void el.panel.offsetWidth;   // same reflow trick as openSheet
+  el.panel.classList.add('in'); el.veil.classList.add('in');
   setTimeout(() => el.panel.focus({ preventScroll: true }), 50);
 }
 function closePanel() {

@@ -71,9 +71,9 @@ body { overflow: hidden; }
 .badge.red { background: linear-gradient(135deg, rgba(255,90,78,.42), rgba(255,90,78,.20)); }
 .badge.yellow { background: linear-gradient(135deg, rgba(245,194,66,.40), rgba(245,194,66,.18)); }
 .badge.green { background: linear-gradient(135deg, rgba(61,214,140,.36), rgba(61,214,140,.16)); }
-.badge.red .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
-.badge.yellow .dot { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
-.badge.green .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.badge.red .dot { background: var(--red); }
+.badge.yellow .dot { background: var(--yellow); }
+.badge.green .dot { background: var(--green); }
 
 .overlay {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -165,7 +165,7 @@ body { overflow: hidden; }
 .receipt-lines div { display: flex; justify-content: space-between; gap: 12px; }
 .receipt-lines hr { width: 100%; height: 1px; border: 0; background: #d8d2c6; margin: 4px 0; }
 .receipt-lines .b { font-weight: 700; }
-.scanline { position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--accent); box-shadow: 0 0 18px 5px rgba(255,122,26,.55); animation: scan 2.4s ease-in-out infinite alternate; }
+.scanline { position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--accent); animation: scan 2.4s ease-in-out infinite alternate; }
 .receipt-tint { position: absolute; inset: 0; background: linear-gradient(rgba(255,122,26,0), rgba(255,122,26,.10)); pointer-events: none; }
 .steps { display: flex; flex-direction: column; gap: 26px; padding-top: 8px; flex-grow: 1; }
 .step { display: flex; align-items: flex-start; gap: 14px; }
@@ -203,8 +203,9 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .rrow.collapsed small { font-size: 13px; color: var(--text-3); }
 .rrow .chev { transition: transform .2s ease; }
 .rrow.open .chev { transform: rotate(90deg); }
-.rrow.nonfood { opacity: .6; }
-.rrow.nonfood .name strong { text-decoration: line-through; }
+/* set-aside lines are dimmed by colour, not opacity, so nothing drops below --text-3 */
+.rrow.nonfood .name strong { color: var(--text-2); text-decoration: line-through; }
+.rrow.nonfood .name small, .rrow.nonfood .qty { color: var(--text-3); }
 .summary { display: flex; align-items: center; justify-content: space-between; font-size: 14px; color: var(--text-2); }
 .summary b { color: var(--text); font-weight: 600; }
 
@@ -318,6 +319,12 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
   .topbar, .foot { padding: 0 20px; }
   .panel { width: min(420px, 100vw); }
   .detail-body { grid-template-columns: 1fr; }
+}
+/* phones: the receipt preview and its step list stack instead of sharing a 310px row */
+@media (max-width: 640px) {
+  .processing { flex-direction: column; align-items: center; gap: 20px; }
+  .receipt { width: min(250px, 100%); height: 300px; }
+  .steps { width: 100%; padding-top: 0; }
 }
 
 /* ---------- touch: no hover to reveal, bigger targets ---------- */
