@@ -122,6 +122,22 @@ function dishStats(dish) {
 }
 const money = v => `$${v.toFixed(2)}`;
 
+/* ---------- household profile (servings default + staples on hand) ---------- */
+const PROFILE_KEY = 'pantry.profile.v1';
+function loadProfile() { try { return JSON.parse(localStorage.getItem(PROFILE_KEY)) || {}; } catch { return {}; } }
+function saveProfile(p) { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch { /* private mode */ } }
+let profile = loadProfile();
+// Pantry staples we don't nag people to buy once they say they keep them stocked.
+const STAPLE_KEYS = new Set(['olive oil', 'oil', 'salt', 'pepper', 'black pepper', 'chili flakes', 'cumin', 'paprika', 'oregano', 'sugar', 'flour', 'butter', 'soy sauce']);
+// Scale the leading number in a display amount ("5 oz" -> "10 oz"); leave "a pinch" alone.
+const scaleAmt = (amt, f) => {
+  if (!f || f === 1) return amt;
+  return String(amt || '').replace(/^\s*(\d+(?:\.\d+)?)/, (m, n) => {
+    const v = parseFloat(n) * f;
+    return m.replace(n, Number.isInteger(v) ? String(v) : v.toFixed(1).replace(/\.0$/, ''));
+  });
+};
+
 const ing = (name, key, need, amt) => ({ name, key, need, amt });
 const DISHES = [
   {
@@ -491,10 +507,12 @@ function analyze(dish) {
   const ings = dish.ingredients.map(i => {
     const item = findItem(i.key);
     const avail = available(i.key);
-    return { ...i, item, avail, have: avail > 0 };
+    const have = avail > 0;
+    const staple = !have && !!profile.staples && STAPLE_KEYS.has(i.key);   // assumed on hand, not a "buy"
+    return { ...i, item, avail, have, staple };
   });
   const have = ings.filter(i => i.have);
-  const missing = ings.filter(i => !i.have);
+  const missing = ings.filter(i => !i.have && !i.staple);
   let urgent = null;
   for (const i of have) {
     const dl = daysLeft(i.item);
@@ -528,6 +546,8 @@ const state = {
   expanded: new Set(),      // pantry stack keys that are open
   sheet: null,
   sortMode: 'urgent',       // deck ordering, see SORTS
+  detailDishId: null,       // recipe open in the detail sheet
+  detailServings: 2,        // people the open recipe is scaled to
   panelOpen: false,
   leaving: false,
   sheetReturn: null,        // where keyboard focus goes back to when the sheet closes
@@ -581,6 +601,8 @@ function cardHTML(a) {
       <div class="stats"><span>${a.stats.kcal} cal</span><i></i><span>${a.stats.protein}g protein</span><i></i><span>${money(a.stats.cost)}/serving</span></div>
       <div class="chips">${a.ings.map(i => i.have
         ? `<span class="chip have">${ICON.checkSm}<span>${esc(i.name)}</span></span>`
+        : i.staple
+        ? `<span class="chip staple">${esc(i.name)}</span>`
         : `<span class="chip missing">${esc(i.name)}</span>`).join('')}</div>
       ${a.missing.length ? `<div class="missing-line">missing ${a.missing.length}: ${esc(a.missing.map(m => m.name.toLowerCase()).join(', '))}</div>` : ''}
     </div>
@@ -1022,34 +1044,43 @@ function addToPantry() {
 
 /* ---------- recipe detail and Made It ---------- */
 // Takes a deck analysis or a bare dish. The Tonight list is the one sheet allowed to open it sheet-to-sheet.
-function openDetail(a) {
-  if (!a || state.leaving) return;
-  if (state.sheet && state.sheet !== 'tonight') return;
-  a = analyze(a.dish || a);
+// Inner HTML for the recipe sheet, scaled to `people` (default from the household profile).
+function detailBody(a, people) {
   const d = a.dish;
-  openSheet('detail', `
+  const base = Math.max(1, d.servings || 1);
+  const factor = people / base;
+  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmt(i.amt, factor))}</span></div>`;
+  return `
     <div class="hero">
       <img src="${d.img}" alt="">
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
       ${closeBtn()}
       <div class="hero-text">
         <h2>${esc(d.name)}</h2>
-        <div class="meta"><span>${d.time}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i><span>${d.difficulty}</span>${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        <div class="meta"><span>${d.time}</span><i></i><span>${d.difficulty}</span>${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
       </div>
     </div>
     <div class="detail-body scroll">
+      <div class="servings">
+        <span class="eyebrow">Cooking for</span>
+        <div class="stepper" role="group" aria-label="People to cook for">
+          <button class="circle sm glass" type="button" data-serv="-1" aria-label="Fewer people"${people <= 1 ? ' disabled' : ''}>−</button>
+          <output>${plural(people, 'person', 'people')}</output>
+          <button class="circle sm glass" type="button" data-serv="1" aria-label="More people"${people >= 20 ? ' disabled' : ''}>+</button>
+        </div>
+      </div>
       <div class="nutri">
-        <div class="nstat"><strong>${a.stats.kcal}</strong><small>cal</small></div>
+        <div class="nstat"><strong>${a.stats.kcal}</strong><small>cal / serving</small></div>
         <div class="nstat"><strong>${a.stats.protein}g</strong><small>protein</small></div>
         <div class="nstat"><strong>${a.stats.fat}g</strong><small>fat</small></div>
         <div class="nstat"><strong>${a.stats.carbs}g</strong><small>carbs</small></div>
         <div class="nstat"><strong>${money(a.stats.cost)}</strong><small>per serving</small></div>
-        <div class="nstat"><strong>${money(a.stats.costTotal)}</strong><small>whole dish</small></div>
+        <div class="nstat"><strong>${money(a.stats.cost * people)}</strong><small>for ${plural(people, 'person', 'people')}</small></div>
       </div>
       <div class="ings">
         <div class="eyebrow">Ingredients</div>
-        ${a.have.map(i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`).join('')}
-        ${a.missing.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`).join('') : ''}
+        ${a.have.map(i => ing(i, 'have')).join('')}
+        ${a.missing.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => ing(i, 'need')).join('') : ''}
       </div>
       <div class="ings">
         <div class="eyebrow">Steps</div>
@@ -1059,7 +1090,52 @@ function openDetail(a) {
     <div class="sheet-foot">
       <button class="linkish" type="button" data-close>Back to deck</button>
       <button class="pill prominent lg" type="button" data-madeit="${d.id}">${ICON.checkMd}<span>I made this</span></button>
-    </div>`, 'w-720');
+    </div>`;
+}
+function openDetail(a) {
+  if (!a || state.leaving) return;
+  if (state.sheet && state.sheet !== 'tonight') return;
+  a = analyze(a.dish || a);
+  state.detailDishId = a.dish.id;
+  state.detailServings = clamp(Math.round(profile.household || a.dish.servings || 1), 1, 20);
+  openSheet('detail', detailBody(a, state.detailServings), 'w-720');
+}
+// Re-render the open recipe sheet in place (used by the servings stepper).
+function rerenderDetail() {
+  const d = dishById(state.detailDishId);
+  if (d) el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
+}
+
+/* ---------- first-run onboarding: household size + staples ---------- */
+let obDraft = { household: 2, staples: true };
+function onboardBody() {
+  return `
+    <div class="sheet-head"><h2>Welcome to Pantry</h2></div>
+    <form id="onboard-form" class="onboard">
+      <p class="ob-q">How many people are you usually cooking for?</p>
+      <div class="stepper big" role="group" aria-label="Household size">
+        <button class="circle glass" type="button" data-ob-serv="-1" aria-label="Fewer"${obDraft.household <= 1 ? ' disabled' : ''}>−</button>
+        <output>${plural(obDraft.household, 'person', 'people')}</output>
+        <button class="circle glass" type="button" data-ob-serv="1" aria-label="More"${obDraft.household >= 20 ? ' disabled' : ''}>+</button>
+      </div>
+      <p class="ob-q">Do you keep salt, oil &amp; pepper stocked?</p>
+      <div class="ob-toggle" role="group" aria-label="Staples on hand">
+        <button class="pill ${obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="1">Yes</button>
+        <button class="pill ${!obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="0">No</button>
+      </div>
+      <p class="ob-note">Sets your default recipe servings, and we won’t nag you to buy staples you already have. Change it anytime.</p>
+      <div class="sheet-foot">
+        <button class="linkish" type="button" data-ob-skip>Skip</button>
+        <button class="pill prominent lg" type="submit">Get started</button>
+      </div>
+    </form>`;
+}
+function openOnboarding() {
+  obDraft = { household: clamp(Math.round(profile.household || 2), 1, 20), staples: profile.staples !== false };
+  openSheet('onboard', onboardBody(), 'w-520');
+}
+function renderOnboarding() {
+  if (state.sheet === 'onboard') el.sheet.innerHTML = onboardBody();
 }
 // Tonight: one dish opens straight into its recipe; more than one gets a short list first.
 function openTonight() {
@@ -1344,11 +1420,23 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.fix) { const l = review.find(x => x.id === t.dataset.fix); if (l) l.fixed = true; return renderReview(); }
   if (t.dataset.editrow) { review.forEach(x => { x.editing = x.id === t.dataset.editrow; }); return renderReview(); }
   if (t.dataset.canceledit) { const l = review.find(x => x.id === t.dataset.canceledit); if (l) l.editing = false; return renderReview(); }
+  if (t.dataset.serv) { state.detailServings = clamp(state.detailServings + Number(t.dataset.serv), 1, 20); return rerenderDetail(); }
+  if (t.dataset.obServ) { obDraft.household = clamp(obDraft.household + Number(t.dataset.obServ), 1, 20); return renderOnboarding(); }
+  if (t.dataset.obStaples) { obDraft.staples = t.dataset.obStaples === '1'; return renderOnboarding(); }
+  if (t.hasAttribute('data-ob-skip')) { profile = { ...profile, onboarded: true }; saveProfile(profile); return closeSheet(); }
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
 });
 el.sheet.addEventListener('submit', e => {
+  if (e.target.id === 'onboard-form') {
+    e.preventDefault();
+    profile = { household: obDraft.household, staples: obDraft.staples, onboarded: true };
+    saveProfile(profile);
+    closeSheet();
+    renderAll();
+    return;
+  }
   const form = e.target.closest('form[data-edit]');
   if (!form) return;
   e.preventDefault();
@@ -1584,4 +1672,5 @@ if (saved) {
 populateFoodOptions();
 renderAll({ enter: true });
 refreshRecipes();
+if (!profile.onboarded) openOnboarding();   // first run: ask household size + staples
 window.pantry = { state, drag, session };   // module scope hides these; handy in the console
