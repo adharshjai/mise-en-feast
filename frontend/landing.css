@@ -156,3 +156,14 @@ h1 em { font-style: italic; }
   .foot { padding: 24px 0 40px; }
   .foot-row.small { flex-direction: column; align-items: flex-start; gap: 6px; }
 }
+
+/* ---------- signed-in state: the avatar replaces "Sign in" (same rules as the app) ---------- */
+.avatar {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 40px; height: 40px; border-radius: 50%; overflow: hidden; color: var(--text);
+  font-size: 16px; font-weight: 700; letter-spacing: -.01em;
+}
+.avatar img { position: absolute; inset: 2px; width: calc(100% - 4px); height: calc(100% - 4px); border-radius: 50%; object-fit: cover; pointer-events: none; }
+.avatar.lg { width: 48px; height: 48px; font-size: 19px; }
+a.avatar { color: var(--text); text-decoration: none; }
+a.avatar:hover { text-decoration: none; }
