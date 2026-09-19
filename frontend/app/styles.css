@@ -389,3 +389,20 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .ob-toggle .pill { flex: 1 1 auto; justify-content: center; height: 44px; }
 .ob-note { font-size: 13px; color: var(--text-3); line-height: 1.4; }
 .onboard .sheet-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+
+/* nicer native dropdowns: custom chevron, dark option list, dark date picker */
+select.field {
+  -webkit-appearance: none; appearance: none; padding-right: 30px; cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23A8A29E' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 12px;
+}
+select.field:hover { border-color: rgba(255,255,255,.22); }
+select.field option { background: #1C1917; color: var(--text); }
+.field.date { color-scheme: dark; cursor: pointer; }
+.add-form .field.date { flex: 0 0 auto; }
+
+/* onboarding cuisine chips */
+.ob-cuisines { display: flex; flex-wrap: wrap; gap: 8px; }
+.ob-chip { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.04); color: var(--text-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+.ob-chip:hover { border-color: rgba(255,255,255,.28); }
+.ob-chip.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }

@@ -365,12 +365,13 @@ async function refreshRecipes() {
   }
   const token = ++recipeRefreshToken;
   try {
-    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2 });
+    const request = (profile.cuisines && profile.cuisines.length) ? `Prefer ${profile.cuisines.join(', ')} cuisine` : null;
+    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2, request });
     if (token !== recipeRefreshToken) return liveDishes || [];
     let list = (data.recipes || []).map(dishFromApi);
     // Soften the filter once if nothing made the cut
     if (!list.length) {
-      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4 });
+      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4, request });
       if (token !== recipeRefreshToken) return liveDishes || [];
       list = (data.recipes || []).map(dishFromApi);
     }
@@ -1106,8 +1107,9 @@ function rerenderDetail() {
   if (d) el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
 }
 
-/* ---------- first-run onboarding: household size + staples ---------- */
-let obDraft = { household: 2, staples: true };
+/* ---------- first-run onboarding: household size + staples + cuisines ---------- */
+const CUISINES = ['Italian', 'Mexican', 'Asian', 'Mediterranean', 'Indian', 'American'];
+let obDraft = { household: 2, staples: true, cuisines: [] };
 function onboardBody() {
   return `
     <div class="sheet-head"><h2>Welcome to Pantry</h2></div>
@@ -1123,7 +1125,11 @@ function onboardBody() {
         <button class="pill ${obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="1">Yes</button>
         <button class="pill ${!obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="0">No</button>
       </div>
-      <p class="ob-note">Sets your default recipe servings, and we won’t nag you to buy staples you already have. Change it anytime.</p>
+      <p class="ob-q">Any cuisines you lean toward?</p>
+      <div class="ob-cuisines">
+        ${CUISINES.map(c => `<button class="ob-chip${obDraft.cuisines.includes(c) ? ' on' : ''}" type="button" data-ob-cuisine="${c}" aria-pressed="${obDraft.cuisines.includes(c)}">${c}</button>`).join('')}
+      </div>
+      <p class="ob-note">Sets your default recipe servings and cuisine leanings, and we won’t nag you to buy staples you already have. Change it anytime.</p>
       <div class="sheet-foot">
         <button class="linkish" type="button" data-ob-skip>Skip</button>
         <button class="pill prominent lg" type="submit">Get started</button>
@@ -1131,7 +1137,7 @@ function onboardBody() {
     </form>`;
 }
 function openOnboarding() {
-  obDraft = { household: clamp(Math.round(profile.household || 2), 1, 20), staples: profile.staples !== false };
+  obDraft = { household: clamp(Math.round(profile.household || 2), 1, 20), staples: profile.staples !== false, cuisines: Array.isArray(profile.cuisines) ? [...profile.cuisines] : [] };
   openSheet('onboard', onboardBody(), 'w-520');
 }
 function renderOnboarding() {
@@ -1423,6 +1429,7 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.serv) { state.detailServings = clamp(state.detailServings + Number(t.dataset.serv), 1, 20); return rerenderDetail(); }
   if (t.dataset.obServ) { obDraft.household = clamp(obDraft.household + Number(t.dataset.obServ), 1, 20); return renderOnboarding(); }
   if (t.dataset.obStaples) { obDraft.staples = t.dataset.obStaples === '1'; return renderOnboarding(); }
+  if (t.dataset.obCuisine) { const c = t.dataset.obCuisine, i = obDraft.cuisines.indexOf(c); if (i >= 0) obDraft.cuisines.splice(i, 1); else obDraft.cuisines.push(c); return renderOnboarding(); }
   if (t.hasAttribute('data-ob-skip')) { profile = { ...profile, onboarded: true }; saveProfile(profile); return closeSheet(); }
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
@@ -1431,10 +1438,11 @@ el.sheet.addEventListener('click', e => {
 el.sheet.addEventListener('submit', e => {
   if (e.target.id === 'onboard-form') {
     e.preventDefault();
-    profile = { household: obDraft.household, staples: obDraft.staples, onboarded: true };
+    profile = { household: obDraft.household, staples: obDraft.staples, cuisines: obDraft.cuisines, onboarded: true };
     saveProfile(profile);
     closeSheet();
     renderAll();
+    refreshRecipes();   // cuisine preference feeds the recipe request
     return;
   }
   const form = e.target.closest('form[data-edit]');
@@ -1604,22 +1612,28 @@ chatEl.log.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
 
+const isoDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const resetAddDefaults = () => { $('#add-expiry').value = isoDay(Date.now() + 7 * DAY); };   // default use-by is 7 days out
+
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
   f.hidden = !f.hidden;
   $('#btn-add').setAttribute('aria-expanded', String(!f.hidden));
-  if (!f.hidden) $('#add-name').focus();
+  if (!f.hidden) { resetAddDefaults(); $('#add-name').focus(); }
 });
 $('#add-form').addEventListener('submit', e => {
   e.preventDefault();
   const name = $('#add-name').value.trim();
-  if (!name) return;
-  const key = keyForName(name);
   const amount = $('#add-qty').value.trim();
+  if (!name || !amount) return;   // name and quantity are both required
+  const key = keyForName(name);
   const unit = $('#add-unit').value;
-  const qty = amount ? `${amount} ${unit}` : '';
-  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, qty);
-  $('#add-name').value = ''; $('#add-qty').value = '';   // keep the unit for the next add
+  const qty = `${amount} ${unit}`;
+  const expVal = $('#add-expiry').value;
+  const expiry = expVal ? new Date(`${expVal}T12:00:00`).getTime() : Date.now() + 7 * DAY;
+  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, qty, '', { expiry });
+  $('#add-name').value = ''; $('#add-qty').value = '';   // keep the unit; refresh the date default
+  resetAddDefaults();
   renderAll();
   toast(`${name} added`);
   refreshRecipes();

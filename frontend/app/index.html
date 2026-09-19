@@ -136,7 +136,7 @@
     <label class="sr-only" for="add-name">Item name</label>
     <input id="add-name" class="field" list="food-options" placeholder="Item, e.g. lemons" autocomplete="off" required>
     <label class="sr-only" for="add-qty">Amount</label>
-    <input id="add-qty" class="field short" type="number" min="0" step="0.1" inputmode="decimal" placeholder="Amt" autocomplete="off">
+    <input id="add-qty" class="field short" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="Amt" autocomplete="off" required>
     <label class="sr-only" for="add-unit">Unit</label>
     <select id="add-unit" class="field unit" aria-label="Unit">
       <option value="oz">oz</option>
@@ -146,6 +146,8 @@
       <option value="ct">count</option>
       <option value="pack">pack</option>
     </select>
+    <label class="sr-only" for="add-expiry">Expiration date</label>
+    <input id="add-expiry" class="field date" type="date" aria-label="Expiration date" required>
     <button class="pill prominent" type="submit">Add</button>
   </form>
   <datalist id="food-options"></datalist>
