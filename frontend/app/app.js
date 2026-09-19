@@ -1226,8 +1226,20 @@ $('#btn-reset').addEventListener('click', () => {
   toast(fresh ? 'Demo pantry loaded' : 'Pantry cleared', fresh ? plural(state.pantry.length, 'item') : '');
   refreshRecipes();
 });
-$('#btn-signout').hidden = !configured;
-$('#btn-signout').addEventListener('click', () => signOut().then(() => location.replace('../login/')));
+// Footer account button: "Sign out" with an account, "Sign in" in demo mode, hidden when
+// Supabase isn't configured at all. Wired once the session is known (see bottom of file).
+function wireAccountButton(session) {
+  const b = $('#btn-signout');
+  b.hidden = !configured;
+  if (!configured) return;
+  if (session) {
+    b.textContent = 'Sign out';
+    b.addEventListener('click', () => signOut().then(() => location.replace('../login/')));
+  } else {
+    b.textContent = 'Sign in';
+    b.addEventListener('click', () => location.assign('../login/'));
+  }
+}
 // Hover preview of the swipe overlays: mouse only, a touch tap would leave it stuck
 ['cook', 'skip'].forEach(k => {
   const b = $(`#btn-${k}`);
@@ -1357,7 +1369,8 @@ fit();
 
 /* ---------- go ---------- */
 syncInert();
-const session = await requireAuth('../login/');   // bounces to the login page when configured and signed out
+const session = await requireAuth('../login/');   // bounces to the login page when configured and signed out, unless ?demo
+wireAccountButton(session);
 const saved = await loadState();
 if (saved) {
   state.pantry = saved.pantry;

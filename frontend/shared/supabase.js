@@ -30,6 +30,24 @@ export async function getClient() {
   return clientPromise;
 }
 
+/** Whether Supabase has the given OAuth provider ("google", "github", …) switched on.
+    Reads the project's public auth settings. Resolves to true when the check itself
+    fails, so a flaky network never blocks a sign-in that might have worked. */
+export async function providerEnabled(provider) {
+  if (!configured) return false;
+  try {
+    const res = await fetch(config.supabaseUrl.trim().replace(/\/$/, '') + '/auth/v1/settings', {
+      headers: { apikey: config.supabaseAnonKey.trim() },
+    });
+    if (!res.ok) return true;
+    const { external } = await res.json();
+    return Boolean(external && external[provider]);
+  } catch (err) {
+    console.warn('[pantry] providerEnabled could not read auth settings', err);
+    return true;
+  }
+}
+
 /** Current session, or null (also null when not configured or when the client can't load). */
 export async function getSession() {
   if (!configured) return null;
@@ -70,9 +88,33 @@ export async function signOut() {
   }
 }
 
+/* ---------- demo mode ----------
+   "Try the demo" links open the app with ?demo. That switches the page to run
+   without an account (localStorage only) and is remembered for the tab, so a
+   reload or in-app navigation doesn't bounce to the login page. A real session,
+   when there is one, always wins over the flag. */
+const DEMO_KEY = 'pantry.demo';
+
+export function isDemo() {
+  try {
+    if (new URLSearchParams(location.search).has('demo')) {
+      sessionStorage.setItem(DEMO_KEY, '1');
+      return true;
+    }
+    return sessionStorage.getItem(DEMO_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Forget the demo flag (call once the user actually signs in). */
+export function exitDemo() {
+  try { sessionStorage.removeItem(DEMO_KEY); } catch { /* ignore */ }
+}
+
 /** Gate a page behind sign-in. When the project is configured and there is no
     session, sends the browser to the login page with ?next=<this path> and
-    resolves to null. Otherwise resolves to the session (or null in demo mode). */
+    resolves to null. In demo mode (see isDemo) it resolves to null without bouncing. Otherwise resolves to the session (or null in demo mode). */
 export async function requireAuth(loginPath = '../login/') {
   if (!configured) return null;
   let session = null;
@@ -87,7 +129,7 @@ export async function requireAuth(loginPath = '../login/') {
     console.warn('[pantry] requireAuth could not check the session', err);
     return null;
   }
-  if (!session) {
+  if (!session && !isDemo()) {
     location.replace(loginPath + '?next=' + encodeURIComponent(location.pathname));
   }
   return session;

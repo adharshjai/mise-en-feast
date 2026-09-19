@@ -33,8 +33,10 @@ Any static server works. From this folder:
 python3 -m http.server 4173
 ```
 
-Then open http://localhost:4173/. Without Supabase configured the login page
-offers "Continue in demo mode" and the app keeps its state in localStorage.
+Then open http://localhost:4173/. "Try the demo" on the landing page opens the
+app with `?demo`, which skips sign-in and keeps state in this browser's
+localStorage. Without Supabase configured the login page offers the same
+"Continue in demo mode" route.
 
 ## Connect Supabase
 

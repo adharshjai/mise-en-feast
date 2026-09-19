@@ -1,5 +1,5 @@
 /* Pantry login page. Talks to Supabase through ../shared/supabase.js. */
-import { configured, getClient, getSession, onAuthChange } from '../shared/supabase.js';
+import { configured, getClient, getSession, onAuthChange, providerEnabled, exitDemo } from '../shared/supabase.js';
 
 const $ = s => document.querySelector(s);
 const el = {
@@ -45,6 +45,7 @@ function nextPath() {
 function goToApp() {
   if (navigating) return;
   navigating = true;
+  exitDemo();   // a real account takes over from any "try the demo" session
   location.replace(nextPath());
 }
 
@@ -95,6 +96,7 @@ function friendly(err) {
   if (/invalid login credentials/i.test(m)) return 'That email and password don’t match.';
   if (/email not confirmed/i.test(m)) return 'Confirm your email first, then sign in. Check your inbox for the link.';
   if (/already registered/i.test(m)) return 'There’s already an account with that email. Try signing in.';
+  if (/provider is not enabled|unsupported provider/i.test(m)) return 'Google sign-in isn’t switched on for this project yet. Use your email and password or a magic link instead.';
   if (/rate limit/i.test(m)) return 'Too many attempts. Give it a minute and try again.';
   if (/failed to fetch|network/i.test(m)) return 'Couldn’t reach the sign-in service. Check your connection and try again.';
   return m;
@@ -147,6 +149,11 @@ async function google() {
   setBusy(el.btnGoogle, true);
   try {
     const client = await getClient();
+    // signInWithOAuth navigates away without checking, so Supabase would answer with a
+    // bare JSON error page if the provider is off. Check first and fail in place instead.
+    if (!(await providerEnabled('google'))) {
+      throw new Error('Google sign-in isn’t switched on for this project yet. Use your email and password or a magic link instead.');
+    }
     const { error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: APP_URL } });
     if (error) throw error;
     // The browser is now leaving for Google; keep the button busy.
