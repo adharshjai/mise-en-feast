@@ -37,8 +37,10 @@ export async function scanReceipt(file) {
 }
 
 /**
- * POST /recipes — body: { items, count?, max_missing? }.
- * `items` should match the backend PantryItem shape.
+ * POST /recipes — body: { items, count?, max_missing?, request?, prefs? }.
+ * `items` should match the backend PantryItem shape; `opts.prefs` is the v2
+ * preferences object from shared/store.js (allergies and diet are hard rules
+ * server-side, the rest are soft), `opts.request` its plain-English summary.
  */
 export async function fetchRecipes(items, opts = {}) {
   if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
@@ -50,6 +52,7 @@ export async function fetchRecipes(items, opts = {}) {
       count: opts.count ?? 6,
       max_missing: opts.maxMissing ?? 2,
       request: opts.request ?? null,
+      prefs: opts.prefs ?? null,
     }),
   });
   if (!res.ok) throw new Error(await readError(res));

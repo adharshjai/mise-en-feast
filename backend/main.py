@@ -282,7 +282,13 @@ async def scan_receipt(file: UploadFile = File(...)):
 
 @app.post("/recipes")
 def get_recipes(req: rx.RecipeRequest):
-    """Generate dishes from pantry contents. Send the items array from /scan."""
+    """Generate dishes from pantry contents. Send the items array from /scan.
+
+    Optional `prefs` (preferences contract v2, see recipes.py) shapes the prompt
+    (allergies and diet as hard rules; cuisines, time, skill, equipment,
+    dislikes and household size as preferences) and is enforced again in
+    rank(), which drops any dish that trips one of the household's allergies.
+    """
     try:
         generated = rx.generate(req, gemini(), MODEL)
     except HTTPException:
@@ -291,7 +297,7 @@ def get_recipes(req: rx.RecipeRequest):
         traceback.print_exc()  # the terminal is where you'll actually read this
         raise HTTPException(502, f"Recipe generation failed: {exc}") from exc
 
-    ranked = rx.rank(generated, req.max_missing, req.items)
+    ranked = rx.rank(generated, req.max_missing, req.items, prefs=req.prefs)
     return {
         "count": len(ranked),
         "recipes": ranked,

@@ -68,6 +68,9 @@ body { overflow: hidden; }
 }
 .chip.have { background: rgba(244,239,232,.10); color: var(--text); padding-left: 8px; }
 .chip.missing { border: 1px dashed rgba(168,162,158,.55); color: var(--text-2); }
+/* something they'd rather not eat: the dish stays, the chip says what it has */
+.chip.warn { background: rgba(244,239,232,.06); color: var(--text-2); padding-left: 9px; }
+.chip.warn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }   /* neutral: the freshness colours stay on freshness */
 .missing-line { font-size: 13px; color: var(--text-2); }
 
 .badge {
@@ -104,7 +107,7 @@ body { overflow: hidden; }
 .state-icon { width: 64px; height: 64px; border-radius: 50%; background: rgba(244,239,232,.08); display: flex; align-items: center; justify-content: center; color: var(--text-2); }
 .state h2 { font-size: 36px; line-height: 1.05; letter-spacing: -.03em; font-weight: 800; }
 .state p { color: var(--text-2); }
-.row-btns { display: flex; gap: 12px; margin-top: 8px; }
+.row-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 8px; }
 .drop-card {
   width: var(--card-w); height: var(--card-h); border-radius: var(--radius); border: 1.5px dashed rgba(244,239,232,.24);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 36px;
@@ -266,10 +269,19 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .profile-head .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .profile-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-head small { font-size: 14px; color: var(--text-2); overflow-wrap: anywhere; }   /* wraps on phones instead of clipping the sentence or the email */
-.prefs { display: flex; flex-direction: column; gap: 18px; }
 .pref { display: flex; flex-direction: column; gap: 10px; }
 .pref-label { font-size: 14px; font-weight: 500; color: var(--text-2); }
-.prefs .field { width: 100%; }
+.pref-label small { font-size: 13px; color: var(--text-3); font-weight: 400; }
+.pref-help { font-size: 13px; color: var(--text-3); }
+.pref .field { width: 100%; }
+/* the preferences as rows: label above value, an Edit link on the right, hairlines between */
+.srows { display: flex; flex-direction: column; }
+.srow { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.srow:first-child { border-top: 0; padding-top: 4px; }
+.srow .stext { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.srow small { font-size: 13px; color: var(--text-2); }
+.srow strong { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+.srow .linkish { flex-shrink: 0; margin-right: -6px; }
 /* choice chips: the card's ingredient chips, as buttons. Dashed = off, filled = on. */
 .choices { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice {
@@ -291,6 +303,30 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .stepper [aria-disabled="true"] { opacity: .4; cursor: default; }
 .stepper [aria-disabled="true"]:hover { transform: none; }
 a.prominent, a.prominent:hover { color: var(--on-accent); }
+
+/* onboarding: one question per screen, progress dots on top, the sheet's own body scrolls */
+.ob { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.ob-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 28px 0; }
+.dots { display: flex; align-items: center; gap: 6px; }
+.dots i { display: block; width: 8px; height: 8px; border-radius: 999px; background: rgba(244,239,232,.14); transition: width .25s var(--ease), background .2s ease; }
+.dots i.done { background: var(--text-2); }
+.dots i.on { width: 22px; background: var(--text); }
+.ob-body { gap: 24px; padding-top: 18px; }
+.ob-titles { display: flex; flex-direction: column; gap: 6px; }
+.ob-title { font-size: 28px; line-height: 1.05; letter-spacing: -.03em; font-weight: 800; }
+.ob-title:focus { outline: none; }
+.ob-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: 4px; }
+.ob-help { color: var(--text-2); }
+.ob-row { display: flex; flex-wrap: wrap; gap: 20px 40px; }
+.ob-line { font-size: 14px; color: var(--text-2); }
+.ob-foot { flex-wrap: wrap; justify-content: flex-start; }
+.ob-foot [data-ob-next] { padding: 0 12px 0 18px; }   /* the chevron sits on the right of "Continue" */
+/* a chip with a one-line description under its label (the skill picker) */
+.choice.desc { height: auto; flex: 1 1 180px; flex-direction: column; align-items: flex-start; gap: 3px; padding: 12px 14px; border-radius: 16px; text-align: left; }
+.choice.desc.on { padding-left: 14px; }
+.choice.desc .lbl { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text); }
+.choice.desc strong { font-weight: 600; }
+.choice.desc small { font-size: 13px; font-weight: 400; color: var(--text-2); }
 
 /* ---------- pantry panel ---------- */
 .panel {
@@ -372,6 +408,11 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
   .processing { flex-direction: column; align-items: center; gap: 20px; }
   .receipt { width: min(250px, 100%); height: 300px; }
   .steps { width: 100%; padding-top: 0; }
+  /* onboarding on a phone: tighter gutters, the steppers stack, the footer wraps */
+  .ob-head, .ob-sheet .sheet-body, .ob-sheet .sheet-foot { padding-left: 20px; padding-right: 20px; }
+  .ob-row { flex-direction: column; gap: 16px; }
+  .ob-title { font-size: 26px; }
+  .choice.desc { flex-basis: 100%; }
 }
 
 /* ---------- touch: no hover to reveal, bigger targets ---------- */
@@ -382,3 +423,14 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
   .linkish { min-height: 44px; padding: 0 8px; }
   .pill.sm, .circle.sm, .rrow .del, .prow .del { min-width: 44px; min-height: 44px; }
 }
+
+/* ---------- difficulty rating: three bars, filled to the level ---------- */
+.diff { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.diff .bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 10px; }
+.diff .bars i { display: block; width: 4px; border-radius: 1px; background: rgba(244,239,232,.18); }
+.diff .bars i:nth-child(1) { height: 5px; }
+.diff .bars i:nth-child(2) { height: 8px; }
+.diff .bars i:nth-child(3) { height: 10px; }
+.diff.l1 .bars i:nth-child(-n+1), .diff.l2 .bars i:nth-child(-n+2), .diff.l3 .bars i:nth-child(-n+3) { background: var(--text-2); }
+.diff.stretch .bars i { background: var(--yellow); }
+.diff.stretch .bars i:nth-child(n+1):nth-child(-n+3) { opacity: 1; }
