@@ -262,8 +262,10 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .panel-head { display: flex; align-items: center; gap: 10px; padding: 24px 20px 12px 28px; }
 .panel-head h2 { font-size: 24px; font-weight: 700; letter-spacing: -.02em; }
 .panel-head .count { font-size: 14px; color: var(--text-2); }
-.add-form { display: flex; gap: 8px; padding: 4px 20px 12px 28px; }
-.add-form .field { flex-grow: 1; }
+.add-form { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 20px 12px 28px; }
+.add-form #add-name { flex: 1 1 140px; }
+.add-form .field.short, .add-form .field.unit { flex: 0 0 auto; }
+.field.unit { width: 88px; }
 .panel-body { flex-grow: 1; padding: 4px 20px 28px 28px; display: flex; flex-direction: column; }
 .checkin { border-radius: 18px; background: rgba(255,122,26,.10); box-shadow: inset 0 0 0 1px rgba(255,122,26,.28); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; margin-bottom: 8px; }
 .checkin .eyebrow { color: var(--accent); }

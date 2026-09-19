@@ -309,6 +309,7 @@ async function refreshRecipes() {
       list = (data.recipes || []).map(dishFromApi);
     }
     liveDishes = list.length ? list : null;
+    populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
       for (const id of [...set]) if (!ids.has(id)) set.delete(id);
@@ -1318,6 +1319,21 @@ el.panel.addEventListener('click', e => {
     return refreshRecipes();
   }
 });
+/* ---------- autocomplete: foods we know about, for the add form ---------- */
+const sentenceCase = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+function foodSuggestions() {
+  const names = new Map();               // key -> display name (first one wins)
+  const add = (key, name) => { const k = String(key || '').toLowerCase(); if (k && !names.has(k)) names.set(k, name || sentenceCase(k)); };
+  for (const d of activeDishes()) for (const i of (d.ingredients || [])) add(i.key, i.name);
+  for (const l of SAMPLE_RECEIPT.lines) if (!l.nonFood) add(l.key || l.name, l.name);
+  for (const k of Object.keys(CATALOG)) add(k, sentenceCase(k));
+  return [...names.values()].sort((a, b) => a.localeCompare(b));
+}
+function populateFoodOptions() {
+  const dl = $('#food-options');
+  if (dl) dl.innerHTML = foodSuggestions().map(n => `<option value="${esc(n)}"></option>`).join('');
+}
+
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
   f.hidden = !f.hidden;
@@ -1328,9 +1344,12 @@ $('#add-form').addEventListener('submit', e => {
   e.preventDefault();
   const name = $('#add-name').value.trim();
   if (!name) return;
-  const key = name.toLowerCase();
-  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, $('#add-qty').value.trim());
-  $('#add-name').value = ''; $('#add-qty').value = '';
+  const key = keyForName(name);
+  const amount = $('#add-qty').value.trim();
+  const unit = $('#add-unit').value;
+  const qty = amount ? `${amount} ${unit}` : '';
+  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, qty);
+  $('#add-name').value = ''; $('#add-qty').value = '';   // keep the unit for the next add
   renderAll();
   toast(`${name} added`);
   refreshRecipes();
@@ -1380,6 +1399,7 @@ if (saved) {
 } else {
   state.pantry = seedPantry();
 }
+populateFoodOptions();
 renderAll({ enter: true });
 refreshRecipes();
 window.pantry = { state, drag, session };   // module scope hides these; handy in the console
