@@ -1,12 +1,12 @@
 /* Login page: one centered card on the shared warm-dark canvas.
    Materials and controls come from ../shared/tokens.css; this file only lays them out. */
 
-body { min-height: 100%; display: grid; grid-template-rows: 72px 1fr; overflow-x: hidden; }
+body { min-height: 100%; display: grid; grid-template-rows: 72px 1fr; grid-auto-rows: 0; overflow-x: hidden; } /* auto-rows 0: extension-injected elements never claim a row */
 
-.topbar { position: relative; z-index: 5; display: flex; align-items: center; padding: 0 32px; }
+.topbar { grid-row: 1; position: relative; z-index: 5; display: flex; align-items: center; padding: 0 32px; }
 .back { font-size: 14px; }
 
-.stage { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 8px 16px 48px; }
+.stage { grid-row: 2; position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 8px 16px 48px; }
 
 /* The card sits on the navigation layer (it is a sheet, not content), so it gets the
    same denser glass tint the app uses for its sheets and pantry panel. */
