@@ -2,3 +2,10 @@
 .env*
 .DS_Store
 node_modules/
+
+# secrets & local
+.env
+.env.local
+dist/
+.vite/
+node_modules/
