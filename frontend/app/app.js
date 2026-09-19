@@ -1411,6 +1411,111 @@ $('#sort-mode').addEventListener('change', e => {
   renderDeck({ enter: true });
 });
 
+/* ---------- kitchen helper (chat: "what do I buy to make X?") ---------- */
+const chatEl = { fab: $('#btn-chat'), panel: $('#chat'), log: $('#chat-log'), form: $('#chat-form'), input: $('#chat-input'), close: $('#btn-chat-close') };
+let chatGreeted = false;
+const normQ = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const listWords = arr => arr.length <= 1 ? (arr[0] || '') : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`;
+
+function addChat(who, html) {
+  const div = document.createElement('div');
+  div.className = `msg ${who}`;
+  div.innerHTML = html;
+  chatEl.log.appendChild(div);
+  chatEl.log.scrollTop = chatEl.log.scrollHeight;
+  return div;
+}
+function chatOpen() {
+  chatEl.panel.hidden = false;
+  requestAnimationFrame(() => chatEl.panel.classList.add('in'));
+  chatEl.panel.setAttribute('aria-hidden', 'false');
+  chatEl.fab.setAttribute('aria-expanded', 'true');
+  if (!chatGreeted) { chatGreeted = true; addChat('bot', 'Hey! Tell me a dish you want to make and I’ll tell you what to buy. Try “shakshuka” or “fried rice”.'); }
+  chatEl.input.focus();
+}
+function chatClose() {
+  chatEl.panel.classList.remove('in');
+  chatEl.panel.setAttribute('aria-hidden', 'true');
+  chatEl.fab.setAttribute('aria-expanded', 'false');
+  setTimeout(() => { chatEl.panel.hidden = true; }, 200);
+}
+// Best recipe match for a free-text query, by name then name+ingredient word overlap.
+function findDishForQuery(text) {
+  const q = normQ(text);
+  if (!q) return null;
+  const words = q.split(' ').filter(w => w.length > 2);
+  let best = null, bestScore = 0;
+  for (const d of activeDishes()) {
+    const name = normQ(d.name);
+    let score = 0;
+    if (name === q) score = 100;
+    else if (name.includes(q) || q.includes(name)) score = 60;
+    const hay = normQ(`${d.name} ${d.ingredients.map(i => `${i.name} ${i.key}`).join(' ')}`);
+    for (const w of words) if (hay.includes(w)) score += 12;
+    if (score > bestScore) { bestScore = score; best = d; }
+  }
+  return bestScore >= 24 ? best : null;
+}
+function shoppingAnswer(d) {
+  const a = analyze(d);
+  const have = a.have.map(i => i.name.toLowerCase());
+  const open = `<button class="chat-open" type="button" data-chat-open="${d.dish ? d.dish.id : d.id}">See recipe</button>`;
+  if (!a.missing.length) {
+    return `You’ve got everything for <strong>${esc(d.name)}</strong> 🎉 Uses ${esc(listWords(have))}. Serves ${d.servings}, about ${money(a.stats.cost)}/serving. ${open}`;
+  }
+  const buy = a.missing.map(i => `${i.name.toLowerCase()}${i.amt ? ` (${i.amt})` : ''}`);
+  const buyCost = a.missing.reduce((s, i) => s + nutriFor(i.key).cost * Math.max(1, i.need || 1), 0);
+  const haveBit = have.length ? ` You already have ${esc(listWords(have))}.` : '';
+  return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit} ${open}`;
+}
+async function handleChat(text) {
+  addChat('user', esc(text));
+  const thinking = addChat('bot', '<span class="dots"><i></i><i></i><i></i></span>');
+  let reply = '';
+  try {
+    // Prefer the recipe service (it takes a free-text request) when it's reachable.
+    if (apiConfigured()) {
+      const data = await Promise.race([
+        fetchRecipes(pantryForApi(), { request: text, count: 3, maxMissing: 12 }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 12000)),
+      ]);
+      const recs = (data.recipes || []).map(dishFromApi);
+      if (recs.length) reply = shoppingAnswer(recs[0]);
+    }
+  } catch { /* offline or slow — fall back to what we know locally */ }
+  if (!reply) {
+    const d = findDishForQuery(text);
+    if (d) {
+      reply = shoppingAnswer(d);
+    } else {
+      const opts = activeDishes().map(analyze).filter(eligible)
+        .sort((a, b) => a.missing.length - b.missing.length).slice(0, 3).map(a => a.dish.name);
+      reply = opts.length
+        ? `I don’t have a recipe for “${esc(text)}” handy. Right now you can make: <b>${esc(opts.join(', '))}</b>. Ask me about one of those, or a dish like “shakshuka”.`
+        : 'Add a few pantry items first, then tell me what you’d like to make and I’ll list what to buy.';
+    }
+  }
+  thinking.remove();
+  addChat('bot', reply);
+}
+
+chatEl.fab.addEventListener('click', () => (chatEl.panel.hidden ? chatOpen() : chatClose()));
+chatEl.close.addEventListener('click', chatClose);
+chatEl.form.addEventListener('submit', e => {
+  e.preventDefault();
+  const t = chatEl.input.value.trim();
+  if (!t) return;
+  chatEl.input.value = '';
+  handleChat(t);
+});
+chatEl.log.addEventListener('click', e => {
+  const b = e.target.closest('[data-chat-open]');
+  if (!b) return;
+  const d = dishById(b.dataset.chatOpen);
+  if (d) { chatClose(); openDetail(d); }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
+
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
   f.hidden = !f.hidden;

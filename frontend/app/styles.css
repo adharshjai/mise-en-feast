@@ -353,3 +353,23 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .nstat { flex: 1 1 84px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 8px; border-radius: 12px; background: rgba(255,255,255,.045); }
 .nstat strong { font-size: 16px; font-weight: 600; }
 .nstat small { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: .03em; }
+
+/* kitchen helper (chat assistant) */
+.chat-fab { position: fixed; right: 20px; bottom: 20px; z-index: 24; width: 56px; height: 56px; border-radius: 50%; border: 0; background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,.35); transition: transform .18s var(--spring); }
+.chat-fab:hover { transform: translateY(-2px); }
+.chat { position: fixed; right: 20px; bottom: 88px; z-index: 25; width: min(360px, calc(100vw - 32px)); max-height: min(70vh, 560px); border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; opacity: 0; transform: translateY(12px); transition: opacity .2s ease, transform .2s var(--spring); }
+.chat.in { opacity: 1; transform: none; }
+.chat-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px 18px; font-size: 15px; font-weight: 600; }
+.chat-log { flex: 1 1 auto; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 14px 12px; }
+.msg { max-width: 85%; padding: 9px 12px; border-radius: 14px; font-size: 14px; line-height: 1.38; }
+.msg.bot { align-self: flex-start; background: rgba(255,255,255,.06); border-bottom-left-radius: 5px; }
+.msg.user { align-self: flex-end; background: rgba(255,122,26,.22); border-bottom-right-radius: 5px; }
+.msg b, .msg strong { font-weight: 600; }
+.chat-open { display: inline-block; margin-top: 8px; padding: 5px 12px; border-radius: 999px; border: 0; background: var(--accent); color: var(--on-accent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.chat-form { display: flex; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid rgba(255,255,255,.08); }
+.chat-form .field { flex: 1 1 auto; }
+.dots { display: inline-flex; gap: 4px; align-items: center; height: 14px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite both; }
+.dots i:nth-child(2) { animation-delay: .2s; }
+.dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }

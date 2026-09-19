@@ -152,6 +152,27 @@
   <div class="panel-body scroll" id="panel-body"></div>
 </aside>
 
+<!-- Kitchen helper: chat assistant docked bottom-right -->
+<button class="chat-fab" id="btn-chat" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="chat" aria-label="Ask what to cook or buy">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 0 1 12.5 3 8.38 8.38 0 0 1 21 11.5z"/></svg>
+</button>
+<section class="chat glass" id="chat" role="dialog" aria-label="Kitchen helper" aria-hidden="true" hidden>
+  <div class="chat-head">
+    <strong>Kitchen helper</strong>
+    <button class="circle sm glass muted" id="btn-chat-close" type="button" aria-label="Close helper">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
+  <form class="chat-form" id="chat-form">
+    <label class="sr-only" for="chat-input">Your message</label>
+    <input id="chat-input" class="field" placeholder="What do you want to make?" autocomplete="off" maxlength="120" required>
+    <button class="circle prominent" type="submit" aria-label="Send">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    </button>
+  </form>
+</section>
+
 <div class="toast glass" id="toast" role="status" aria-live="polite"></div>
 
 <!-- Kept in the DOM and focusable; app.js moves it inside the dropzone while the upload sheet is open -->
