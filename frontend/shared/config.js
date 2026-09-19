@@ -13,6 +13,6 @@
 
    Leave both empty to run Pantry in demo mode (state lives in localStorage). */
 window.PANTRY_CONFIG = {
-  supabaseUrl: 'https://kfzgofybljvahvrxdhav.supabase.co',
-  supabaseAnonKey: 'sb_publishable_L1BhUCvvzLvweoBm3WMecA_aq6PevHH',
+  supabaseUrl: 'https://btkiulsnvtujjomrknfo.supabase.co',   // project ref from supabase/config.toml in the repo
+  supabaseAnonKey: '',   // the key from the same project's Settings -> API; empty = demo mode (the pasted key belonged to another project)
 };
