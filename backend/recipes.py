@@ -99,7 +99,16 @@ DEFAULT_EQUIPMENT = ("oven", "stovetop", "microwave")
 ALLERGEN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "peanuts": ("peanut", "groundnut"),
     "tree-nuts": ("almond", "walnut", "cashew", "pecan", "pistachio", "hazelnut", "macadamia"),
-    "dairy": ("milk", "cheese", "butter", "cream", "yogurt", "yoghurt", "parmesan", "feta", "mozzarella", "ghee"),
+    # Named cheeses are spelled out: "cheddar" and "ricotta" never contain the
+    # word cheese, and a dairy allergy that misses them is the dangerous kind.
+    "dairy": (
+        "milk", "cheese", "butter", "cream", "creme", "yogurt", "yoghurt", "ghee",
+        "whey", "casein", "custard", "kefir", "curd", "gelato",
+        "parmesan", "feta", "mozzarella", "cheddar", "brie", "camembert", "gouda",
+        "gruyere", "provolone", "ricotta", "mascarpone", "halloumi", "paneer",
+        "queso", "cotija", "pecorino", "asiago", "manchego", "gorgonzola",
+        "roquefort", "stilton", "havarti", "colby", "burrata", "romano",
+    ),
     "eggs": ("egg",),
     "gluten": ("wheat", "flour", "pasta", "spaghetti", "noodle", "bread", "couscous", "barley", "bulgur", "seitan", "soy sauce"),
     "shellfish": ("shrimp", "prawn", "crab", "lobster", "clam", "mussel", "oyster", "scallop"),
@@ -108,15 +117,23 @@ ALLERGEN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "sesame": ("sesame", "tahini"),
 }
 
+# A plant milk, cream, butter, yogurt or cheese is not dairy. One rule for the
+# whole family, the same one FALSE_FRIENDS uses in frontend/shared/store.js, so
+# a new alternative does not have to be added in two places. The nut word is
+# kept, so peanut butter still trips the peanut allergy.
+_ALT_DAIRY = re.compile(
+    r"\b(coconut|almond|oat|soy|rice|cashew|peanut|hazelnut|macadamia|cocoa|shea|nut|plant)"
+    r"[ -]+(milk|cream|creamer|butter|yogurt|yoghurt|cheese)\b"
+)
+
 # Phrases that contain a keyword but are not the allergen. They are blanked out
 # of the name before matching. Kept short and on the side of caution: when in
 # doubt an ingredient stays flagged.
 _SAFE_PHRASES: dict[str, tuple[str, ...]] = {
     "dairy": (
-        "coconut milk", "almond milk", "oat milk", "soy milk", "rice milk", "cashew milk",
-        "coconut cream", "cashew cream", "cream of tartar",
-        "peanut butter", "almond butter", "cashew butter", "cocoa butter", "apple butter",
+        "cream of tartar", "apple butter",
         "butternut", "butter bean", "butter lettuce", "buttercup",
+        "bean curd",  # tofu, not a cheese curd
         "dairy free", "non dairy",
     ),
     "eggs": ("eggplant", "veggie", "egg free", "eggless"),
@@ -633,7 +650,7 @@ def ingredient_hits(names: Iterable[str], allergies: Iterable[str]) -> list[str]
     normalised name, minus a few phrases that only look like the allergen
     (eggplant, peanut butter, coconut milk, oyster mushroom...).
     """
-    texts = [_norm(n) for n in names if n]
+    texts = [_ALT_DAIRY.sub(r"\1 ", _norm(n)) for n in names if n]
     hits: list[str] = []
     for key in allergies:
         keywords = ALLERGEN_KEYWORDS.get(key)

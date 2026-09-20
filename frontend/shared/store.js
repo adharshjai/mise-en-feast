@@ -493,7 +493,16 @@ export function prefsToRequest(prefs) {
 export const ALLERGEN_KEYWORDS = Object.freeze({
   'peanuts': Object.freeze(['peanut']),
   'tree-nuts': Object.freeze(['almond', 'walnut', 'cashew', 'pecan', 'pistachio', 'hazelnut', 'macadamia']),
-  'dairy': Object.freeze(['milk', 'cheese', 'butter', 'cream', 'yogurt', 'yoghurt', 'parmesan', 'feta', 'mozzarella', 'ghee']),
+  // Named cheeses are spelled out: "cheddar" and "ricotta" never contain the
+  // word cheese, and a dairy allergy that misses them is the dangerous kind.
+  'dairy': Object.freeze([
+    'milk', 'cheese', 'butter', 'cream', 'creme', 'yogurt', 'yoghurt', 'ghee',
+    'whey', 'casein', 'custard', 'kefir', 'curd', 'gelato',
+    'parmesan', 'feta', 'mozzarella', 'cheddar', 'brie', 'camembert', 'gouda',
+    'gruyere', 'provolone', 'ricotta', 'mascarpone', 'halloumi', 'paneer',
+    'queso', 'cotija', 'pecorino', 'asiago', 'manchego', 'gorgonzola',
+    'roquefort', 'stilton', 'havarti', 'colby', 'burrata', 'romano',
+  ]),
   'eggs': Object.freeze(['egg']),
   'gluten': Object.freeze(['wheat', 'flour', 'pasta', 'spaghetti', 'noodle', 'bread', 'couscous', 'barley', 'bulgur', 'seitan', 'soy sauce']),
   'shellfish': Object.freeze(['shrimp', 'prawn', 'crab', 'lobster', 'clam', 'mussel', 'oyster', 'scallop']),
@@ -509,6 +518,7 @@ const FALSE_FRIENDS = [
   [/\beggplant/g, 'aubergine'],
   [/\bbutternut/g, 'squash'],
   [/\bcream of tartar\b/g, 'tartar'],
+  [/\bbean curd\b/g, 'tofu'],
 ];
 
 /** Which of the given allergy keys appear in any of the ingredient / item names.
