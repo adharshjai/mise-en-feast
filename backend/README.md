@@ -4,26 +4,29 @@ FastAPI + Gemini, with Claude on Bedrock for the chat. Reads a receipt photo int
 pantry items (with servings, shelf life, burn rate and a brand-agnostic
 `group_key` so repeat purchases stack as separate lots), generates dishes from
 whatever is in the pantry ranked by what expires first, plans the week, draws a
-picture for each dish, and runs the in-app assistant.
+picture for each dish, runs the in-app assistant and answers "no heavy cream?"
+from what the household actually has.
 
 | Endpoint | What it does |
 |---|---|
 | `POST /scan` | multipart `file` (image or PDF) → parsed, enriched items |
 | `POST /recipes` | `{ items, count, max_missing, request, prefs }` → ranked recipes |
-| `POST /chat` | `{ messages, pantry, prefs, recent_meals, shopping }` → `{ reply, actions, recipes }`, see below |
+| `POST /chat` | `{ messages, pantry, prefs, recent_meals, shopping, focus_recipe }` → `{ reply, actions, recipes }`, see below |
 | `POST /recipe-detail` | `{ title, servings, ingredients, request }` → `{ steps }` for one chat/plan card |
+| `POST /substitutions` | `{ ingredient, dish_title, dish_ingredients, pantry, prefs }` → `{ substitutions }`, pantry-based first, see below |
 | `POST /cook` | subtract a cooked recipe's servings |
 | `POST /identify` | multipart `file` (photo of a dish) → its recipe, see below |
 | `GET /dish-image` | `?title=&ingredients=&seed=` → JPEG bytes, cached for a year, see below |
 | `POST /meal-plan` | `{ items, prefs, days, start, request }` → `{ start, days: [{ date, meals }] }`, see below |
 | `GET /health` | `{ ok, model, image_model, key_set, chat: {...} }` |
 
-Gemini runs everything except the chat. `GEMINI_API_KEY` is its only key;
+Gemini runs everything except the chat and the substitutions. `GEMINI_API_KEY` is its only key;
 `GEMINI_MODEL` (default `gemini-3.5-flash-lite`) picks the text model,
 `GEMINI_IMAGE_MODEL` pins the image model (unset: the first of
 `gemini-3.5-flash-image`, `gemini-3-flash-image`, `gemini-2.5-flash-image` that
 answers), and `IDENTIFY_STUB=1` makes `/identify` answer without calling
-anything. The chat needs the Bedrock variables in `bedrock.py`'s docstring.
+anything. The chat and `/substitutions` need the Bedrock variables in
+`bedrock.py`'s docstring.
 
 ## Run locally
 
@@ -148,6 +151,7 @@ check-ins, the assistant can now stock the pantry and keep the shopping list:
 | `add_to_shopping_list` | "put lemons on my shopping list", "I need to buy rice" | `{ type: 'add_shopping_items', items: [{ name, quantity, unit, note }] }` |
 | `remove_from_shopping_list` | "take milk off the list" | `{ type: 'remove_shopping_items', names: [...] }` (only names that matched a row in `shopping`) |
 | `read_shopping_list` | "what's on my list?" | none (a read) |
+| `suggest_substitutions` | "no heavy cream?", "what can I use instead of buttermilk" | none (a read: the swaps go back to Claude, which answers in prose) |
 
 Names are trimmed to 1–60 characters, quantities must be positive, and units are
 folded into the six the pantry stores (`g, kg, ml, l, pcs, pack`): `2 lb` becomes
@@ -155,6 +159,78 @@ folded into the six the pantry stores (`g, kg, ml, l, pcs, pack`): `2 lb` become
 nobody recognises becomes `""` with the quantity kept. `expires_in_days` is
 1–730 or null. The request's `shopping` field (`[{ name, quantity, unit, done }]`)
 is what `read_shopping_list` answers from and what removals are matched against.
+`update_preference` also accepts `liked` and `disliked` (complete lists of dish
+titles, see below).
+
+### Asking from the recipe popup (`focus_recipe`)
+
+When the chat is opened from a recipe ("Ask a question"), the client sends the
+dish along with the turn:
+
+```
+focus_recipe: { title: str, servings: int = 2, ingredients: [str] = [],
+                steps: [str] = [], missing: [str] = [] } | null
+```
+
+`ingredients` are the recipe's lines ("1 cup heavy cream"), `steps` its steps
+and `missing` the ingredient names the pantry lacks. `chat.py` appends "The user
+is currently looking at this recipe and their questions are about it unless they
+say otherwise:" with the title, servings, ingredients, steps and what is missing
+to the system prompt for every model call of that turn, so "can I skip the
+wine?" or "how long is step 3?" needs no other context, and
+`suggest_substitutions` uses that ingredient list unless the model names a
+different dish. Tool routing is otherwise unchanged; omit the field (or send
+`null`) for a plain turn. Sloppy values never 422: the title is capped at 120
+characters, servings clamped to 1..24, lines trimmed and capped (40 ingredients,
+20 steps).
+
+### Rated dishes (`prefs.liked` / `prefs.disliked`)
+
+`Prefs` carries two more lists, `liked` and `disliked`: the dish titles the
+household rated up and down, newest first as the client writes them. They are
+cleaned like the other list fields (trimmed, inner whitespace collapsed, control
+characters removed, at most 80 characters each, de-duplicated ignoring case and
+punctuation, at most 30 kept) and never cause a 422. Every recipe prompt
+(`/recipes`, the chat's `suggest_recipes`, `/meal-plan`, `/substitutions`) gets
+"Dishes they rated up (make more like these): …" and "Dishes they rated down (do
+not suggest these or close variants): …", and `rank()` drops any dish whose
+normalised title equals a disliked one, so a repeat never reaches the deck even
+when the model ignores the note. `read_preferences` returns both lists.
+
+## Substitutions (`POST /substitutions`)
+
+```
+POST /substitutions  { ingredient: str,                // "heavy cream"
+                       dish_title: str = "",           // the dish it is for, when known
+                       dish_ingredients: [str] = [],   // the dish's ingredient lines
+                       pantry: [PantryItem] = [],      // same shape /recipes takes
+                       prefs: Prefs | null }
+
+200 → { substitutions: [ { use: "milk + butter",           // the swap; foods joined with " + "
+                           from_pantry: true,              // every food it needs is in the pantry
+                           ratio: "¾ cup milk + ¼ cup melted butter per 1 cup heavy cream",
+                           note: "will not whip",          // how it changes the dish, "" when it doesn't
+                           pantry_names: ["Milk", "Butter"] } ] }  // exact pantry names, for deduction
+      pantry-based first, at most 4, [] when nothing sensible stands in
+422 → no ingredient
+503 → Bedrock is not configured
+502 → the model call failed, or answered something that was not the JSON asked for
+```
+
+`substitutions.py` asks Claude (the fast model) with a JSON-only prompt: the
+ingredient, the dish and its ingredient list, the pantry names (food with
+servings left), the household's hard rules and preferences; pantry first,
+realistic ratios, a note on what changes, never an allergen. Then Python has
+the last word, as `rank()` does for recipes: `finish()` recomputes `from_pantry`
+by matching `pantry_names` (or the foods in `use`) against the real pantry rows
+with the same normalisation `recipes._match` uses, rewrites `pantry_names` to
+the exact pantry spellings, drops any swap that trips `ingredient_hits` /
+`diet_conflicts` (or names something they avoid), drops "use the thing you are
+out of" and repeats, and sorts pantry-based swaps first. `build_prompt()` and
+`finish()` are pure, so the whole pass can be exercised without a model call.
+The chat's `suggest_substitutions` tool calls the same `suggest()` with the
+request's pantry, prefs and the recipe on screen; the client falls back to
+`frontend/shared/substitutions.js` when the API is unconfigured or unreachable.
 
 ## Dish pictures (`GET /dish-image`)
 
@@ -211,6 +287,7 @@ comes back `null`.
 - `main.py` — app, receipt parsing (`/scan`), `/cook`, `/health`, and the routes for everything below
 - `recipes.py` — recipe generation (ideas, then recipes), `annotate` (have/missing against the pantry) and `rank`
 - `recipes_ai.py` — the chat's step-less suggestions and `/recipe-detail` (Claude)
+- `substitutions.py` — `/substitutions` and the chat's `suggest_substitutions`: what stands in for an ingredient, pantry first (Claude)
 - `chat.py` — the assistant: tools, validation, the actions the client applies
 - `meal_plan.py` — `/meal-plan`: the week's meals, chunked, annotated
 - `images.py` — `/dish-image`: one image call per dish, model fallback, LRU, downscale

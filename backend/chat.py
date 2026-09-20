@@ -16,7 +16,12 @@ Contract with the frontend (frontend/shared/api.js -> chat, app.js -> handleChat
         pantry:        [ PantryItem ],   # same shape /recipes takes (pantryForApi)
         prefs:         Prefs | null,     # the v2 preferences object
         recent_meals:  [ { title, cooked_at? } ],  # optional, newest first
-        shopping:      [ { name, quantity?, unit?, done? } ]   # the shopping list, optional
+        shopping:      [ { name, quantity?, unit?, done? } ],  # the shopping list, optional
+        focus_recipe:  { title, servings?, ingredients?, steps?, missing? } | null
+                       # the recipe open in the popup when the user asks from it
+                       # ("Ask a question"): ingredients/steps are strings, missing
+                       # the ingredient names the pantry lacks. Appended to the
+                       # system prompt so "can I skip the wine?" needs no context.
       }
     ->
       {
@@ -40,9 +45,11 @@ see _clean_unit), `expires_in_days` is 1..730 or null and `note` is free text.
 remove_shopping_items only carries names that matched an item in `shopping`,
 so the client never has to guess what the model meant.
 
-Reads never produce actions. The deterministic layers (decay, expiration,
-consumption-rate learning) stay in the frontend / SQL exactly as before; the
-chatbot only triggers them, it never recomputes them.
+Reads never produce actions. suggest_substitutions is a read too: it asks
+substitutions.py what stands in for an ingredient (pantry first) and Claude
+answers in prose, so the client has nothing to apply. The deterministic layers
+(decay, expiration, consumption-rate learning) stay in the frontend / SQL
+exactly as before; the chatbot only triggers them, it never recomputes them.
 """
 
 from __future__ import annotations
@@ -51,11 +58,12 @@ import math
 import re
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import bedrock
 import recipes as rx
 import recipes_ai  # Claude recipe suggestions (leaves the deck's recipe engine untouched)
+import substitutions  # "no heavy cream?" -> what stands in, pantry first
 from recipes import (
     ALLERGENS,
     CUISINES,
@@ -89,12 +97,58 @@ class ShoppingItem(BaseModel):
     done: bool = False
 
 
+def _str_list(value, limit: int, count: int) -> list[str]:
+    """A list of short strings from whatever the client sent; a bare string is one
+    entry, anything else is none. Never a 422 for a sloppy recipe object."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = [" ".join(str(v).split())[:limit].strip() for v in value if isinstance(v, (str, int, float))]
+    return [v for v in out if v][:count]
+
+
+class FocusRecipe(BaseModel):
+    """The recipe the user has open when they ask from the popup ("Ask a question").
+
+    The client sends the whole dish so a question like "can I skip the wine?" or
+    "how long does step 3 take?" needs no other context. It shapes the system
+    prompt only; tool routing is unchanged."""
+
+    title: str = ""
+    servings: int = 2
+    ingredients: list[str] = Field(default_factory=list)  # "1 cup heavy cream" lines
+    steps: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)  # ingredient names the pantry lacks
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        return " ".join(str(v or "").split())[:120]
+
+    @field_validator("servings", mode="before")
+    @classmethod
+    def _servings(cls, v):
+        return rx._clamp_int(v, 2, 1, 24)
+
+    @field_validator("ingredients", "missing", mode="before")
+    @classmethod
+    def _names(cls, v):
+        return _str_list(v, 120, 40)
+
+    @field_validator("steps", mode="before")
+    @classmethod
+    def _steps(cls, v):
+        return _str_list(v, 600, 20)
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
     pantry: list[PantryItem] = Field(default_factory=list)
     prefs: Prefs | None = None
     recent_meals: list[Meal] = Field(default_factory=list)
     shopping: list[ShoppingItem] = Field(default_factory=list)
+    focus_recipe: FocusRecipe | None = None
 
 
 SYSTEM = """You are the in-app assistant for mise en feast, an app that tracks what food a
@@ -122,6 +176,10 @@ When the user tells you something actionable, take the action AND confirm it pla
 For "what can I make ..." questions, call suggest_recipes directly and immediately — it
 already receives the full pantry and preferences, so do NOT call read_pantry or
 get_expiring first. The recipes it returns are shown to the user as tappable cards.
+
+For "I don't have X" / "what can I use instead of X" / "no heavy cream?" call
+suggest_substitutions: it already knows the pantry and the recipe on screen, so answer in
+prose from what it returns, the pantry-based swap first, with the ratio and its note.
 
 Be concise, friendly and specific. Never invent pantry items the user does not have. Do
 not claim you changed something unless you called the tool for it: never say an item was
@@ -155,7 +213,7 @@ TOOLS = [
     {
         "toolSpec": {
             "name": "read_preferences",
-            "description": "Read the household's dietary preferences: allergies, diet, cuisines, time limit, skill, equipment, dislikes, household size.",
+            "description": "Read the household's dietary preferences: allergies, diet, cuisines, time limit, skill, equipment, dislikes, household size, and the dishes they rated up (liked) or down (disliked).",
             "inputSchema": {"json": {"type": "object", "properties": {}}},
         }
     },
@@ -200,7 +258,8 @@ TOOLS = [
                 "Update one dietary preference. field is one of: allergies, diet, cuisines, "
                 "equipment (each a list of allowed ids), maxMinutes (integer, 0=any), skill "
                 "(beginner|comfortable|confident), shopping (weekly|twice-weekly|whenever), "
-                "avoid (free text of disliked ingredients), household (object {adults,kids}). "
+                "avoid (free text of disliked ingredients), household (object {adults,kids}), "
+                "liked / disliked (each a list of dish titles they rated up / down). "
                 "For a list field, pass the COMPLETE new list."
             ),
             "inputSchema": {
@@ -335,6 +394,28 @@ TOOLS = [
             },
         }
     },
+    {
+        "toolSpec": {
+            "name": "suggest_substitutions",
+            "description": (
+                "What to use instead of ONE ingredient, from what is in the pantry first. Use it "
+                "when the user is out of something, asks what they can swap, or wants to skip an "
+                "ingredient. Pass the ingredient and, if the user named one, the dish it is for "
+                "(the recipe on screen is used automatically). Returns up to 4 swaps with a ratio "
+                "and a note on how each changes the dish; answer in prose from them."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "ingredient": {"type": "string", "description": "The ingredient they lack, e.g. 'heavy cream'."},
+                        "dish_title": {"type": "string", "description": "The dish it is for, only if the user named one."},
+                    },
+                    "required": ["ingredient"],
+                }
+            },
+        }
+    },
 ]
 
 
@@ -419,7 +500,31 @@ def _prefs_view(prefs: Prefs | None) -> dict:
         "avoid": prefs.avoid,
         "shopping": prefs.shopping,
         "household": {"adults": prefs.household.adults, "kids": prefs.household.kids},
+        "liked": prefs.liked,  # dish titles rated up / down, newest first
+        "disliked": prefs.disliked,
     }
+
+
+def _focus_block(focus: FocusRecipe | None) -> str:
+    """The system-prompt suffix for a question asked from the recipe popup, or ""."""
+    if focus is None or not focus.title:
+        return ""
+    lines = [
+        "",
+        "The user is currently looking at this recipe and their questions are about it unless they say otherwise:",
+        f"Title: {focus.title}",
+        f"Serves: {focus.servings}",
+    ]
+    if focus.ingredients:
+        lines.append("Ingredients: " + "; ".join(focus.ingredients))
+    if focus.steps:
+        lines.append("Steps:")
+        lines.extend(f"{n}. {step}" for n, step in enumerate(focus.steps, 1))
+    if focus.missing:
+        lines.append("They are missing: " + ", ".join(focus.missing) + ".")
+    else:
+        lines.append("They are missing: nothing, the pantry covers it.")
+    return "\n".join(lines)
 
 
 # ---- preference validation (mirrors the store.js / recipes.py contract) ----
@@ -468,6 +573,9 @@ def _validate_pref(field: str, value):
         if not out:
             raise ValueError("household needs adults and/or kids")
         return field, out
+    if field in ("liked", "disliked"):
+        # Complete lists of dish titles, cleaned the way Prefs cleans them (30 x 80 chars).
+        return field, rx.clean_titles(value)
     raise ValueError(f"unknown preference field: {field}")
 
 
@@ -704,6 +812,33 @@ def _run_tool(name: str, args: dict, req: ChatRequest, actions: list[dict], reci
             actions.append({"type": "remove_shopping_items", "names": removed})
         return {"ok": bool(removed), "removed": removed, "unknown": unknown}
 
+    if name == "suggest_substitutions":
+        ingredient = " ".join(str(args.get("ingredient") or "").split())[:120]
+        if not ingredient:
+            return {"ok": False, "error": "ingredient is required, e.g. 'heavy cream'"}
+        focus = req.focus_recipe
+        named = " ".join(str(args.get("dish_title") or "").split())[:120]
+        # The recipe on screen is the dish unless the model named a different one; its
+        # ingredient list only travels with it (a swap depends on what else is in the pot).
+        on_screen = focus is not None and focus.title and (not named or _norm(named) == _norm(focus.title))
+        sreq = substitutions.SubRequest(
+            ingredient=ingredient,
+            dish_title=focus.title if on_screen else named,
+            dish_ingredients=list(focus.ingredients) if on_screen else [],
+            pantry=req.pantry,
+            prefs=req.prefs,
+        )
+        try:
+            subs = substitutions.suggest(sreq)
+        except (HTTPException, ValueError) as exc:
+            # A failed lookup should not sink the whole turn: tell Claude, and it can
+            # still answer from general knowledge while saying it could not check the pantry.
+            detail = getattr(exc, "detail", None) or str(exc)
+            return {"ok": False, "error": f"substitution lookup failed: {detail}"}
+        if not subs:
+            return {"ingredient": ingredient, "substitutions": [], "note": "nothing sensible stands in for it in this dish"}
+        return {"ingredient": ingredient, "dish": sreq.dish_title, "substitutions": [s.model_dump() for s in subs]}
+
     return {"ok": False, "error": f"unknown tool: {name}"}
 
 
@@ -737,18 +872,21 @@ def _to_converse_messages(history: list[ChatMessage]) -> list[dict]:
 
 
 def run(req: ChatRequest) -> dict:
-    """Run the chatbot for one user turn. Returns { reply, actions }."""
+    """Run the chatbot for one user turn. Returns { reply, actions, recipes }."""
     messages = _to_converse_messages(req.messages)
     if not messages or messages[-1]["role"] != "user":
         raise HTTPException(400, "The last message must be from the user.")
 
     actions: list[dict] = []
     recipes: list[dict] = []
+    # The recipe open in the popup, if any, is appended to the system prompt for every
+    # call of this turn, so the reply after a tool call still knows which dish is meant.
+    system = SYSTEM + _focus_block(req.focus_recipe)
 
     for _ in range(MAX_TOOL_TURNS):
         response = bedrock.converse(
             messages=messages,
-            system=SYSTEM,
+            system=system,
             tools=TOOLS,
             max_tokens=768,
             temperature=0.3,
@@ -779,6 +917,6 @@ def run(req: ChatRequest) -> dict:
 
     # Ran out of tool turns: make one last plain call for a closing reply.
     response = bedrock.converse(
-        messages=messages, system=SYSTEM, max_tokens=768, temperature=0.3, model=bedrock.model_fast()
+        messages=messages, system=system, max_tokens=768, temperature=0.3, model=bedrock.model_fast()
     )
     return {"reply": bedrock.response_text(response), "actions": actions, "recipes": recipes}
