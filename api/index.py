@@ -6,6 +6,7 @@ function, mounted under /api so the static frontend can call it same-origin.
   /api/scan     -> backend /scan
   /api/recipes  -> backend /recipes
   /api/cook     -> backend /cook
+  /api/identify -> backend /identify   (skeleton: 501 until wired up, or IDENTIFY_STUB=1)
 
 Set GEMINI_API_KEY (and optionally GEMINI_MODEL) in the Vercel project's
 environment variables. Locally, run backend/ with uvicorn instead (see

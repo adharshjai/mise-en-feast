@@ -14,12 +14,21 @@
      { version: 2, onboarded, household: { adults, kids }, allergies[], diet[],
        cuisines[], maxMinutes, skill, equipment[], avoid, shopping }
    The allowed values are the exported lists below; normalizePrefs() migrates the
-   old v1 shape { diet[], household: number, maxMinutes, avoid }. */
+   old v1 shape { diet[], household: number, maxMinutes, avoid }.
+
+   Saved dishes ("photo of a dish → recipe", see loadSavedDishes / saveDish /
+   removeDish at the bottom) always live in localStorage and, when signed in, in
+   the public.recipes table as well. Dish shape (the deck's, plus a few fields):
+     { id: 'photo-<uuid>', name, img (data: URL), time: '30 min', servings,
+       difficulty: 'Easy'|'Medium'|'Hard', ingredients: [{ name, key, need, amt, staple }],
+       names[], steps[], tags: { vegetarian, vegan, contains[] }, cuisine,
+       source: 'photo', confidence, description, savedAt (ms epoch) } */
 
 import { configured, getClient, getSession, getUser } from './supabase.js';
 
 export const LOCAL_KEY = 'pantry.state.v1';
 export const PREFS_KEY = 'pantry.prefs.v1';
+export const SAVED_KEY = 'pantry.saved.v1';
 const DEBOUNCE_MS = 400;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -548,5 +557,341 @@ export async function logReceipt({ store, total, scannedAt, itemCount } = {}) {
     if (error) throw error;
   } catch (err) {
     console.warn('[pantry] logReceipt failed', err);
+  }
+}
+
+/* ---------- saved dishes ("photo of a dish → recipe") ----------
+   The browser copy under SAVED_KEY is the source of truth for demo mode and the
+   instant read on every load. Signed in, each dish is also upserted into
+   public.recipes (id uuid, user_id default auth.uid(), title, image_url,
+   cook_minutes, servings, steps jsonb, ingredients jsonb, generated_at) and the
+   two are merged on load. Writes to Supabase are fire-and-forget and serialised,
+   so a save followed by a quick remove lands in that order. Nothing here throws. */
+
+const MAX_SAVED = 50;   // ~100 KB per dish photo as a data URL; keep well under the localStorage quota
+
+/** Canned /identify answer, used for "Use a sample photo" (pair it with ../img/shakshuka.jpg)
+    and as the fallback when the backend is unreachable or still answers 501. */
+const deepFreeze = o => {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) { Object.freeze(o); Object.values(o).forEach(deepFreeze); }
+  return o;
+};
+export const SAMPLE_IDENTIFIED = deepFreeze({
+  title: 'Shakshuka',
+  confidence: 0.86,
+  description: 'Eggs poached in a paprika-spiced tomato sauce, served straight from the pan.',
+  cuisine: 'middle-eastern',
+  cook_minutes: 30,
+  servings: 2,
+  difficulty: 'easy',
+  ingredients: [
+    { name: 'Eggs', amount: '4', staple: false },
+    { name: 'Tomatoes', amount: '4 roma, chopped', staple: false },
+    { name: 'Onion', amount: '1, diced', staple: false },
+    { name: 'Garlic', amount: '2 cloves', staple: false },
+    { name: 'Smoked paprika', amount: '1 tsp', staple: false },
+    { name: 'Feta', amount: '2 oz, crumbled', staple: false },
+    { name: 'Olive oil', amount: '2 tbsp', staple: true },
+    { name: 'Salt', amount: 'to taste', staple: true },
+  ],
+  steps: [
+    'Warm the olive oil in a wide pan over medium heat and soften the onion, about 5 minutes.',
+    'Stir in the garlic and paprika and cook for a minute, until fragrant.',
+    'Add the tomatoes and a pinch of salt; simmer 10 to 12 minutes, until the sauce is thick.',
+    'Make four wells in the sauce and crack an egg into each one.',
+    'Cover and cook 5 to 7 minutes, until the whites are set and the yolks are still soft.',
+    'Scatter the feta over the top and serve from the pan, with bread for the sauce.',
+  ],
+  tags: { vegetarian: true, vegan: false, contains: ['eggs', 'dairy'] },
+});
+
+const capitalize = s => str(s).replace(/^\w/, c => c.toUpperCase());
+/** "30 min" → 30; null when there is no number in it. */
+const minutesOf = time => { const m = /\d+/.exec(str(time)); return m ? Number(m[0]) : null; };
+
+function normalizeIngredient(i) {
+  if (typeof i === 'string') i = { name: i };
+  if (!i || typeof i !== 'object') return null;
+  const name = str(i.name).trim();
+  if (!name) return null;
+  return {
+    name,
+    key: lc(i.key || name) || 'item',
+    need: Math.max(0.5, num(i.need, 1)),
+    amt: str(i.amt ?? i.amount),
+    staple: Boolean(i.staple),
+  };
+}
+
+function normalizeTags(t, cuisine) {
+  const src = t && typeof t === 'object' ? t : {};
+  return {
+    ...src,                                  // the deck's extra keys (pescatarian, …) survive
+    vegetarian: Boolean(src.vegetarian) || Boolean(src.vegan),
+    vegan: Boolean(src.vegan),
+    contains: pick(src.contains, ALLERGENS),
+    cuisine: lc(src.cuisine || cuisine),
+  };
+}
+
+/** Coerce anything into the saved-dish shape (always a fresh copy), or null when
+    there is no name to show. Unknown fields are kept so nothing the app adds later
+    is lost on a round trip. */
+export function normalizeDish(d) {
+  if (!d || typeof d !== 'object') return null;
+  const name = str(d.name || d.title).trim();
+  if (!name) return null;
+  const id = str(d.id).trim() || `photo-${newId()}`;
+  const ingredients = (Array.isArray(d.ingredients) ? d.ingredients : []).map(normalizeIngredient).filter(Boolean);
+  const cuisine = lc(d.cuisine || (d.tags && d.tags.cuisine));
+  const minutes = minutesOf(d.time) ?? (d.cook_minutes == null ? null : num(d.cook_minutes, null));
+  const names = list(d.names).filter(Boolean);   // every ingredient name, staples included, for the allergy checks
+  return {
+    ...d,
+    id,
+    name,
+    img: str(d.img),
+    time: minutes == null ? str(d.time) || '20 min' : `${Math.max(1, Math.round(minutes))} min`,
+    servings: Math.max(1, Math.round(num(d.servings, 2))),
+    difficulty: capitalize(d.difficulty) || 'Easy',
+    ingredients,
+    names: names.length ? names : ingredients.map(i => i.name),
+    steps: list(d.steps).map(s => s.trim()).filter(Boolean),
+    tags: normalizeTags(d.tags, cuisine),
+    cuisine,
+    source: str(d.source) || (id.startsWith('photo-') ? 'photo' : 'deck'),
+    confidence: d.confidence == null ? null : Math.min(1, Math.max(0, num(d.confidence, 0))),
+    description: str(d.description).trim(),
+    savedAt: num(d.savedAt, Date.now()),
+  };
+}
+
+/* public.recipes row mapping.
+   Row ids are uuids. A photo dish's id is 'photo-<uuid>', so the uuid part is the
+   row id; any other id (a deck dish someone saved, 'pasta') is hashed together
+   with the user id into a stable uuid so two accounts can't collide on the key.
+   The original id travels inside the jsonb as client_id and comes back on read. */
+
+function fnv1a(text, seed) {
+  let h = (0x811c9dc5 ^ seed) >>> 0;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, '0');
+}
+function uuidFromString(text) {
+  const h = [0, 1, 2, 3].map(i => fnv1a(text, Math.imul(i + 1, 0x9e3779b9))).join('');   // 32 hex chars
+  const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20)}`;
+}
+const UUID_TAIL = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+function rowIdFor(dishId, userId) {
+  const m = UUID_TAIL.exec(str(dishId));
+  return m ? m[1].toLowerCase() : uuidFromString(`${userId}:${dishId}`);
+}
+
+function dishToRow(d, userId) {
+  const { id, name, img, time, servings, steps, savedAt, ingredients, ...rest } = d;
+  return {
+    id: rowIdFor(id, userId),
+    user_id: userId,
+    title: name,
+    // Prototype: the downscaled photo goes in as a data: URL. Production should upload
+    // the file to Supabase Storage and store that object's public URL here instead.
+    image_url: img || null,
+    cook_minutes: minutesOf(time),
+    servings,
+    steps,
+    // Everything the row has no column for, so a read gives back the same dish.
+    ingredients: { ...rest, items: ingredients, client_id: id },
+    generated_at: toIso(savedAt),
+  };
+}
+
+function dishFromRow(r) {
+  const payload = r.ingredients && typeof r.ingredients === 'object' && !Array.isArray(r.ingredients) ? r.ingredients : {};
+  const { items, client_id: clientId, ...rest } = payload;
+  return normalizeDish({
+    ...rest,
+    id: str(clientId) || `photo-${str(r.id)}`,
+    name: r.title,
+    img: r.image_url,
+    time: r.cook_minutes == null ? '' : `${r.cook_minutes} min`,
+    servings: r.servings,
+    steps: r.steps,
+    ingredients: Array.isArray(items) ? items : (Array.isArray(r.ingredients) ? r.ingredients : []),
+    savedAt: fromIso(r.generated_at, Date.now()),
+  });
+}
+
+/* ---------- localStorage copy ---------- */
+
+/** Dedupe by id (the newer savedAt wins), newest first, capped. */
+function tidyDishes(dishes) {
+  const byId = new Map();
+  for (const raw of dishes) {
+    const d = normalizeDish(raw);
+    if (!d) continue;
+    const prev = byId.get(d.id);
+    if (!prev || d.savedAt >= prev.savedAt) byId.set(d.id, d);
+  }
+  return [...byId.values()].sort((a, b) => b.savedAt - a.savedAt).slice(0, MAX_SAVED);
+}
+
+function readLocalSaved() {
+  try {
+    const raw = localStorage.getItem(SAVED_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return tidyDishes(Array.isArray(parsed) ? parsed : []);
+  } catch (err) {
+    console.warn('[pantry] could not read saved dishes', err);
+    return [];
+  }
+}
+
+function writeLocalSaved(dishes) {
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify(dishes)); } catch (err) { console.warn('[pantry] could not write saved dishes', err); }
+}
+
+/** Drop the browser's copy of the saved dishes (on sign-out). */
+export function clearLocalSaved() {
+  try { localStorage.removeItem(SAVED_KEY); } catch (err) { console.warn('[pantry] could not clear saved dishes', err); }
+}
+
+/* ---------- public API ---------- */
+
+/** Resolve to the saved dishes, newest first. Signed in: the account's recipes rows
+    merged with this browser's copy (dedupe by id, newer savedAt wins) and the merge
+    written back locally so an offline reload still shows them. Never rejects. */
+export async function loadSavedDishes() {
+  const local = readLocalSaved();
+  try {
+    const user = await signedInUser();
+    if (!user) return local;
+    const client = await getClient();
+    const { data, error } = await client.from('recipes').select('*').eq('user_id', user.id).order('generated_at', { ascending: false });
+    if (error) throw error;
+    const merged = tidyDishes([...(data || []).map(dishFromRow), ...local]);
+    writeLocalSaved(merged);
+    return merged;
+  } catch (err) {
+    console.warn('[pantry] loadSavedDishes failed, using the local copy', err);
+    return local;
+  }
+}
+
+let savedInflight = Promise.resolve();
+const queueRemote = (label, job) => {
+  savedInflight = savedInflight.then(job).catch(err => console.warn(`[pantry] ${label} failed`, err));
+};
+
+async function upsertRemote(dish) {
+  const user = await signedInUser();
+  if (!user) return;
+  const client = await getClient();
+  const { error } = await client.from('recipes').upsert(dishToRow(dish, user.id), { onConflict: 'id' });
+  if (error) throw error;
+}
+
+async function deleteRemote(id) {
+  const user = await signedInUser();
+  if (!user) return;
+  const client = await getClient();
+  const { error } = await client.from('recipes').delete().eq('user_id', user.id).eq('id', rowIdFor(id, user.id));
+  if (error) throw error;
+}
+
+/** Add or replace (by id) a dish in localStorage right away and, when signed in,
+    upsert it into public.recipes in the background. Returns the normalised copy
+    that was stored (with its id and savedAt filled in), or null when the dish had
+    no name. Never throws. */
+export function saveDish(dish) {
+  try {
+    const d = normalizeDish(dish);
+    if (!d) return null;
+    writeLocalSaved(tidyDishes([d, ...readLocalSaved().filter(x => x.id !== d.id)]));
+    if (configured) queueRemote('saveDish', () => upsertRemote(d));
+    // Keep the app's own object in step with what was stored (id / savedAt may have been filled in).
+    if (dish && typeof dish === 'object' && !Object.isFrozen(dish)) { dish.id = d.id; dish.savedAt = d.savedAt; }
+    return d;
+  } catch (err) {
+    console.warn('[pantry] saveDish failed', err);
+    return null;
+  }
+}
+
+/** Remove a saved dish by id from localStorage right away and, when signed in,
+    from public.recipes in the background. Returns whether the browser had it. Never throws. */
+export function removeDish(id) {
+  try {
+    const key = str(id);
+    const before = readLocalSaved();
+    const after = before.filter(x => x.id !== key);
+    if (after.length !== before.length) writeLocalSaved(after);
+    if (configured) queueRemote('removeDish', () => deleteRemote(key));
+    return after.length !== before.length;
+  } catch (err) {
+    console.warn('[pantry] removeDish failed', err);
+    return false;
+  }
+}
+
+/* ---------- photo downscale ---------- */
+
+function readAsDataURL(file) {
+  return new Promise(resolve => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => { console.warn('[pantry] could not read the photo', reader.error); resolve(''); };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.warn('[pantry] could not read the photo', err);
+      resolve('');
+    }
+  });
+}
+
+/** Decode a File into something drawImage() accepts, honouring EXIF orientation. */
+async function decodeImage(file) {
+  if (typeof createImageBitmap === 'function') {
+    try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* fall through to <img> */ }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = url;
+    });
+  } finally {
+    // Revoke after the current task so a resolved <img> has already been drawn from.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
+
+/** Shrink a photo to at most `maxSide` px on its long edge and return it as a JPEG
+    data: URL (what the dish card and public.recipes.image_url hold). If the browser
+    can't decode or re-encode it (HEIC in Chrome, a tainted canvas, no canvas at all)
+    the original file comes back as a data: URL instead; '' when even that fails.
+    Never rejects. */
+export async function downscaleImage(file, maxSide = 640, quality = 0.72) {
+  if (!file) return '';
+  try {
+    const source = await decodeImage(file);
+    const w0 = source.naturalWidth || source.width, h0 = source.naturalHeight || source.height;
+    if (!w0 || !h0) throw new Error('image has no size');
+    const scale = Math.min(1, maxSide / Math.max(w0, h0));
+    const w = Math.max(1, Math.round(w0 * scale)), h = Math.max(1, Math.round(h0 * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(source, 0, 0, w, h);
+    if (typeof source.close === 'function') source.close();
+    const url = canvas.toDataURL('image/jpeg', quality);
+    if (!url.startsWith('data:image/jpeg')) throw new Error('canvas could not export a JPEG');
+    return url;
+  } catch (err) {
+    console.warn('[pantry] downscaleImage fell back to the original file', err);
+    return readAsDataURL(file);
   }
 }

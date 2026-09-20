@@ -1,5 +1,6 @@
 """
-Pantry AI backend — receipt OCR + recipe generation via Gemini.
+Pantry AI backend — receipt OCR + recipe generation via Gemini, and (skeleton,
+see identify.py) a photo of a dish → its recipe.
 
 Pairs with the static frontend in ../frontend (Supabase for auth/persistence).
 
@@ -25,6 +26,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import identify as ident
 import recipes as rx
 
 load_dotenv()  # must run before the client is built
@@ -329,6 +331,39 @@ def cook(req: CookRequest):
     return {"items": updated, "depleted": depleted}
 
 
+@app.post("/identify")
+async def identify_dish(file: UploadFile = File(...)):
+    """Photo of a dish → its recipe (contract in identify.py). SKELETON:
+
+    - IDENTIFY_STUB=1  → the canned shakshuka in identify.SAMPLE_IDENTIFIED, no key needed.
+    - otherwise        → 501 "identify is not implemented yet" until the owner pastes
+                         the Gemini call into identify.identify() (five commented lines).
+    Once wired up, errors map like /scan and /recipes: 400 bad upload, 503 no key,
+    502 the model call failed.
+    """
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(400, "Empty file.")
+
+    mime_type = file.content_type or "image/jpeg"
+    if not mime_type.startswith("image/"):
+        raise HTTPException(400, f"Unsupported type: {mime_type}")
+
+    try:
+        # Only build the client when it will be used, so the stub works without a key.
+        client = None if ident.stubbed() else gemini()
+        dish = ident.identify(image_bytes, mime_type, client, MODEL)
+    except HTTPException:
+        raise
+    except NotImplementedError:
+        raise HTTPException(501, "identify is not implemented yet")
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()  # the terminal is where you'll actually read this
+        raise HTTPException(502, f"Could not identify dish: {exc}") from exc
+
+    return dish.model_dump()
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY"))}
@@ -341,5 +376,5 @@ def root():
         "service": "pantry-ai",
         "health": "/health",
         "docs": "/docs",
-        "endpoints": ["/scan", "/recipes", "/cook"],
+        "endpoints": ["/scan", "/recipes", "/cook", "/identify"],
     }

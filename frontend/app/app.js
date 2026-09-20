@@ -7,11 +7,12 @@
 
 import { requireAuth, signOut, configured, onAuthChange } from '../shared/supabase.js';
 import {
-  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs,
+  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs, clearLocalSaved,
   loadPrefs, savePrefs, prefsToRequest, normalizePrefs, servingsTarget, householdScale, ingredientHits,
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
+  loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED,
 } from '../shared/store.js';
-import { scanReceipt, fetchRecipes, apiConfigured } from '../shared/api.js';
+import { scanReceipt, fetchRecipes, identifyDish, apiConfigured } from '../shared/api.js';
 
 const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
@@ -36,6 +37,10 @@ const ICON = {
   checkSm: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>', 12, 3),
   checkMd: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>', 16, 3),
   camera: svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>', 16),
+  cameraLg: svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>', 22, 2),
+  receipt: svg('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>', 22, 2),
+  cameraBig: svg('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>', 30, 2),
+  bookmark: svg('<path d="M6 4.5h12v16l-6-4.2-6 4.2z"/>', 16),
   upload: svg('<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>', 30, 2),
   chevron: svg('<path d="M9 6l6 6-6 6"/>', 16),
   trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>', 16, 2),
@@ -143,8 +148,6 @@ function dishStats(dish) {
 }
 const money = v => `$${v.toFixed(2)}`;
 
-// Pantry staples we don't nag people to buy once they say they keep them stocked.
-const STAPLE_KEYS = new Set(['olive oil', 'oil', 'salt', 'pepper', 'black pepper', 'chili flakes', 'cumin', 'paprika', 'oregano', 'sugar', 'flour', 'butter', 'soy sauce']);
 // Scale the leading number in a display amount ("5 oz" -> "10 oz"); leave "a pinch" alone.
 const scaleAmt = (amt, f) => {
   if (!f || f === 1) return amt;
@@ -253,7 +256,13 @@ function pickPhoto(recipe, index) {
 let liveDishes = null;
 let recipeRefreshToken = 0;
 
-const dishById = id => (liveDishes || DISHES).find(d => d.id === id);
+// Dishes from a photo live outside the deck: in Saved, or (picked for tonight and then
+// removed from Saved) in state.photoDishes, so the Tonight pill can still open them.
+const isPhotoId = id => String(id).startsWith('photo-');
+const dishById = id => (liveDishes || DISHES).find(d => d.id === id)
+  || state.saved.find(d => d.id === id)
+  || state.photoDishes.get(id)
+  || null;
 const activeDishes = () => liveDishes || DISHES;
 
 const SAMPLE_RECEIPT = {
@@ -411,7 +420,7 @@ async function refreshRecipes() {
     populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
-      for (const id of [...set]) if (!ids.has(id)) set.delete(id);
+      for (const id of [...set]) if (!ids.has(id) && !isPhotoId(id)) set.delete(id);   // photo dishes are never in the deck; keep them
     }
     renderAll({ enter: true });
     return liveDishes || [];
@@ -615,6 +624,8 @@ const state = {
   skipped: new Set(),
   cooked: new Set(),
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
+  saved: [],                // dishes kept from the photo flow, newest first; replaced by loadSavedDishes() at boot
+  photoDishes: new Map(),   // photo dishes picked for tonight, by id, so they stay findable if removed from Saved
   expanded: new Set(),      // pantry stack keys that are open
   prefs: normalizePrefs(DEFAULT_PREFS),   // cooking preferences; replaced by loadPrefs() at boot
   prefsHid: false,          // the deck is empty only because of the preferences (nothing to reshuffle)
@@ -622,6 +633,7 @@ const state = {
   sortMode: 'urgent',       // deck ordering, see SORTS
   detailDishId: null,       // recipe open in the detail sheet
   detailServings: 2,        // people the open recipe is scaled to
+  detailFromSaved: false,   // retain the return destination while changing servings
   panelTab: 'expiring',     // pantry panel sort tab: expiring | amount | category
   panelOpen: false,
   leaving: false,
@@ -649,7 +661,7 @@ const el = {
   endTitle: $('#end-title'), endCopy: $('#end-copy'), reshuffle: $('#btn-reshuffle'), endPrefs: $('#btn-end-prefs'),
   count: $('#btn-pantry'), tonight: $('#btn-tonight'), profile: $('#btn-profile'),
   veil: $('#veil'), sheet: $('#sheet'), panel: $('#panel'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
-  toast: $('#toast'), file: $('#file-input'),
+  toast: $('#toast'), file: $('#file-input'), dishFile: $('#dish-input'), savedBtn: $('#btn-saved'),
 };
 
 // The choke point after every mutation: everything derived is rebuilt here, then saved.
@@ -860,9 +872,9 @@ function syncInert() {
   for (const n of $$('.topbar, .stage, .foot')) n.inert = modal;
   el.panel.inert = !state.panelOpen;
 }
-// The file input lives in the dropzone while the upload sheet is open; park it before the sheet's markup is replaced.
+// The file inputs live in their dropzone while an upload sheet is open; park them before the sheet's markup is replaced.
 function parkFileInput() {
-  if (el.sheet.contains(el.file)) document.body.appendChild(el.file);
+  for (const input of [el.file, el.dishFile]) if (el.sheet.contains(input)) document.body.appendChild(input);
 }
 function openSheet(kind, html, cls = '') {
   if (!state.sheet) state.sheetReturn = document.activeElement;   // first open only: sheet-to-sheet keeps the original trigger
@@ -900,6 +912,26 @@ function closeSheet() {
 const closeBtn = (extra = '') => `<button class="circle sm glass muted close ${extra}" type="button" data-close aria-label="Close">${ICON.x}</button>`;
 
 /* ---------- scan: upload ---------- */
+/* ---------- scan: what kind of photo? ---------- */
+function openScanChooser() {
+  openSheet('scan-choose', `
+    <div class="sheet-head"><h2>What are we looking at?</h2>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="choose">
+        <button class="option glass" type="button" data-choose-receipt>
+          <span class="icon">${ICON.receipt}</span>
+          <span class="text"><strong>Scan a receipt</strong><small>Add what you bought. Items, quantities and use-by dates are read for you.</small></span>
+          <span class="go">${ICON.chevron}</span>
+        </button>
+        <button class="option glass" type="button" data-choose-dish>
+          <span class="icon">${ICON.cameraLg}</span>
+          <span class="text"><strong>Break down a dish</strong><small>A photo of any meal becomes a recipe, with what you have and what you'll need.</small></span>
+          <span class="go">${ICON.chevron}</span>
+        </button>
+      </div>
+    </div>`, 'w-520');
+}
+
 function openScanUpload() {
   openSheet('upload', `
     <div class="sheet-head"><h2>Scan a receipt</h2>${closeBtn()}</div>
@@ -909,9 +941,12 @@ function openScanUpload() {
         <strong>Drop a receipt or click to browse</strong>
         <small>Photos and PDFs · one receipt at a time</small>
       </label>
-      <div class="sheet-note">
+      <div class="sheet-note wrap">
         <span>${apiConfigured() ? 'Items, prices and dates are read with Gemini.' : 'Backend offline — use the sample receipt, or set apiBaseUrl.'}</span>
-        <button class="linkish accent" type="button" data-sample>Use sample receipt</button>
+        <span class="note-links">
+          <button class="linkish" type="button" data-dish-upload>Have a photo of a dish instead?</button>
+          <button class="linkish accent" type="button" data-sample>Use sample receipt</button>
+        </span>
       </div>
     </div>`);
   const zone = $('#dropzone');
@@ -1145,16 +1180,18 @@ function addToPantry() {
 }
 
 /* ---------- recipe detail and Made It ---------- */
-// Takes a deck analysis or a bare dish. The Tonight list is the one sheet allowed to open it sheet-to-sheet.
+// Recipe details can open from the deck, Tonight, or Saved.
 // Inner HTML for the recipe sheet, scaled to `people` (default from the household profile).
 function detailBody(a, people) {
   const d = a.dish;
+  const fromSaved = state.detailFromSaved;
+  const kept = isSaved(d.id);
   const base = Math.max(1, d.servings || 1);
   const factor = people / base;
   const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmt(i.amt, factor))}</span></div>`;
   return `
     <div class="hero">
-      <img src="${d.img}" alt="">
+      <img src="${esc(d.img)}" alt="">
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
       ${closeBtn()}
       <div class="hero-text">
@@ -1191,13 +1228,18 @@ function detailBody(a, people) {
       </div>
     </div>
     <div class="sheet-foot">
-      <button class="linkish" type="button" data-close>Back to deck</button>
+      ${fromSaved
+        ? `<button class="linkish" type="button" data-open-saved>Back to saved</button>`
+        : `<button class="linkish" type="button" data-close>Back to deck</button>`}
+      ${kept ? `<button class="linkish dim" type="button" data-remove-saved="${d.id}">Remove</button>` : ''}
+      <span class="grow"></span>
       <button class="pill prominent lg" type="button" data-madeit="${d.id}">${ICON.checkMd}<span>I made this</span></button>
     </div>`;
 }
 function openDetail(a) {
   if (!a || state.leaving) return;
-  if (state.sheet && state.sheet !== 'tonight') return;
+  if (state.sheet && state.sheet !== 'tonight' && state.sheet !== 'saved') return;
+  state.detailFromSaved = state.sheet === 'saved';
   a = analyze(a.dish || a);
   state.detailDishId = a.dish.id;
   state.detailServings = servingsTarget(state.prefs);
@@ -1227,7 +1269,9 @@ function openTonight() {
     <div class="sheet-foot"><button class="linkish" type="button" data-close>Back to deck</button></div>`, 'w-520');
 }
 function openMadeIt(dishId) {
-  const a = analyze(dishById(dishId));
+  const dish = dishById(dishId);
+  if (!dish) return;
+  const a = analyze(dish);
   const factor = state.detailServings / Math.max(1, a.dish.servings || 1);
   const rows = a.have.filter(i => i.item).map(original => {
     const i = { ...original, need: original.need * factor };
@@ -1249,7 +1293,8 @@ function openMadeIt(dishId) {
       <div class="deduct" id="deduct">
         ${rows.map(r => `<label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
           <span class="name"><strong>${esc(r.name)}</strong><small class="${r.last ? 'warn' : ''}">${esc(r.note)}</small></span>
-          <span class="amt">${r.need} of ${Math.round(r.cur)}</span></label>`).join('')}
+          <span class="amt">${r.need} of ${Math.round(r.cur)}</span></label>`).join('')
+          || '<p class="empty-note">Nothing in this dish is tracked in your pantry yet.</p>'}
       </div>
     </div>
     <div class="sheet-foot" style="flex-direction:column;align-items:stretch;gap:12px">
@@ -1267,6 +1312,7 @@ function updateDeductSummary() {
 }
 function finishMadeIt(dishId) {
   const dish = dishById(dishId);
+  if (!dish) return closeSheet();
   const checked = $$('#deduct input').filter(b => b.checked).map(b => b.dataset.key);
   const ranOut = [];
   const used = [];
@@ -1285,6 +1331,275 @@ function finishMadeIt(dishId) {
   toast('Pantry updated', `${plural(checked.length, 'item')} used`, ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '');
   logCook({ recipeId: dish.id, title: dish.name, items: used });
   refreshRecipes();
+}
+
+/* ---------- photo of a dish → recipe ----------
+   Upload (or the sample) → downscale → POST /identify → a dish object shaped like the
+   deck's → the result sheet, from which it can be saved or put on tonight's list.
+   While the backend is a skeleton (501) or unreachable, SAMPLE_IDENTIFIED stands in. */
+const SAMPLE_DISH_IMG = '../img/shakshuka.jpg';
+const DISH_SHEETS = new Set(['upload', 'saved', 'dish-upload', 'dish-processing', 'dish-result', 'scan-choose']);   // sheets the flow may open from
+const confidenceLabel = c => (c >= 0.8 ? 'pretty sure' : c >= 0.6 ? 'fairly sure' : 'best guess');
+const isSaved = id => state.saved.some(d => d.id === id);
+const isImageFile = f => /^image\//i.test(f.type || '') || /\.(heic|heif)$/i.test(f.name || '');
+let identifyToken = 0;    // a cancelled identify must not open a result over a newer one
+let resultDish = null;    // the dish in the result sheet, until it is saved or dropped
+
+// Servings a recipe takes from the pantry: 1, or 2 for something that reads as the bulk of the dish.
+function needFor(i) {
+  if (i.staple) return 1;
+  const a = String(i.amount || '').toLowerCase();
+  const n = parseFloat(a.replace(/^[^\d.]*/, '')) || 0;
+  if (/\b(lb|lbs|pound|pounds)\b/.test(a) && n >= 1) return 2;
+  if (/\boz\b/.test(a) && n >= 8) return 2;
+  if (/\bcups?\b/.test(a) && n >= 2) return 2;
+  if (/^\s*\d+\s*$/.test(a) && n >= 4) return 2;   // "4" eggs
+  return 1;
+}
+/** The /identify response as a deck-shaped dish (see the contract in shared/store.js). */
+function dishFromIdentified(res, imgDataUrl) {
+  const r = res && typeof res === 'object' ? res : {};
+  const t = r.tags && typeof r.tags === 'object' ? r.tags : {};
+  const level = String(r.difficulty || 'easy').toLowerCase();
+  const ingredients = (Array.isArray(r.ingredients) ? r.ingredients : [])
+    .filter(i => i && i.name)
+    .map(i => ({ name: String(i.name).trim(), key: keyForName(i.name), need: needFor(i), amt: String(i.amount || '').trim(), staple: Boolean(i.staple) }));
+  const cuisine = String(r.cuisine || '').toLowerCase().trim();
+  return {
+    id: `photo-${uid()}`,
+    name: String(r.title || 'Untitled dish').trim() || 'Untitled dish',
+    img: imgDataUrl || '',
+    time: `${Math.max(1, Math.round(Number(r.cook_minutes) || 20))} min`,
+    servings: Math.max(1, Math.round(Number(r.servings) || 2)),
+    difficulty: ['easy', 'medium', 'hard'].includes(level) ? level.replace(/^\w/, c => c.toUpperCase()) : 'Easy',
+    ingredients,
+    names: ingredients.map(i => i.name),   // staples included, for the allergy and dislike checks
+    steps: (Array.isArray(r.steps) ? r.steps : []).map(s => String(s).trim()).filter(Boolean),
+    tags: { vegetarian: Boolean(t.vegetarian) || Boolean(t.vegan), vegan: Boolean(t.vegan), contains: Array.isArray(t.contains) ? t.contains.map(String) : [], cuisine },
+    cuisine,
+    source: 'photo',
+    confidence: clamp(Number(r.confidence) || 0, 0, 1),
+    description: String(r.description || '').trim(),
+    savedAt: Date.now(),
+  };
+}
+// The backend is still a skeleton (501), deployed without a key (503), or not there (offline, no base URL):
+// show the sample instead of an error.
+function backendNotReady(err) {
+  const code = err && err.code;
+  if (code === 'not_implemented' || code === 'unreachable' || code === 'unconfigured') return true;
+  if (err && (err.status === 501 || err.status === 503)) return true;
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return /not implemented/.test(msg) || /failed to fetch|networkerror|load failed|network request failed/.test(msg);
+}
+
+function openDishUpload() {
+  if (state.sheet && !DISH_SHEETS.has(state.sheet)) return;
+  identifyToken++;   // whatever was being identified is dropped
+  resultDish = null;
+  openSheet('dish-upload', `
+    <div class="sheet-head"><h2>Photo of a dish</h2>${closeBtn()}</div>
+    <div class="sheet-body">
+      <label class="dropzone drop" id="dish-dropzone" for="dish-input">
+        <span class="icon-ring">${ICON.cameraBig}</span>
+        <strong>Drop a photo of any dish, or click to browse</strong>
+        <small>One dish per photo works best</small>
+      </label>
+      <div class="sheet-note wrap">
+        <span>${apiConfigured() ? 'The dish, its recipe and what you already have are worked out with Gemini.' : 'Backend offline — use the sample photo, or set apiBaseUrl.'}</span>
+        <span class="note-links">
+          <button class="linkish accent" type="button" data-dish-sample>Use a sample photo</button>
+          <button class="linkish" type="button" data-close>Cancel</button>
+        </span>
+      </div>
+    </div>`);
+  const zone = $('#dish-dropzone');
+  zone.prepend(el.dishFile);   // same pattern as the receipt: the real input is inside, the label names it
+  ['dragenter', 'dragover'].forEach(t => zone.addEventListener(t, e => { e.preventDefault(); zone.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(t => zone.addEventListener(t, e => { e.preventDefault(); zone.classList.remove('over'); }));
+  zone.addEventListener('drop', e => { const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) startIdentify(f); });
+}
+el.dishFile.addEventListener('change', () => { const f = el.dishFile.files[0]; if (f) startIdentify(f); el.dishFile.value = ''; });
+
+/** file: a File from the dropzone, or null for the sample photo. */
+async function startIdentify(file) {
+  const token = ++identifyToken;
+  const usingSample = !file;
+  if (file && !isImageFile(file)) {
+    toast('That doesn’t look like a photo', 'JPG, PNG, WEBP or HEIC');
+    return openDishUpload();
+  }
+  let img = SAMPLE_DISH_IMG;
+  if (file) {
+    img = await downscaleImage(file);   // never rejects; '' when the browser can't read it at all
+    if (token !== identifyToken || (state.sheet && state.sheet !== 'dish-upload')) return;   // dismissed or replaced meanwhile
+    if (!img) img = URL.createObjectURL(file);
+  }
+  const live = Boolean(file) && apiConfigured();
+  const steps = [
+    ['Looking at the dish', live ? 'Sending your photo to Gemini' : 'What is on the plate'],
+    ['Writing the recipe', 'Ingredients, amounts and steps'],
+    ['Checking your pantry', 'What you have and what you’ll need'],
+  ];
+  openSheet('dish-processing', `
+    <div class="sheet-head"><h2>Looking at your photo</h2>${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="processing">
+        <div class="dish-photo"><img src="${esc(img)}" alt=""><div class="receipt-tint"></div><div class="scanline"></div></div>
+        <div class="steps">${steps.map(([t, s]) => `<div class="step"><span class="mark">${ICON.checkMd}</span><div><strong>${t}</strong><small>${s}</small></div></div>`).join('')}</div>
+      </div>
+      <div class="sheet-note wrap">
+        <span>${usingSample
+          ? 'Sample photo — skip the camera when you just want to try the flow.'
+          : live ? 'Identifying with Gemini. Keep this tab open.' : 'Demo mode: the sample recipe stands in for the backend.'}</span>
+        <button class="linkish" type="button" data-dish-upload>Cancel</button>
+      </div>
+    </div>`);
+  const stepEls = $$('.step', el.sheet);
+  const still = () => token === identifyToken && state.sheet === 'dish-processing';
+  let res = null, fallback = false;
+
+  if (!live) {
+    // no request to wait for: play the steps, then use the canned answer
+    for (let i = 0; i < stepEls.length; i++) {
+      if (!still()) return;
+      stepEls[i].classList.add('active');
+      await wait(900);
+      stepEls[i].classList.remove('active');
+      stepEls[i].classList.add('done');
+    }
+    res = SAMPLE_IDENTIFIED;
+    fallback = !usingSample;   // they gave us a real photo and got the sample back: say so
+  } else {
+    // Animate steps while the request runs (same pattern as the receipt)
+    let stepIdx = 0;
+    stepEls[0]?.classList.add('active');
+    const tick = setInterval(() => {
+      if (!still()) return;
+      if (stepEls[stepIdx]) {
+        stepEls[stepIdx].classList.remove('active');
+        stepEls[stepIdx].classList.add('done');
+      }
+      stepIdx = Math.min(stepIdx + 1, stepEls.length - 1);
+      stepEls[stepIdx]?.classList.add('active');
+    }, 1400);
+    try {
+      res = await identifyDish(file);
+    } catch (err) {
+      console.warn('[pantry] identify failed', err);
+      if (backendNotReady(err)) { res = SAMPLE_IDENTIFIED; fallback = true; }
+      else {
+        clearInterval(tick);
+        if (!still()) return;
+        toast('Couldn’t read that photo', String(err.message || err));
+        return openDishUpload();
+      }
+    }
+    clearInterval(tick);
+  }
+  if (!still()) return;
+  stepEls.forEach(s => { s.classList.remove('active'); s.classList.add('done'); });
+  await wait(200);
+  if (!still()) return;
+  openDishResult(dishFromIdentified(res, img));
+  if (fallback) toast('Backend not ready yet — showing a sample');
+}
+
+const ingHaveHTML = i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`;
+const ingNeedHTML = i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`;
+
+// The result: the recipe detail's layout with the photo as the hero, split into what they have and what they'll need.
+function openDishResult(dish) {
+  resultDish = dish;
+  const a = analyze(dish);
+  const matched = a.have.filter(i => !i.staple);
+  const staples = a.ings.filter(i => i.staple);
+  const haveCol = (matched.length || staples.length)
+    ? matched.map(ingHaveHTML).join('') + (staples.length ? `<div class="divider"><span>Staples</span></div>${staples.map(ingHaveHTML).join('')}` : '')
+    : '<p class="ing-note">Nothing from your pantry yet.</p>';
+  const needCol = a.missing.length ? a.missing.map(ingNeedHTML).join('') : '<p class="ing-note">Nothing — you have it all.</p>';
+  openSheet('dish-result', `
+    <div class="hero">
+      <img src="${esc(dish.img)}" alt="">
+      <div class="badge glass looks"><span>Looks like ${esc(dish.name)} · ${confidenceLabel(dish.confidence)}</span></div>
+      ${closeBtn()}
+      <div class="hero-text">
+        <h2>${esc(dish.name)}</h2>
+        <div class="meta"><span>${esc(dish.time)}</span><i></i><span>${plural(dish.servings, 'serving')}</span><i></i>${difficultyHTML(dish)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        ${dish.description ? `<p class="dish-desc">${esc(dish.description)}</p>` : ''}
+      </div>
+    </div>
+    <div class="sheet-body result-body">
+      <div class="result-cols">
+        <div class="ings"><div class="eyebrow">You have</div>${haveCol}</div>
+        <div class="ings"><div class="eyebrow">You’ll need</div>${needCol}</div>
+      </div>
+      <div class="ings">
+        <div class="eyebrow">Steps</div>
+        ${dish.steps.length
+          ? `<ol class="stepslist">${dish.steps.map((s, i) => `<li><span class="num glass">${i + 1}</span><span>${esc(s)}</span></li>`).join('')}</ol>`
+          : '<p class="ing-note">No steps came back for this one.</p>'}
+      </div>
+    </div>
+    <div class="sheet-foot result-foot">
+      <button class="pill prominent lg" type="button" data-dish-save>${ICON.bookmark}<span>Save for later</span></button>
+      <button class="pill glass lg" type="button" data-dish-cook>${ICON.checkMd}<span>Cook tonight</span></button>
+      <button class="linkish dim" type="button" data-dish-upload>Not it? Try another photo</button>
+    </div>`, 'w-720 dish-result');
+}
+// Save keeps the recipe; cook also puts it on tonight's list, the way a cook swipe does.
+function keepResult({ cook = false } = {}) {
+  const dish = resultDish;
+  if (!dish) return closeSheet();
+  resultDish = null;
+  saveDish(dish);   // localStorage now, public.recipes in the background; never throws
+  state.saved = [dish, ...state.saved.filter(d => d.id !== dish.id)];
+  if (cook) {
+    state.photoDishes.set(dish.id, dish);
+    state.chosen.add(dish.id);
+  }
+  closeSheet();
+  renderAll();
+  toast(cook ? `Tonight · ${dish.name}` : `Saved · ${dish.name}`, cook ? 'Saved for later too' : '');
+}
+function removeSaved(id) {
+  const dish = state.saved.find(d => d.id === id);
+  state.saved = state.saved.filter(d => d.id !== id);
+  removeDish(id);
+  if (dish && state.chosen.has(id)) state.photoDishes.set(id, dish);   // still on tonight's list: keep it openable
+  renderAll();
+  toast('Removed from saved', dish ? dish.name : '');
+  openSaved();   // back to the list (sheet-to-sheet from the detail)
+}
+
+/* ---------- saved dishes ---------- */
+function savedRowHTML(d, i) {
+  const a = analyze(d);
+  const counted = a.ings.filter(x => !x.staple);   // staples are assumed, so they don't count either way
+  const haveN = counted.filter(x => x.have).length;
+  const thumb = d.img ? `<img class="thumb" src="${esc(d.img)}" alt="" draggable="false">` : `<span class="thumb" aria-hidden="true">${ICON.camera}</span>`;
+  return `<div class="rrow" style="animation-delay:${i * 50}ms">
+    <button class="main" type="button" data-open-saved-dish="${esc(d.id)}">
+      ${thumb}
+      <div class="name">
+        <strong>${esc(d.name)}</strong>
+        <small class="meta"><span>${esc(d.time)}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i>${difficultyHTML(d)}</small>
+        <small>you have ${haveN} of ${counted.length}</small>
+      </div>
+      <span class="chev">${ICON.chevron}</span>
+    </button>
+  </div>`;
+}
+function openSaved() {
+  if (state.sheet && state.sheet !== 'detail') return;   // the detail's "Back to saved" and Remove reopen it sheet-to-sheet
+  openSheet('saved', `
+    <div class="sheet-head"><h2>Saved dishes</h2>${closeBtn()}</div>
+    <div class="sheet-body">
+      <button class="pill prominent full" type="button" data-dish-upload>${ICON.camera}<span>Identify a dish from a photo</span></button>
+      <div class="dlist" id="saved-list">
+        ${state.saved.length ? state.saved.map(savedRowHTML).join('') : '<p class="empty-note">Nothing saved yet. Snap a dish and keep the recipe here.</p>'}
+      </div>
+    </div>`, 'w-520');
 }
 
 /* ---------- pantry panel ---------- */
@@ -1683,6 +1998,7 @@ async function doSignOut(btn) {
   btn.disabled = true;
   btn.textContent = 'Signing out…';
   clearLocalPrefs();   // the next account on this browser starts from its own answers
+  clearLocalSaved();   // and does not inherit this account's saved dishes (they stay in public.recipes)
   await signOut();
   location.replace('../login/');
 }
@@ -1690,7 +2006,8 @@ async function doSignOut(btn) {
 /* =========================================================================
    Wiring
    ========================================================================= */
-$('#btn-scan').addEventListener('click', openScanUpload);
+$('#btn-scan').addEventListener('click', openScanChooser);
+el.savedBtn.addEventListener('click', openSaved);
 $('#btn-scan-2').addEventListener('click', openScanUpload);
 $('#empty-drop').addEventListener('click', () => el.file.click());   // "click to browse" means the file picker
 $('#empty-sample').addEventListener('click', () => startProcessing(null));
@@ -1785,6 +2102,16 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
+  // photo of a dish, and the saved list
+  if (t.hasAttribute('data-dish-upload')) return openDishUpload();
+  if (t.hasAttribute('data-choose-receipt')) return openScanUpload();
+  if (t.hasAttribute('data-choose-dish')) return openDishUpload();
+  if (t.hasAttribute('data-dish-sample')) return startIdentify(null);
+  if (t.hasAttribute('data-dish-save')) return keepResult();
+  if (t.hasAttribute('data-dish-cook')) return keepResult({ cook: true });
+  if (t.hasAttribute('data-open-saved')) return openSaved();
+  if (t.dataset.openSavedDish) return openDetail(dishById(t.dataset.openSavedDish));
+  if (t.dataset.removeSaved) return removeSaved(t.dataset.removeSaved);
   // onboarding
   if (state.sheet === 'onboarding' && draft) {
     if (obChange(t)) return;
@@ -2086,8 +2413,9 @@ user = session && session.user ? session.user : null;
 renderAvatar();
 // Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
 onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
-const [saved, prefs] = await Promise.all([loadState(), loadPrefs()]);
+const [saved, prefs, kept] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes()]);
 state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
+state.saved = Array.isArray(kept) ? kept.filter(d => d && d.id && Array.isArray(d.ingredients)) : [];   // before renderAll, so a photo dish on tonight's list resolves
 if (saved) {
   state.pantry = saved.pantry;
   state.skipped = new Set(saved.skipped);
@@ -2101,4 +2429,4 @@ renderAll({ enter: true });
 refreshRecipes();
 // First visit (a fresh sign-in, or once per browser in demo mode): ask the five questions before anything else.
 if (!state.prefs.onboarded) openOnboarding();
-window.pantry = { state, drag, session, openOnboarding, openProfile, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console
+window.pantry = { state, drag, session, openOnboarding, openProfile, openDishUpload, openSaved, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console
