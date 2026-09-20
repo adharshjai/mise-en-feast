@@ -367,14 +367,6 @@ function lookupServing(key) {
  * about 29 of them, not five 100 g helpings); only a food we have no figure for
  * falls back to the family default.
  */
-/** The unit a food's serving is measured in ('g', 'ml' or 'pcs'), or null when the food is
-    not in the table (it then falls to the family defaults). Lets callers tell a food bought
-    by the piece from one bought by the package. */
-export function servingUnit(key) {
-  const entry = lookupServing(key);
-  return entry ? entry.unit : null;
-}
-
 export function servingsFor(key, text) {
   const c = toCanonical(text);
   if (c.amount == null || !c.unit) return null;
