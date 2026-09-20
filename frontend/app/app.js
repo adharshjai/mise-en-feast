@@ -2061,13 +2061,8 @@ function clearPantry() {
 }
 $('#btn-clear').addEventListener('click', clearPantry);
 
-// Logo goes "home" within the app (deck) instead of navigating away — which used to
-// drop the demo session and feel like a sign-out.
-$('#home').addEventListener('click', e => {
-  e.preventDefault();
-  closeSheet(); closePanel();
-  renderAll({ enter: true });
-});
+// The logo is a plain link to the landing page. Demo mode is kept in sessionStorage, so
+// coming back through "Open the app" does not bounce a demo visitor to the login page.
 
 /* ---------- profile menu (account: preferences, clear, sign out) ---------- */
 const profileEl = $('#profile'), profileBtn = $('#btn-profile'), profileMenu = $('#profile-menu');
