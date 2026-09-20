@@ -246,6 +246,34 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .stepslist li { display: flex; gap: 14px; align-items: flex-start; font-size: 16px; line-height: 1.55; }
 .stepslist .num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; margin-top: 2px; }
 
+/* ---------- photo of a dish → recipe, and the saved list ---------- */
+/* upload / processing notes that carry two links: let them wrap on phones instead of squeezing */
+.sheet-note.wrap { flex-wrap: wrap; gap: 6px 12px; }
+.note-links { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; margin-right: -6px; }
+/* the photo being read: same scanline as the receipt, on a rounded photo instead of a paper strip */
+.dish-photo {
+  position: relative; flex-shrink: 0; max-width: 320px; border-radius: 16px; overflow: hidden;
+  background: #0E0C0A; box-shadow: 0 10px 30px rgba(0,0,0,.45);
+}
+.dish-photo img { display: block; width: auto; height: auto; max-width: 100%; max-height: 320px; }
+/* result sheet: the detail's hero with a shorter title and a one-line description */
+.sheet.dish-result .hero-text h2 { font-size: 32px; line-height: 1.02; }
+.dish-desc { font-size: 15px; color: var(--text-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.hero .badge.looks { max-width: calc(100% - 84px); padding-left: 12px; }   /* leaves room for the close button */
+.result-body { padding: 28px 32px 24px; gap: 28px; }
+.result-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 40px; align-items: start; }
+.ing-note { font-size: 14px; color: var(--text-3); }
+.result-foot { flex-wrap: wrap; }
+/* saved list: the review's rows with a thumbnail */
+.dlist { display: flex; flex-direction: column; gap: 2px; margin: 0 -14px; }
+.dlist .rrow .main { gap: 14px; }
+.thumb {
+  width: 56px; height: 56px; border-radius: 14px; flex-shrink: 0; object-fit: cover; background: #0E0C0A;
+  display: flex; align-items: center; justify-content: center; color: var(--text-3);
+}
+.rrow .name .meta { font-size: 13px; gap: 6px; }
+.rrow .name .meta i { background: var(--text-3); }
+
 /* made it */
 .deduct { display: flex; flex-direction: column; gap: 2px; }
 .deduct label { display: flex; align-items: center; gap: 14px; padding: 11px 12px; margin: 0 -12px; border-radius: 12px; cursor: pointer; transition: background .15s ease; }
@@ -413,6 +441,23 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
   .ob-row { flex-direction: column; gap: 16px; }
   .ob-title { font-size: 26px; }
   .choice.desc { flex-basis: 100%; }
+  .sheet-foot { flex-wrap: wrap; }   /* the detail's footer can carry three controls now */
+  /* photo of a dish: the photo stacks above the steps; the two ingredient columns become one */
+  .dish-photo { max-width: 100%; }
+  .dish-photo img { max-height: 240px; }
+  .sheet.dish-result .hero { height: 240px; }
+  .sheet.dish-result .hero-text { left: 20px; right: 20px; }
+  .sheet.dish-result .hero-text h2 { font-size: 28px; }
+  .result-body { padding: 20px 20px 20px; gap: 24px; }
+  .result-cols { grid-template-columns: 1fr; gap: 24px; }
+  .result-foot { padding-left: 20px; padding-right: 20px; }
+  .result-foot .pill { flex: 1 1 auto; }
+  .result-foot .linkish { width: 100%; text-align: center; }
+}
+/* narrow phones: the top bar has five things in a row; the wordmark keeps its mark and drops the word */
+@media (max-width: 480px) {
+  .topbar { gap: 8px; }
+  .wordmark span { display: none; }
 }
 
 /* ---------- touch: no hover to reveal, bigger targets ---------- */
@@ -434,3 +479,13 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 .diff.l1 .bars i:nth-child(-n+1), .diff.l2 .bars i:nth-child(-n+2), .diff.l3 .bars i:nth-child(-n+3) { background: var(--text-2); }
 .diff.stretch .bars i { background: var(--yellow); }
 .diff.stretch .bars i:nth-child(n+1):nth-child(-n+3) { opacity: 1; }
+
+/* ---------- scan chooser: receipt or dish ---------- */
+.choose { display: flex; flex-direction: column; gap: 10px; }
+.choose .option { display: flex; align-items: center; gap: 16px; width: 100%; padding: 16px 18px; border: 0; border-radius: 18px; text-align: left; color: var(--text); cursor: pointer; transition: transform .18s var(--spring), background .18s ease; }
+.choose .option:hover { transform: translateY(-1px); }
+.choose .option .icon { width: 48px; height: 48px; border-radius: 50%; background: rgba(255,122,26,.16); color: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.choose .option .text { display: flex; flex-direction: column; gap: 3px; flex-grow: 1; min-width: 0; }
+.choose .option strong { font-size: 16px; font-weight: 600; }
+.choose .option small { font-size: 13px; color: var(--text-2); line-height: 1.4; }
+.choose .option .go { color: var(--text-3); flex-shrink: 0; }

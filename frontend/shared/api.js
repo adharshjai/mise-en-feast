@@ -1,4 +1,4 @@
-/* Pantry — FastAPI client (receipt scan + recipes).
+/* Pantry — FastAPI client (receipt scan, recipes, dish photo → recipe).
    Base URL comes from window.PANTRY_CONFIG.apiBaseUrl (see shared/config.js). */
 
 const cfg = () => (typeof window !== 'undefined' && window.PANTRY_CONFIG) || {};
@@ -24,6 +24,13 @@ async function readError(res) {
     if (data && data.detail) return typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
   } catch { /* ignore */ }
   return res.statusText || `HTTP ${res.status}`;
+}
+
+/** Tag an Error so callers can branch on `err.code` instead of parsing messages. */
+function withCode(err, code, extra = {}) {
+  err.code = code;
+  Object.assign(err, extra);
+  return err;
 }
 
 /** POST /scan — FormData with a receipt image or PDF. */
@@ -56,6 +63,34 @@ export async function fetchRecipes(items, opts = {}) {
     }),
   });
   if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/**
+ * POST /identify — FormData with a photo of a dish (jpeg/png/webp/heic).
+ * Resolves to the backend's identified-dish shape:
+ *   { title, confidence (0..1), description, cuisine, cook_minutes, servings,
+ *     difficulty ('easy'|'medium'|'hard'), ingredients: [{ name, amount, staple }],
+ *     steps: string[], tags: { vegetarian, vegan, contains: allergenKey[] } }
+ * Rejects with an Error carrying a `code` so the app can decide what to show:
+ *   'unconfigured'     apiBaseUrl is empty (demo build) — use the sample
+ *   'unreachable'      the request never got an HTTP answer (offline, CORS, DNS) — use the sample
+ *   'not_implemented'  the endpoint answered 501: it is still a skeleton — use the sample
+ *   'http'             any other non-2xx (400 bad file, 502 model failure); `status` is set
+ * Passing the original file is fine; the backend downscales what it sends to the model.
+ */
+export async function identifyDish(file) {
+  if (!apiConfigured()) throw withCode(new Error('API base URL is not set in shared/config.js'), 'unconfigured');
+  const body = new FormData();
+  body.append('file', file, (file && file.name) || 'dish.jpg');
+  let res;
+  try {
+    res = await fetch(`${baseUrl()}/identify`, { method: 'POST', body });
+  } catch (err) {
+    throw withCode(new Error('Could not reach the recipe backend', { cause: err }), 'unreachable');
+  }
+  if (res.status === 501) throw withCode(new Error(await readError(res)), 'not_implemented', { status: 501 });
+  if (!res.ok) throw withCode(new Error(await readError(res)), 'http', { status: res.status });
   return res.json();
 }
 
