@@ -317,7 +317,7 @@ export const SERVING_SIZES = {
   garlic: S(1, 'pcs', { head: 10 }),      // a clove is a serving; a head holds about ten
   mushrooms: S(75, 'g'), carrots: S(1, 'pcs'),
   'olive oil': S(15, 'ml'), oil: S(15, 'ml'),
-  'soy sauce': S(30, 'ml'), vinegar: S(30, 'ml'), stock: S(30, 'ml'), broth: S(30, 'ml'),
+  'soy sauce': S(30, 'ml'), vinegar: S(30, 'ml'), stock: S(240, 'ml'), broth: S(240, 'ml'),   // a serving of stock is a cup, not a splash
   spices: S(2, 'g'), cumin: S(2, 'g'), paprika: S(2, 'g'), 'chili flakes': S(2, 'g'), salt: S(2, 'g'), 'black pepper': S(2, 'g'),
   olives: S(30, 'g'), beans: S(120, 'g'), chickpeas: S(120, 'g'), lentils: S(120, 'g'),
   broccoli: S(100, 'g'), cauliflower: S(100, 'g'),

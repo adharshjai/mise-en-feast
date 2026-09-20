@@ -603,6 +603,27 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 
 /* staple chip (assumed on hand), servings stepper, onboarding */
 .chip.staple { background: rgba(var(--ink),.05); color: var(--text-3); }
+
+/* ---------- "+" on every ingredient ----------
+   Chips are buttons: the + shows on hover or focus (always, faintly, on touch) and
+   becomes a check once the ingredient is on the list. Rows get a small circle instead. */
+button.chip { border: 0; font: inherit; cursor: pointer; text-align: left; }
+button.chip:disabled { cursor: default; }
+.chip .plus { display: inline-flex; align-items: center; margin: 0 -3px 0 1px; color: var(--text-2); opacity: 0; transition: opacity .15s ease; }
+.chip:hover .plus, .chip:focus-visible .plus, .chip.listed .plus { opacity: 1; }
+.chip.listed .plus { color: var(--accent-text); }
+.circle.xs { width: 28px; height: 28px; }
+.circle.list { flex-shrink: 0; color: var(--text-2); }
+.circle.list.listed { color: var(--accent-text); opacity: .85; cursor: default; }
+.circle.list.listed:hover { transform: none; }
+.ing .list { margin-left: 2px; }
+.prow .list { opacity: 0; width: 32px; height: 32px; transition: opacity .15s ease; }
+.prow:hover .list, .prow:focus-within .list, .prow .list.listed { opacity: 1; }
+.drow { display: flex; align-items: center; gap: 6px; }
+.drow label { flex: 1 1 auto; min-width: 0; }
+@media (hover: none), (pointer: coarse) {
+  .chip .plus, .prow .list { opacity: .7; }
+}
 .servings { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 0; }
 .detail-body > .servings, .detail-body > .nutri { grid-column: 1 / -1; }
 .stepper { display: flex; align-items: center; gap: 12px; }

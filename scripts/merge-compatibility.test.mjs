@@ -169,23 +169,25 @@ test('analyze verifies each ingredient against the pantry by name: have, short, 
   assert.equal(run('analyze(a.dish).short.length'), 0);
 });
 
-test('Curated is strictly what they have; Explore is one to three ingredients away', () => {
+test('Curated is everything in the pantry, low or not; Explore is one to three ingredients away', () => {
   const run = app();
   run(`renderAll = () => {};
     state.pantry = [${lot('Eggs', 'eggs', 12)}, ${lot('Tomatoes', 'tomatoes', 6)}];
     liveDishes = [
       {id: 'all', name: 'All in', servings: 2, ingredients: [{name: 'Eggs', need: 2}, {name: 'Tomatoes', need: 2}]},
+      {id: 'low', name: 'Low on eggs', servings: 2, ingredients: [{name: 'Eggs', need: 20}, {name: 'Tomatoes', need: 2}]},
       {id: 'one', name: 'One away', servings: 2, ingredients: [{name: 'Eggs', need: 2}, {name: 'Feta', need: 1}]},
       {id: 'far', name: 'Far away', servings: 2, ingredients: [{name: 'Feta', need: 1}, {name: 'Lamb', need: 1}, {name: 'Mint', need: 1}, {name: 'Lemon', need: 1}]},
     ];
-    state.tab = 'curated'; buildDeck(); globalThis.curated = state.deck.map(a => a.dish.id);
+    state.tab = 'curated'; buildDeck(); globalThis.curated = state.deck.map(a => a.dish.id).sort();
     state.tab = 'explore'; buildDeck(); globalThis.explore = state.deck.map(a => a.dish.id);`);
-  assert.equal(run('JSON.stringify(curated)'), JSON.stringify(['all']));
+  // being low on eggs keeps the dish in Curated (the chip warns); only a missing ingredient moves it to Explore
+  assert.equal(run('JSON.stringify(curated)'), JSON.stringify(['all', 'low']));
   assert.equal(run('JSON.stringify(explore)'), JSON.stringify(['one']));
   assert.equal(run('state.tabTotal'), 1);
   // the deck tabs are the only ones the swipe filter follows; the pantry tab keeps the curated deck ready
   run(`state.tab = 'pantry'; buildDeck();`);
-  assert.equal(run('JSON.stringify(state.deck.map(a => a.dish.id))'), JSON.stringify(['all']));
+  assert.equal(run('JSON.stringify(state.deck.map(a => a.dish.id).sort())'), JSON.stringify(['all', 'low']));
 });
 
 test('setTab persists the section and undo brings the last swipe back on top of its deck', () => {
@@ -501,4 +503,32 @@ test('a plan meal put on Tonight survives the week being regenerated, and a relo
   run(`state.chosen.delete(picked); adoptPlan(JSON.parse(JSON.stringify(plan)), { source: plan.source, signature: plan.signature, at: plan.at });`);
   assert.equal(run('plan.parked.length'), 0);
   assert.equal(run('dishById(picked)'), null);
+});
+
+test('every ingredient carries a "+" that puts it on the shopping list', () => {
+  const run = app();
+  run(`renderAll = toast = () => {};
+    state.pantry = [${lot('Eggs', 'eggs', 12)}];
+    state.shopping = [];
+    const dish = {id: 'd', name: 'Omelette', servings: 2, ingredients: [{name: 'Eggs', need: 2, amt: '2'}, {name: 'Feta', need: 1, amt: '2 oz'}]};
+    liveDishes = [dish];
+    const a = analyze(dish);
+    globalThis.chips = a.ings.map(i => chipHTML(i, dish)).join('');
+    globalThis.row = listBtnHTML(a.ings[1], dish, {qty: '2 oz'});`);
+  // chips are buttons with the list attributes, for have and missing alike
+  assert.equal(run('(chips.match(/<button class="chip/g) || []).length'), 2);
+  assert.equal(run('chips.includes(\'data-list-add="Feta"\')'), true);
+  assert.equal(run('chips.includes(\'data-list-add="Eggs"\')'), true);
+  assert.equal(run('row.includes(\'aria-label="Add Feta to your shopping list"\')'), true);
+  // pressing it adds the row once and flips the button to its listed state
+  run(`const btn = {disabled: false, dataset: {listAdd: 'Feta', listKey: 'feta', listQty: '2 oz', listDish: 'd', listDishName: 'Omelette', listSource: 'recipe'},
+      classList: {add(c) { this.added = c; }}, setAttribute() {}, querySelector: () => null, innerHTML: ''};
+    globalThis.first = listAddFromEl(btn); globalThis.second = listAddFromEl(btn); globalThis.btn = btn;`);
+  assert.equal(run('first'), true);
+  assert.equal(run('second'), false);                      // disabled once listed
+  assert.equal(run('btn.classList.added'), 'listed');
+  assert.equal(run('state.shopping.length'), 1);
+  assert.equal(run('state.shopping[0].name + \' \' + state.shopping[0].qty + \' \' + state.shopping[0].dishName'), 'Feta 2 oz Omelette');
+  // rendered again, the chip shows the listed state instead of a plus
+  assert.equal(run('chipHTML(analyze(liveDishes[0]).ings[1], liveDishes[0]).includes(\'class="chip missing listed"\')'), true);
 });

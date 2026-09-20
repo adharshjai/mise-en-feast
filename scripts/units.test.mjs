@@ -321,7 +321,7 @@ test('servingsFor matches keys by exact name, then trailing phrase, then word', 
   assert.equal(servingsFor('Red Bell Pepper', '3'), 3);        // "bell pepper" (1 pcs) beats "pepper"
   assert.equal(servingsFor('black pepper', '50 g'), 25);       // the spice, 2 g
   assert.equal(servingsFor('pepper', '2'), 2);                 // a bell pepper, 1 pcs
-  near(servingsFor('chicken stock', '1 l'), 33.33);            // head noun "stock" (30 ml), not chicken
+  near(servingsFor('chicken stock', '1 l'), 4.17);             // head noun "stock" (240 ml, a cup), not chicken
   near(servingsFor('rice vinegar', '250 ml'), 8.33);           // "vinegar", not rice
   near(servingsFor('greek yogurt', '450 g'), 3);
   assert.equal(servingsFor('red onion', '2'), 2);

@@ -57,6 +57,7 @@ const ICON = {
   personBig: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/>', 24, 2),
   minus: svg('<path d="M5 12h14"/>', 16, 2.4),
   plus: svg('<path d="M12 5v14M5 12h14"/>', 16, 2.4),
+  plusSm: svg('<path d="M12 5v14M5 12h14"/>', 12, 2.8),
 };
 
 /* ---------- reference data: shelf life and household burn rate ---------- */
@@ -734,16 +735,19 @@ function analyze(dish) {
 }
 // Which deck a dish belongs on: Curated is strictly what they have, Explore is one to
 // three ingredients away (short or missing). Anything further is not dealt at all.
+// Being low on something does not demote a dish: Curated is everything whose ingredients
+// are all in the pantry (the "low on" chip says go easy); Explore is one to three
+// ingredients that are not there at all.
 const TAB_FILTER = {
-  curated: a => a.gap === 0,
-  explore: a => a.gap >= 1 && a.gap <= 3,
+  curated: a => a.missing.length === 0,
+  explore: a => a.missing.length >= 1 && a.missing.length <= 3,
 };
-const eligible = a => a.gap <= 3;
+const eligible = a => a.missing.length <= 3;
 
 // Deck ordering modes for the sort control.
 const SORTS = {
   urgent:   { label: 'Expiring first', cmp: (a, b) => (a.urgentDays - b.urgentDays) || (a.gap - b.gap) },
-  missing:  { label: 'Fewest missing', cmp: (a, b) => (a.gap - b.gap) || (a.urgentDays - b.urgentDays) },
+  missing:  { label: 'Fewest missing', cmp: (a, b) => (a.missing.length - b.missing.length) || (a.gap - b.gap) || (a.urgentDays - b.urgentDays) },
   calories: { label: 'Fewest calories', cmp: (a, b) => a.stats.kcal - b.stats.kcal },
   protein:  { label: 'Most protein', cmp: (a, b) => b.stats.protein - a.stats.protein },
   cost:     { label: 'Cheapest', cmp: (a, b) => a.stats.cost - b.stats.cost },
@@ -895,12 +899,18 @@ function difficultyHTML(d) {
 // Every dish is served for the household (D5): the label says so, and the detail sheet scales the amounts.
 const servesLabel = () => `Serves ${servingsTarget(state.prefs)}`;
 // One ingredient chip by status; a stand-in from the pantry says which row it is using.
-function chipHTML(i) {
+// Every chip is also the "+" that puts that ingredient on the shopping list (the pointer
+// handler on the card tells a chip tap from a card tap).
+function chipHTML(i, dish) {
   const using = i.approx && i.item ? ` title="Using your ${esc(i.item.name.toLowerCase())}"` : '';
-  if (i.status === 'staple') return `<span class="chip staple">${esc(i.name)}</span>`;
-  if (i.status === 'short') return `<span class="chip low"${using}><span class="dot"></span><span>Low on ${esc(i.name)}</span></span>`;
-  if (i.status === 'missing') return `<span class="chip missing">${esc(i.name)}</span>`;
-  return `<span class="chip have"${using}>${ICON.checkSm}<span>${esc(i.name)}</span></span>`;
+  const listed = onShoppingList(i.key || keyForName(i.name));
+  const attrs = ` type="button"${listAttrs(i, dish, 'recipe')} aria-label="${listed ? `${esc(i.name)}, on your shopping list` : `Add ${esc(i.name)} to your shopping list`}"${listed ? ' disabled' : ''}`;
+  const plus = `<span class="plus" aria-hidden="true">${listed ? ICON.checkSm : ICON.plusSm}</span>`;
+  const on = listed ? ' listed' : '';
+  if (i.status === 'staple') return `<button class="chip staple${on}"${attrs}><span>${esc(i.name)}</span>${plus}</button>`;
+  if (i.status === 'short') return `<button class="chip low${on}"${using}${attrs}><span class="dot"></span><span>Low on ${esc(i.name)}</span>${plus}</button>`;
+  if (i.status === 'missing') return `<button class="chip missing${on}"${attrs}><span>${esc(i.name)}</span>${plus}</button>`;
+  return `<button class="chip have${on}"${using}${attrs}>${ICON.checkSm}<span>${esc(i.name)}</span>${plus}</button>`;
 }
 // "missing 2: fresh noodles, lime · low on: garlic"
 function gapLine(a) {
@@ -920,7 +930,7 @@ function cardHTML(a) {
       <h2 class="${d.name.length > 24 ? 'long' : ''}">${esc(d.name)}</h2>
       <div class="meta"><span>${d.time}</span><i></i><span>${servesLabel()}</span><i></i>${difficultyHTML(d)}</div>
       <div class="stats"><span>${a.stats.kcal} cal</span><i></i><span>${a.stats.protein}g protein</span><i></i><span>${money(a.stats.cost)}/serving</span></div>
-      <div class="chips">${a.ings.map(chipHTML).join('')}${warnChips(a)}</div>
+      <div class="chips">${a.ings.map(i => chipHTML(i, a.dish)).join('')}${warnChips(a)}</div>
       ${gapLine(a)}
     </div>
     <div class="overlay cook"><div class="glass ring">${ICON.checkBig}</div></div>
@@ -1023,7 +1033,7 @@ function onPointerDown(e) {
   const card = e.currentTarget;
   cancelAnimationFrame(drag.raf);
   card.classList.remove('enter');   // an entrance still playing would override the drag transform
-  Object.assign(drag, { active: true, el: card, startX: e.clientX, startY: e.clientY, dx: 0, vx: 0, lastX: e.clientX, lastT: performance.now(), moved: false });
+  Object.assign(drag, { active: true, el: card, target: e.target, startX: e.clientX, startY: e.clientY, dx: 0, vx: 0, lastX: e.clientX, lastT: performance.now(), moved: false });
   card.classList.add('dragging');
   try { card.setPointerCapture(e.pointerId); } catch (err) { /* older browsers */ }
   card.addEventListener('pointermove', onPointerMove);
@@ -1045,7 +1055,12 @@ function onPointerUp() {
   const card = drag.el;
   endDrag();
   const { dx, vx } = drag;
-  if (!drag.moved) { settle(card); openDetail(state.deck[0]); return; }   // a plain click opens the recipe
+  if (!drag.moved) {   // a plain tap: on a chip it puts that ingredient on the list, anywhere else it opens the recipe
+    settle(card);
+    const chip = drag.target && drag.target.closest ? drag.target.closest('[data-list-add]') : null;
+    if (chip) listAddFromEl(chip); else openDetail(state.deck[0]);
+    return;
+  }
   const fling = Math.abs(vx) > 0.6;
   if (dx > THRESHOLD || (fling && vx > 0 && dx > 30)) commit('cook', dx);
   else if (dx < -THRESHOLD || (fling && vx < 0 && dx < -30)) commit('skip', dx);
@@ -1445,7 +1460,7 @@ function detailBody(a, people) {
     if (i.approx && i.item) return ` <small>· your ${esc(i.item.name.toLowerCase())}</small>`;
     return '';
   };
-  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmount(i.amt, factor))}${note(i)}</span></div>`;
+  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmount(i.amt, factor))}${note(i)}</span>${listBtnHTML(i, d, { qty: scaleAmount(i.amt, factor) })}</div>`;
   // everything under "You'll need" is already on the list: say so instead of offering it again
   const listed = needed.length > 0 && needed.every(i => onShoppingList(i.key));
   const shopBtn = needed.length
@@ -1608,9 +1623,9 @@ function openMadeIt(dishId) {
     <div class="sheet-sub"><span>${esc(a.dish.name)}</span><i></i><span>uncheck anything you skipped</span></div>
     <div class="sheet-body">
       <div class="deduct" id="deduct">
-        ${rows.map(r => `<label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
+        ${rows.map(r => `<div class="drow"><label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
           <span class="name"><strong>${esc(r.name)}</strong><small class="${r.last ? 'warn' : ''}">${esc(r.note)}</small></span>
-          <span class="amt">${fmt1(r.take)} of ${fmt1(r.cur)}</span></label>`).join('')
+          <span class="amt">${fmt1(r.take)} of ${fmt1(r.cur)}</span></label>${listBtnHTML(r, a.dish, { qty: r.amt || '', source: 'pantry' })}</div>`).join('')
           || '<p class="empty-note">Nothing in this dish is tracked in your pantry yet.</p>'}
       </div>
     </div>
@@ -1829,9 +1844,10 @@ async function startIdentify(file) {
   if (fallback) toast('Backend not ready yet — showing a sample');
 }
 
-const ingHaveHTML = i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span></div>`;
-const ingNeedHTML = i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span></div>`;
-const ingLowHTML = i => `<div class="ing low"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))} <small>· low</small></span></div>`;
+const resultListBtn = i => listBtnHTML(i, resultDish, { qty: standardizeAmount(i.amt) });
+const ingHaveHTML = i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span>${resultListBtn(i)}</div>`;
+const ingNeedHTML = i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span>${resultListBtn(i)}</div>`;
+const ingLowHTML = i => `<div class="ing low"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))} <small>· low</small></span>${resultListBtn(i)}</div>`;
 
 // The result: the recipe detail's layout with the photo as the hero, split into what they have and what they'll need.
 function openDishResult(dish) {
@@ -1963,6 +1979,7 @@ function prowHTML(it, { lot = false } = {}) {
       <div class="bar"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div>
       <div class="fmeta"><span class="pct">${Math.round(pctLeft * 100)}% left</span><span class="exp">exp ${esc(shortDate(it.expiry))}</span></div>
     </div>
+    ${listBtnHTML(it, null, { qty: it.qty || '', source: 'pantry', size: 'sm' })}
     <button class="circle sm glass del" type="button" data-remove="${it.id}" aria-label="Remove ${esc(it.name)}">${ICON.xSm}</button>
   </div>`;
 }
@@ -1985,6 +2002,7 @@ function stackHTML(lots) {
         <div class="fmeta"><span class="pct">${Math.round(pctLeft * 100)}% left</span><span class="exp">exp ${esc(shortDate(primary.expiry))}</span></div>
       </div>
     </button>
+    ${listBtnHTML({ name, key }, null, { qty: primary.qty || '', source: 'pantry', size: 'sm' })}
   </div>
   <div class="lots">${lots.map(it => prowHTML(it, { lot: true })).join('')}</div>`;
 }
@@ -2109,6 +2127,39 @@ function neededForDish(d, people = servingsTarget(state.prefs)) {
   return [...a.missing, ...a.short].map(i => ({ name: i.name, key: i.key, qty: scaleAmount(i.amt, factor), dishId: d.id, dishName: d.name }));
 }
 const addDishToShopping = (d, people) => addShopping(neededForDish(d, people), { source: 'recipe' });
+
+/* ---------- "+" on every ingredient ----------
+   One rule wherever an ingredient is shown (card chips, recipe rows, the photo result,
+   the made-it sheet, pantry rows): a small + puts it on the shopping list. The button
+   carries what the list needs as data attributes; listAddFromEl reads them back. */
+function listAttrs(i, dish, source = 'recipe', qty) {
+  const factor = dish ? servingsTarget(state.prefs) / Math.max(1, dish.servings || 1) : 1;
+  const amount = qty != null ? qty : (i.amt ? scaleAmount(i.amt, factor) : '');
+  return ` data-list-add="${esc(i.name)}" data-list-key="${esc(i.key || keyForName(i.name))}" data-list-qty="${esc(amount)}"`
+    + ` data-list-dish="${esc(dish ? dish.id : '')}" data-list-dish-name="${esc(dish ? dish.name : '')}" data-list-source="${esc(source)}"`;
+}
+function listBtnHTML(i, dish, { source = 'recipe', qty, size = 'xs' } = {}) {
+  const listed = onShoppingList(i.key || keyForName(i.name));
+  const label = listed ? `${esc(i.name)}, on your shopping list` : `Add ${esc(i.name)} to your shopping list`;
+  return `<button class="circle ${size} glass list${listed ? ' listed' : ''}" type="button"${listAttrs(i, dish, source, qty)} aria-label="${label}" title="${listed ? 'On your shopping list' : 'Add to shopping list'}"${listed ? ' disabled' : ''}>${listed ? ICON.checkSm : ICON.plusSm}</button>`;
+}
+// Flip a "+" to its listed state in place, so sheets need no re-render to show it.
+function markListed(b) {
+  b.classList.add('listed'); b.disabled = true;
+  b.setAttribute('aria-label', `${b.dataset.listAdd}, on your shopping list`); b.title = 'On your shopping list';
+  const plus = b.querySelector('.plus');
+  if (plus) plus.innerHTML = ICON.checkSm; else b.innerHTML = ICON.checkSm;
+}
+function listAddFromEl(b) {
+  if (!b || b.disabled) return false;
+  const d = b.dataset;
+  const r = addShopping([{ name: d.listAdd, key: d.listKey, qty: d.listQty, dishId: d.listDish, dishName: d.listDishName }], { source: d.listSource || 'recipe' });
+  if (!r.count) return false;
+  markListed(b);
+  toast(`${d.listAdd} added to your shopping list`, r.merged ? 'merged with what was there' : (d.listDishName ? `for ${d.listDishName}` : ''));
+  renderAll();
+  return true;
+}
 function toggleShopping(id) {
   const s = state.shopping.find(x => x.id === id);
   if (s) { s.done = !s.done; shoppingDirty = true; }
@@ -2990,7 +3041,8 @@ function shoppingAnswer(d) {
   const haveBit = have.length ? ` You already have ${esc(listWords(have))}.` : '';
   const lowBit = a.short.length ? ` You’re low on ${esc(listWords(a.short.map(i => i.name.toLowerCase())))}.` : '';
   if (!buy.length) return `You’ve got everything for <strong>${esc(d.name)}</strong>, just about.${lowBit} ${open}`;
-  return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit}${lowBit} ${open}`;
+  const add = `<button class="chat-open" type="button" data-list-dish-add="${esc(d.dish ? d.dish.id : d.id)}">Add to list</button>`;
+  return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit}${lowBit} ${open} ${add}`;
 }
 // Claude replies in plain text. Escape it, then honour a little markdown (**bold**)
 // and line breaks so a multi-line answer reads cleanly in the bubble.
@@ -3213,7 +3265,22 @@ function openChatDish(d) {
   return openGeneratedDish(d);
 }
 
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-list-add]');
+  if (!b || b.closest('#deck')) return;   // chips on the deck are handled by the card's pointer-up
+  e.preventDefault();
+  listAddFromEl(b);
+});
 chatEl.log.addEventListener('click', e => {
+  const add = e.target.closest('[data-list-dish-add]');
+  if (add) {
+    const d = dishById(add.dataset.listDishAdd);
+    if (!d) return;
+    const r = addDishToShopping(d);
+    toast(r.count ? `${plural(r.count, 'item')} added to your shopping list` : 'Already on your list', r.count ? `for ${d.name}` : '');
+    add.replaceWith(Object.assign(document.createElement('span'), { className: 'chat-source', textContent: 'On your list' }));
+    return renderAll();
+  }
   const b = e.target.closest('[data-chat-open]');
   if (!b) return;
   const d = dishById(b.dataset.chatOpen);
