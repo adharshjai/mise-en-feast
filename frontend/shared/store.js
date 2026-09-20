@@ -26,7 +26,9 @@
 
    The shopping list (loadShopping / saveShopping) and the weekly plan
    (loadPlan / savePlan) are one jsonb blob each on app_state (0006), with a
-   localStorage copy that is demo mode's only copy; see their sections below. */
+   localStorage copy that is demo mode's only copy; see their sections below.
+   Ratings, the cooked log and the events log (0007) follow the same pattern:
+   app_state.ratings, app_state.cooked_log and app_state.events. */
 
 import { configured, getClient, getSession, getUser } from './supabase.js';
 
@@ -36,6 +38,9 @@ export const SAVED_KEY = 'pantry.saved.v1';
 export const DECK_KEY = 'pantry.deck.v1';
 export const SHOPPING_KEY = 'pantry.shopping.v1';
 export const PLAN_KEY = 'pantry.plan.v1';
+export const RATINGS_KEY = 'pantry.ratings.v1';
+export const COOKED_KEY = 'pantry.cooked.v1';
+export const EVENTS_KEY = 'pantry.events.v1';
 const DEBOUNCE_MS = 400;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -63,11 +68,14 @@ const list = v => {
   return [];
 };
 
+// A whole-lot price (from the receipt) as a number, or null when there is none.
+const priceOf = v => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+
 /** Normalise whatever the app or storage hands us into the Item shape. */
 function normalizeItem(it) {
   if (!it || typeof it !== 'object') return null;
   const purchase = num(it.purchase, Date.now());
-  return {
+  const out = {
     id: UUID_RE.test(str(it.id)) ? str(it.id).toLowerCase() : newId(),
     name: str(it.name),
     key: str(it.key || it.name).toLowerCase(),
@@ -79,7 +87,10 @@ function normalizeItem(it) {
     expiry: num(it.expiry, purchase + 7 * 86400000),
     burn: num(it.burn, 0),
     deducted: num(it.deducted, 0),
+    price: priceOf(it.price),   // what the whole lot cost, for the kitchen report (0007)
   };
+  if (it.wasteLogged) out.wasteLogged = true;   // the boot sweep already wrote its `expired` event
+  return out;
 }
 
 function normalizeState(s) {
@@ -95,7 +106,7 @@ function normalizeState(s) {
 /* ---------- Supabase row mapping ---------- */
 
 function toRow(it, userId) {
-  return {
+  const row = {
     id: it.id,
     user_id: userId,
     name: it.name,
@@ -110,6 +121,10 @@ function toRow(it, userId) {
     item_type: it.burn > 0 ? 'continuous' : 'event',
     status: 'active',
   };
+  // The price column arrives with 0007; a project that has not run it keeps saving
+  // as long as no lot carries a price (only receipt lots do).
+  if (it.price != null) row.price = it.price;
+  return row;
 }
 
 function fromRow(r) {
@@ -125,6 +140,7 @@ function fromRow(r) {
     expiry: fromIso(r.expiry_date, purchase + 7 * 86400000),
     burn: num(r.daily_burn_rate, 0),
     deducted: num(r.deducted_servings, 0),
+    price: priceOf(r.price),
   };
 }
 
@@ -320,10 +336,30 @@ export const DEFAULT_PREFS = Object.freeze({
   equipment: Object.freeze(['oven', 'stovetop', 'microwave']),
   avoid: '',
   shopping: 'weekly',
+  liked: Object.freeze([]),      // dish titles rated up, newest first (from the ratings)
+  disliked: Object.freeze([]),   // dish titles rated down, newest first
 });
 
 // v1 kept these under "diet"; in v2 they are allergies.
 const LEGACY_DIET_TO_ALLERGY = { 'gluten-free': 'gluten', 'dairy-free': 'dairy' };
+
+/* Dish titles the household rated (Prefs.liked / disliked, the same limits the backend's
+   clean_titles applies): trimmed, inner whitespace collapsed, control characters gone,
+   80 chars each, no repeats (first spelling kept), at most 30. */
+const MAX_TITLES = 30, MAX_TITLE_LEN = 80;
+export const titleKey = t => str(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+export function cleanTitles(v) {
+  const out = [], seen = new Set();
+  for (const raw of (typeof v === 'string' ? [v] : list(v))) {
+    const t = str(raw).replace(/[ -]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE_LEN).trim();
+    const k = titleKey(t);
+    if (!t || !k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+    if (out.length >= MAX_TITLES) break;
+  }
+  return out;
+}
 
 const lc = s => str(s).trim().toLowerCase();
 const hasId = (opts, id) => opts.some(o => o.id === id);
@@ -370,6 +406,8 @@ export function normalizePrefs(p) {
     equipment: src.equipment == null ? [...d.equipment] : pick(src.equipment, EQUIPMENT),
     avoid,
     shopping: one(src.shopping, SHOPPING, d.shopping),
+    liked: cleanTitles(src.liked),
+    disliked: cleanTitles(src.disliked),
   };
 }
 
@@ -670,8 +708,18 @@ export function normalizeDish(d) {
   const cuisine = lc(d.cuisine || (d.tags && d.tags.cuisine));
   const minutes = minutesOf(d.time) ?? (d.cook_minutes == null ? null : num(d.cook_minutes, null));
   const names = list(d.names).filter(Boolean);   // every ingredient name, staples included, for the allergy checks
+  // Substitutions the cook picked ("Use this" on the recipe sheet), keyed by the ingredient
+  // they replace: { use, ratio, pantry_names }. Kept so a saved dish remembers them.
+  const subs = {};
+  if (d.subs && typeof d.subs === 'object') {
+    for (const [k, s] of Object.entries(d.subs)) {
+      if (!s || typeof s !== 'object' || !str(s.use).trim()) continue;
+      subs[lc(k)] = { use: str(s.use).trim(), ratio: str(s.ratio).trim(), pantry_names: list(s.pantry_names).filter(Boolean) };
+    }
+  }
   return {
     ...d,
+    subs,
     id,
     name,
     img: str(d.img),
@@ -1118,6 +1166,129 @@ export function savePlan(plan) {
     console.warn('[pantry] savePlan failed', err);
   }
 }
+
+/* ---------- ratings, the cooked log and the events log (0007) ----------
+   Three more blobs on app_state, each with a localStorage copy that is demo
+   mode's only copy, saved the way the shopping list is (this browser at once,
+   the account after a short debounce). Nothing here throws.
+     ratings  { [titleKey]: { title, value: 1|-1, at, dishId } }   -> app_state.ratings
+     cooked   [{ id, title, at, rating, dishId, dish }]  newest first, capped -> app_state.cooked_log
+              (the column is cooked_log, not cooked: app_state.cooked already holds the ids of
+              dishes marked cooked, which saveState writes)
+     events   [{ type, key, name, servings, value, at, ... }]  see shared/report.js -> app_state.events */
+
+export const MAX_COOKED = 100;
+export const MAX_EVENTS = 2000;
+
+function normalizeRating(r) {
+  if (!r || typeof r !== 'object') return null;
+  const title = str(r.title).trim();
+  const value = Number(r.value) > 0 ? 1 : Number(r.value) < 0 ? -1 : 0;
+  if (!title || !value) return null;
+  return { title, value, at: num(r.at, Date.now()), dishId: str(r.dishId || '') };
+}
+export function normalizeRatings(map) {
+  const out = {};
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return out;
+  for (const [k, v] of Object.entries(map)) {
+    const r = normalizeRating(v);
+    const key = titleKey(r ? r.title : k);
+    if (r && key) out[key] = r;
+  }
+  return out;
+}
+function normalizeCookedEntry(e) {
+  if (!e || typeof e !== 'object') return null;
+  const title = str(e.title || (e.dish && e.dish.name)).trim();
+  if (!title) return null;
+  const dish = e.dish && typeof e.dish === 'object' ? normalizeDish(e.dish) : null;
+  return {
+    id: str(e.id) || newId(),
+    title,
+    at: num(e.at, Date.now()),
+    rating: Number(e.rating) > 0 ? 1 : Number(e.rating) < 0 ? -1 : 0,
+    dishId: str(e.dishId || (dish && dish.id) || ''),
+    dish,
+  };
+}
+export const normalizeCooked = rows => (Array.isArray(rows) ? rows : []).map(normalizeCookedEntry).filter(Boolean)
+  .sort((a, b) => b.at - a.at).slice(0, MAX_COOKED);
+const normalizeEvents = rows => (Array.isArray(rows) ? rows : []).filter(e => e && typeof e === 'object' && str(e.type) && Number.isFinite(Number(e.at)))
+  .slice(-MAX_EVENTS);
+
+// One small store per blob: a localStorage key, an app_state column, a normaliser.
+function blobStore(label, localKey, column, normalize, empty) {
+  const hasLocal = () => typeof localStorage !== 'undefined';   // the Node test harness has none
+  const readLocalBlob = () => {
+    try { const raw = hasLocal() ? localStorage.getItem(localKey) : null; return raw ? normalize(JSON.parse(raw)) : normalize(empty()); }
+    catch (err) { console.warn(`[pantry] could not read ${label}`, err); return normalize(empty()); }
+  };
+  const writeLocalBlob = v => { try { if (hasLocal()) localStorage.setItem(localKey, JSON.stringify(v)); } catch (err) { console.warn(`[pantry] could not write ${label}`, err); } };
+  const clearLocalBlob = () => { try { if (hasLocal()) localStorage.removeItem(localKey); } catch (err) { console.warn(`[pantry] could not clear ${label}`, err); } };
+  let pendingBlob = null, blobTimer = null;
+  async function persistBlob(v) {
+    const user = await signedInUser();
+    if (!user) return;
+    const client = await getClient();
+    const { error } = await client.from('app_state').upsert({ user_id: user.id, [column]: v }, { onConflict: 'user_id' });
+    if (error) throw error;
+  }
+  function flushBlob() {
+    if (blobTimer) { clearTimeout(blobTimer); blobTimer = null; }
+    const v = pendingBlob; pendingBlob = null;
+    if (v == null) return;
+    queueRemote(`save ${label}`, () => persistBlob(v));
+  }
+  async function load() {
+    const local = readLocalBlob();
+    try {
+      const user = await signedInUser();
+      if (!user) return local;
+      const client = await getClient();
+      const { data, error } = await client.from('app_state').select(column).eq('user_id', user.id).maybeSingle();
+      if (error) throw error;
+      if (!data || data[column] == null) return local;   // no row yet, or the column is not migrated: the browser's copy carries over
+      const v = normalize(data[column]);
+      writeLocalBlob(v);
+      return v;
+    } catch (err) {
+      console.warn(`[pantry] load ${label} failed, using the local copy`, err);
+      return local;
+    }
+  }
+  function save(v) {
+    try {
+      const snapshot = normalize(v);
+      writeLocalBlob(snapshot);
+      if (!configured) return;
+      pendingBlob = snapshot;
+      if (blobTimer) clearTimeout(blobTimer);
+      blobTimer = setTimeout(flushBlob, DEBOUNCE_MS);
+    } catch (err) {
+      console.warn(`[pantry] save ${label} failed`, err);
+    }
+  }
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', () => { try { flushBlob(); } catch (err) { console.warn(`[pantry] ${label} flush on pagehide failed`, err); } });
+  return { load, save, clearLocal: clearLocalBlob };
+}
+
+const ratingsStore = blobStore('ratings', RATINGS_KEY, 'ratings', normalizeRatings, () => ({}));
+const cookedStore = blobStore('cooked log', COOKED_KEY, 'cooked_log', normalizeCooked, () => []);
+const eventsStore = blobStore('events', EVENTS_KEY, 'events', normalizeEvents, () => []);
+
+/** Resolve to { [titleKey]: { title, value, at, dishId } }. Never rejects. */
+export const loadRatings = () => ratingsStore.load();
+/** Save the ratings map (this browser now, the account after a debounce). Never throws. */
+export const saveRatings = map => ratingsStore.save(map);
+export const clearLocalRatings = () => ratingsStore.clearLocal();
+/** Resolve to the cooked log, newest first, at most MAX_COOKED entries. Never rejects. */
+export const loadCooked = () => cookedStore.load();
+export const saveCooked = rows => cookedStore.save(rows);
+export const clearLocalCooked = () => cookedStore.clearLocal();
+/** Resolve to the events log (oldest first, at most MAX_EVENTS). Never rejects. */
+export const loadEvents = () => eventsStore.load();
+export const saveEvents = rows => eventsStore.save(rows);
+export const clearLocalEvents = () => eventsStore.clearLocal();
 
 /* ---------- photo downscale ---------- */
 

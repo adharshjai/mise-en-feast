@@ -12,11 +12,16 @@ import {
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
   loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED, loadDeck, saveDeck,
   loadShopping, saveShopping, clearLocalShopping, loadPlan, savePlan, clearLocalPlan,
+  loadRatings, saveRatings, clearLocalRatings, loadCooked, saveCooked, clearLocalCooked, loadEvents, saveEvents, clearLocalEvents,
+  titleKey, MAX_COOKED, MAX_EVENTS,
 } from '../shared/store.js';
-import { scanReceipt, fetchRecipes, fetchMealPlan, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
-import { matchIngredient, buildPantryIndex } from '../shared/ingredients.js';
-import { UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor } from '../shared/units.js';
-import { dishSlug, needsGeneratedImage, applyDishImages, primeDishImages, clearDishImages } from '../shared/dish-images.js';
+import { scanReceipt, fetchRecipes, fetchMealPlan, fetchSubstitutions, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
+import { matchIngredient, buildPantryIndex, normalizeName } from '../shared/ingredients.js';
+import { UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor, convertCanonical, convertQuantity } from '../shared/units.js';
+import { dishSlug, needsGeneratedImage, applyDishImages, primeDishImages, clearDishImages, peekDishImage, warmDishImages } from '../shared/dish-images.js';
+import { findDurations, highlightDurations, createTimer, formatRemaining } from '../shared/timers.js';
+import { localSubstitutions } from '../shared/substitutions.js';
+import { summarize, lotEvent, expiredLots, expiringSoon } from '../shared/report.js';
 
 const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
@@ -58,6 +63,15 @@ const ICON = {
   minus: svg('<path d="M5 12h14"/>', 16, 2.4),
   plus: svg('<path d="M12 5v14M5 12h14"/>', 16, 2.4),
   plusSm: svg('<path d="M12 5v14M5 12h14"/>', 12, 2.8),
+  chat: svg('<path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 0 1 12.5 3 8.38 8.38 0 0 1 21 11.5z"/>', 16, 2),
+  flame: svg('<path d="M12 3c.6 3.4 4.5 5.2 4.5 9.4a4.5 4.5 0 0 1-9 0c0-1.7.7-3 1.6-4 .2 1.2.8 2 1.6 2.4C10.3 8.6 11 5.8 12 3z"/>', 16, 2),
+  thumbUp: svg('<path d="M7 11v9"/><path d="M3 11h4l4-7.5a2 2 0 0 1 3.5 1.5L14 9h5a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 20H7"/>', 30, 2),
+  thumbDown: svg('<path d="M17 13V4"/><path d="M21 13h-4l-4 7.5a2 2 0 0 1-3.5-1.5L10 15H5a2 2 0 0 1-2-2.3l1.2-7A2 2 0 0 1 6.2 4H17"/>', 30, 2),
+  thumbUpSm: svg('<path d="M7 11v9"/><path d="M3 11h4l4-7.5a2 2 0 0 1 3.5 1.5L14 9h5a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 20H7"/>', 14, 2.2),
+  thumbDownSm: svg('<path d="M17 13V4"/><path d="M21 13h-4l-4 7.5a2 2 0 0 1-3.5-1.5L10 15H5a2 2 0 0 1-2-2.3l1.2-7A2 2 0 0 1 6.2 4H17"/>', 14, 2.2),
+  clock: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>', 14, 2.2),
+  chevronL: svg('<path d="M15 6l-6 6 6 6"/>', 20),
+  chevronR: svg('<path d="M9 6l6 6-6 6"/>', 20),
 };
 
 /* ---------- reference data: shelf life and household burn rate ---------- */
@@ -263,12 +277,13 @@ let recipeRefreshToken = 0;
 const chatDishes = new Map();
 const planDishes = new Map();   // this week's meals by plan- id, so a cell opens like any dish
 
-// Dishes from a photo live outside the deck: in Saved, or (picked for tonight and then
-// removed from Saved) in state.photoDishes, so the Tonight pill can still open them.
+// Dishes that live outside the deck but must still open: a photo dish picked for tonight
+// and then removed from Saved, or a cooked snapshot brought back with "Cook again". They
+// sit in state.extraDishes so the Tonight pill and the detail sheet can still find them.
 const isPhotoId = id => String(id).startsWith('photo-');
 const dishById = id => (liveDishes || DISHES).find(d => d.id === id)
   || state.saved.find(d => d.id === id)
-  || state.photoDishes.get(id)
+  || state.extraDishes.get(id)
   || chatDishes.get(id)
   || planDishes.get(id)
   || null;
@@ -279,35 +294,19 @@ const onDeck = id => activeDishes().some(d => d.id === id);
 // the model wrote; '' for built-in and photo dishes, which already have their own.
 function dishImgAttrs(d) {
   if (!needsGeneratedImage(d)) return '';
-  return ` data-dish-img="${dishSlug(d.name)}" data-dish-id="${esc(d.id)}" data-dish-name="${esc(d.name)}" data-dish-ings="${esc(dishNames(d).join(','))}"`;
+  return ` data-dish-img="${dishSlug(d.name)}" data-dish-id="${esc(d.id)}" data-dish-name="${esc(d.name)}" data-dish-ings="${esc(dishNames(d).join(','))}" data-dish-fallback="${esc(d.img || '')}"`;
+}
+// What a dish paints with on first render: its picture when it is already in memory, its
+// own photo for built-in and photo dishes, and nothing (the neutral placeholder) for a
+// generated dish whose picture is still on its way. A stand-in that gets corrected a moment
+// later is never shown; the stand-in only appears if no picture can be had at all.
+function imgSrcAttr(d) {
+  const src = needsGeneratedImage(d) ? peekDishImage(d) : d.img;
+  return src ? ` src="${esc(src)}"` : '';
 }
 
-const SAMPLE_RECEIPT = {
-  store: 'Whole Foods Market', date: 'Sep 19', total: 64.18,
-  lines: [
-    { raw: 'ORG SPINACH 5OZ', name: 'Spinach', key: 'spinach', qty: '5 oz', price: 3.49 },
-    { raw: 'GV MLK 1GAL', name: 'Milk', key: 'milk', qty: '1 gal', price: 3.98 },
-    { raw: 'EGGS LG DZ', name: 'Eggs', key: 'eggs', qty: '12', price: 4.29 },
-    { raw: 'CHKN THIGH 1.4LB', name: 'Chicken thighs', key: 'chicken thighs', qty: '1.4 lb', price: 8.12 },
-    { raw: 'GARLIC', name: 'Garlic', key: 'garlic', qty: '1 head', price: 0.89 },
-    { raw: 'SPAGHETTI 1LB', name: 'Spaghetti', key: 'spaghetti', qty: '1 lb', price: 1.99 },
-    { raw: 'ROMA TOM 6', name: 'Tomatoes, roma', key: 'tomatoes', qty: '6', price: 3.24 },
-    { raw: 'BASIL BNCH', name: 'Basil', key: 'basil', qty: '1 bunch', price: 2.49 },
-    { raw: 'JASMINE RICE 2LB', name: 'Jasmine rice', key: 'jasmine rice', qty: '2 lb', price: 4.99 },
-    { raw: 'PARM REG 8OZ', name: 'Parmesan', key: 'parmesan', qty: '8 oz', price: 6.99 },
-    { raw: 'CUCUMBER 2', name: 'Cucumber', key: 'cucumber', qty: '2', price: 1.58 },
-    { raw: 'SPRNG MX ORG 5OZ', name: 'Spring mix', key: 'spring mix', qty: '5 oz', price: 4.49, low: true },
-    { raw: 'PAPER TWL 6PK', name: 'Paper towels', price: 9.99, nonFood: true },
-    { raw: 'AA BATT 8PK', name: 'AA batteries', price: 7.65, nonFood: true },
-  ],
-};
-
-/** Metadata for the receipt currently in the review sheet. */
-let lastReceipt = {
-  store: SAMPLE_RECEIPT.store,
-  date: SAMPLE_RECEIPT.date,
-  total: SAMPLE_RECEIPT.total,
-};
+/** Metadata for the receipt currently in the review sheet; filled from the scan response. */
+let lastReceipt = { store: '', date: '', total: 0 };
 
 // The pantry key: a catalog food when the name really is that food, judged by the same
 // head-noun and form rules the recipe matcher uses ("Roma tomatoes" is tomatoes, "coconut
@@ -361,8 +360,17 @@ function formatReceiptDate(iso) {
 // only stands in when the quantity cannot be sized ("1 bag"), and the package default last.
 const lineServings = l => servingsFor(l.key, l.qty) ?? l.estimated ?? catalog(l.key).servings;
 
+// A review row's quantity, said in the unit that food is already kept in, and the servings
+// that comes to. `pending` is the rows settled ahead of this one, so two lines of the same
+// food on one receipt agree with each other as well as with the pantry.
+function settleLine(row, pending = []) {
+  row.qty = qtyInPantryUnit(row.key, formatQuantity(row.qty), state.pantry.concat(pending));
+  row.initial = lineServings(row);
+  return row;
+}
+
 /** Map a /scan item into a review-row + pantry seed fields. */
-function lineFromScanItem(item) {
+function lineFromScanItem(item, pending = []) {
   const key = keyForScan(item);
   const purchaseMs = item.purchase_date ? Date.parse(item.purchase_date) : Date.now();
   const expiryMs = item.expiration_date ? Date.parse(item.expiration_date) : purchaseMs + catalog(key).shelf * DAY;
@@ -383,8 +391,7 @@ function lineFromScanItem(item) {
     purchase: Number.isFinite(purchaseMs) ? purchaseMs : Date.now(),
     expiry: Number.isFinite(expiryMs) ? expiryMs : Date.now() + catalog(key).shelf * DAY,
   };
-  line.initial = lineServings(line);
-  return line;
+  return settleLine(line, pending);
 }
 
 function slugify(title) {
@@ -488,6 +495,13 @@ async function refreshRecipes({ quiet = false } = {}) {
   // the plain-English line is the fallback the model reads — '' when all default.
   const prefs = state.prefs;
   const request = prefsToRequest(prefs);
+  // The loading bar and, with no cached deck, the skeleton cards, until the answer is in.
+  // Settled before any render so the deck never paints a skeleton over a finished answer.
+  const busy = beginBusy('Finding recipes…');
+  recipesLoading++;
+  let settled = false;
+  const settle = () => { if (settled) return; settled = true; recipesLoading = Math.max(0, recipesLoading - 1); busy.end(); };
+  if (!quiet && !liveDishes) renderDeck();   // paint the skeletons now, not after the model answers
   try {
     // Two batches at once, merged: one aimed at what they can make outright (Curated),
     // one told to reach for dishes a few store items away (Explore), so neither tab
@@ -498,15 +512,16 @@ async function refreshRecipes({ quiet = false } = {}) {
       fetchRecipes(items, { count: 12, maxMissing: 1, request, prefs }),
       fetchRecipes(items, { count: 16, maxMissing: 3, request: reach, prefs }),
     ]);
+    settle();
     if (token !== recipeRefreshToken) return liveDishes || [];
     if (batches.every(b => b.status === 'rejected')) throw batches[0].reason;
-    const titleKey = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const keyOfTitle = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const seen = new Set();
     const recipes = [];
     for (const b of batches) {
       if (b.status !== 'fulfilled') continue;
       for (const r of (b.value.recipes || [])) {
-        const k = titleKey(r.title);
+        const k = keyOfTitle(r.title);
         if (!k || seen.has(k)) continue;
         seen.add(k); recipes.push(r);
       }
@@ -514,7 +529,13 @@ async function refreshRecipes({ quiet = false } = {}) {
     const list = recipes.map(dishFromApi);
     liveDishes = list.length ? list : null;
     saveDeck(list, signature);           // so the next visit paints without waiting on the model
-    primeDishImages(list);               // pictures start generating before the cards are even dealt
+    // The cards about to be dealt wait, briefly, for their pictures, so they appear right
+    // rather than corrected a moment later; the rest of the deck fetches behind them.
+    buildDeck();                         // the deck order decides which pictures to wait for
+    const first = state.deck.slice(0, 3).map(a => a.dish);
+    await warmDishImages(first, { network: true, timeoutMs: 1500 });
+    if (token !== recipeRefreshToken) return liveDishes || [];
+    primeDishImages(list.filter(d => !first.includes(d)));
     populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
@@ -525,6 +546,7 @@ async function refreshRecipes({ quiet = false } = {}) {
     renderAll({ enter: true });
     return liveDishes || [];
   } catch (err) {
+    settle();
     console.warn('[pantry] recipe refresh failed', err);
     if (token !== recipeRefreshToken) return [];
     // A quiet refresh that fails leaves the cached deck alone: a deck from the
@@ -561,32 +583,129 @@ function recomputeDefaultServings(items) {
   if (n) console.info(`[pantry] servings recomputed from quantities for ${plural(n, 'lot')}`);
   return n;
 }
-function seedPantry() {
-  return [
-    mk('Spinach', 'spinach', '5 oz', 2.6),
-    mk('Garlic', 'garlic', '1 head', 52),
-    mk('Spaghetti', 'spaghetti', '1 lb', 12),
-    mk('Parmesan', 'parmesan', '8 oz', 5),
-    mk('Olive oil', 'olive oil', '500 ml', 210),
-    mk('Chili flakes', 'chili flakes', '1 jar', 60),
-    mk('Onion', 'onion', '3', 6),
-    mk('Red onion', 'red onion', '2', 6),
-    mk('Mushrooms', 'mushrooms', '8 oz', 2),
-    mk('Arborio rice', 'arborio rice', '1 lb', 30),
-    mk('Stock', 'stock', '1 qt', 1),
-    mk('Soy sauce', 'soy sauce', '1 bottle', 90),
-    mk('Cream', 'cream', '1 pint', 3),
-    mk('Olives', 'olives', '1 jar', 12),
-    mk('Cucumber', 'cucumber', '1', 1),
-    mk('Cumin', 'cumin', '1 jar', 120),
-    mk('Paprika', 'paprika', '1 jar', 120),
-    mk('Milk', 'milk', '1 gal', 9),
-  ];
+/* ---------- the unit a food is kept in ----------
+   Everything the app says about a food is said in the unit its pantry rows already use.
+   The first lot of a food sets that unit — whatever the receipt or the add form gave —
+   and every later lot converts into it: a receipt's "4 kg" of bananas lands as about 34
+   bananas, and the recipe sheet asks for bananas too, never servings or grams. Converted
+   lots still stack separately, because each one has its own use-by date. */
+
+// The noun a count reads best as ("12 bananas", not "12 pcs"): the wording the quantity
+// came with, else the food's own name.
+const countNoun = (key, name) => String(name || key || '').toLowerCase().trim() || null;
+/** A lot's quantity as a canonical amount, with a readable noun for counts. */
+function lotSize(it) {
+  const c = toCanonical(it.qty);
+  if (c.amount == null || !c.unit) return null;
+  if (c.unit === 'pcs' && !c.label) c.label = countNoun(it.key, it.name);
+  return c;
 }
+/**
+ * How a food is measured in this pantry: the unit its rows use, the noun counts read
+ * with, and how much of that unit one serving comes to. The oldest lot carrying a
+ * readable quantity decides, so the answer does not move as newer lots come and go.
+ * Null when the pantry holds none of it — then there is no unit to borrow.
+ */
+let unitCache = { pantry: null, size: -1, map: new Map() };
+function pantryUnitOf(key, pantry = state.pantry) {
+  if (pantry === state.pantry) {
+    if (unitCache.pantry !== pantry || unitCache.size !== pantry.length) unitCache = { pantry, size: pantry.length, map: new Map() };
+    else if (unitCache.map.has(key)) return unitCache.map.get(key);
+  }
+  const u = readPantryUnit(key, pantry);
+  if (pantry === state.pantry) unitCache.map.set(key, u);
+  return u;
+}
+function readPantryUnit(key, pantry) {
+  const lots = pantry.filter(it => it.key === key).sort((a, b) => a.purchase - b.purchase);   // a stable sort keeps insertion order among same-day lots
+  for (const it of lots) {
+    const c = lotSize(it);
+    if (!c) continue;
+    const per = it.initial > 0 ? c.amount / it.initial : 0;
+    return { unit: c.unit, label: c.label || null, perServing: per > 0 ? per : null };
+  }
+  return null;
+}
+/**
+ * A quantity said in the unit `key` is already kept in. A food the pantry has never held,
+ * or a quantity with no size to convert ("1 bag"), is left exactly as it came — only a
+ * real conversion rewrites what is stored.
+ */
+function qtyInPantryUnit(key, qty, pantry = state.pantry) {
+  const target = pantryUnitOf(key, pantry);
+  const converted = target ? convertQuantity(qty, target, key) : null;
+  return converted ? formatQuantity(converted) : (typeof qty === 'string' ? qty : formatQuantity(qty));
+}
+// A lot that arrived with no readable quantity ("1 bag", nothing at all) has no unit to
+// be said in; servings are all we know, and they are quoted as such.
+const servingsNote = n => `~${plural(Number(fmt1(Math.max(0, n))), 'serving')}`;
+/** Servings of a food, said in the unit the pantry keeps it in. */
+function servingsText(key, servings) {
+  const u = pantryUnitOf(key);
+  if (!u || !u.perServing) return servingsNote(servings);
+  return formatQuantity({ amount: servings * u.perServing, unit: u.unit, label: u.label });
+}
+/** How much of one lot is left, said in the unit that lot is kept in. */
+function lotAmountText(it, servings = current(it)) {
+  const c = lotSize(it);
+  if (!c || !(it.initial > 0)) return servingsText(it.key, servings);   // no quantity of its own: borrow the food's unit
+  return formatQuantity({ ...c, amount: c.amount * (servings / it.initial) });
+}
+/** The same for a whole stack: every lot of a food shares its unit, so they add up. */
+function stackAmountText(lots) {
+  const key = lots[0].key;
+  const u = pantryUnitOf(key);
+  if (!u || !u.perServing) return servingsNote(lots.reduce((n, it) => n + current(it), 0));
+  const total = lots.reduce((n, it) => { const c = lotSize(it); return n + (c && it.initial > 0 ? c.amount * (current(it) / it.initial) : current(it) * u.perServing); }, 0);
+  return formatQuantity({ amount: total, unit: u.unit, label: u.label });
+}
+
+/**
+ * A check-in is a correction: they have told us how much of this lot is really left, so
+ * it becomes the lot's new full amount. The quantity comes down with the servings — both
+ * sides of the ratio the display reads — or the row would keep quoting the old pack.
+ */
+function rebaseLot(it, pct) {
+  unitCache.size = -1;   // the ratio this lot is read by has moved
+  const c = lotSize(it);
+  if (c) {
+    it.qty = formatQuantity({ ...c, amount: c.amount * (pct / 100) });
+    it.initial = Math.max(0.1, baseServings(it.key, it.qty));
+  } else {
+    it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (pct / 100));   // no readable quantity: the package default, scaled
+  }
+  it.purchase = Date.now(); it.deducted = 0; it.asking = false;
+  it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
+}
+
+/**
+ * What a recipe takes of one ingredient, worked out once so the recipe sheet, the
+ * made-it list and the deduction all quote the same number: the amount in the unit the
+ * pantry keeps that food in, and the servings that amount comes to. The recipe's own
+ * wording is converted when it can be ("8 oz" of spaghetti against a pantry kept in
+ * grams is "225 g"); otherwise the servings analyze() worked out are turned back into
+ * pantry units. Packaging ("1 jar") has no size of its own, so those foods keep the
+ * recipe's wording rather than being quoted in half-jars.
+ */
+function takeFor(i, factor = 1) {
+  const servings = Math.max(0, (Number(i.need) || 0) * factor);
+  const fallback = scaleAmount(i.amt, factor) || (servings ? servingsNote(servings) : '');
+  const u = pantryUnitOf(i.key);
+  if (!u || u.unit === 'pack') return { text: fallback, servings };
+  // The conversion works from the amount as written, not from its rounded reading: the
+  // sheet may say "1.5 bananas" while 1.7 is what really leaves the pantry.
+  const raw = i.amt ? toCanonical(i.amt) : null;
+  const direct = raw && raw.amount != null ? convertCanonical({ ...raw, amount: raw.amount * factor }, u, i.key) : null;
+  if (direct) return { text: formatQuantity(direct), servings: u.perServing ? direct.amount / u.perServing : servings };
+  if (u.perServing) return { text: formatQuantity({ amount: servings * u.perServing, unit: u.unit, label: u.label }), servings };
+  return { text: fallback, servings };
+}
+
 // Each purchase is its own lot. Same group_key stacks in the panel with separate
 // expiry dates — never merge and overwrite an older banana's use-by.
 function addLot(name, key, qty, raw = '', extras = null) {
   const c = catalog(key);
+  qty = qtyInPantryUnit(key, qty);   // "4 kg" of bananas joins a pantry kept in bananas as about 34 of them
   const initial = extras && extras.initial != null ? extras.initial : baseServings(key, qty);
   const burn = extras && extras.burn != null ? extras.burn : c.burn;
   const purchase = extras && extras.purchase != null ? extras.purchase : Date.now();
@@ -603,6 +722,9 @@ function addLot(name, key, qty, raw = '', extras = null) {
     expiry,
     burn,
     deducted: 0,
+    // what the whole lot cost (a receipt line's price); null when nobody said, so the
+    // kitchen report falls back to a typical cost per serving
+    price: extras && Number.isFinite(Number(extras.price)) && Number(extras.price) > 0 ? Number(extras.price) : null,
   };
   state.pantry.push(it);
   return { item: it, merged: false };
@@ -717,7 +839,26 @@ function prefFit(dish) {
   let fit = 0;
   if (dish.tags && p.cuisines.includes(dish.tags.cuisine)) fit += 1;
   if (p.maxMinutes > 0 && dishMinutes(dish) <= p.maxMinutes) fit += 1;
+  if (isLiked(dish)) fit += 2;   // a 👍 after cooking it, or a dish made of the same things
   return fit;
+}
+// Ratings (👍 / 👎 after "I made this") are kept by title, so a regenerated deck's copy of a
+// dish still carries them. A rated-down dish is left out of the deck; a rated-up one, or a
+// dish sharing at least 60% of its ingredients with one, sorts earlier.
+const ratingOf = dish => (dish && state.ratings[titleKey(dish.name)]) || null;
+const isDisliked = dish => { const r = ratingOf(dish); return Boolean(r && r.value < 0); };
+const ingredientKeys = dish => new Set(((dish && dish.ingredients) || []).map(i => normalizeName(i.name)).filter(Boolean));
+function isLiked(dish) {
+  const r = ratingOf(dish);
+  if (r) return r.value > 0;
+  const keys = ingredientKeys(dish);
+  if (!keys.size) return false;
+  for (const e of state.cookedLog) {
+    if (!(e.rating > 0) || !e.dish) continue;
+    const common = [...ingredientKeys(e.dish)].filter(k => keys.has(k)).length;
+    if (common / keys.size >= 0.6) return true;
+  }
+  return false;
 }
 
 /* ---------- dishes against the pantry ---------- */
@@ -732,9 +873,25 @@ function pantryIndex() {
   }
   return pantryIndexCache.index;
 }
+// Half of the smallest step a food's pantry unit shows, in servings. A shortfall smaller
+// than this prints as no shortfall at all, so counting it as "low" would put a warning on
+// a row that reads "2 bananas of 2 bananas".
+function displaySlack(key) {
+  const u = pantryUnitOf(key);
+  if (!u || !u.perServing) return 1e-9;
+  const step = u.unit === 'pcs' || u.unit === 'pack' ? 0.5 : 5;   // counts read at halves, g and ml at fives
+  return step / 2 / u.perServing;
+}
+
 // A key for an ingredient nothing in the pantry or the catalog matches: a plain slug of its
 // name, so nutrition, chips and the made-it sheet still have something stable to hang on.
 const fallbackKey = name => String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() || 'item';
+
+// A substitution the cook picked on the recipe sheet lives on the dish (dish.subs, keyed by
+// the ingredient's normalised name, so it survives the pantry changing under it): the
+// swap counts as "have", approximately, and the made-it sheet deducts the swap's foods.
+const subKeyOf = i => normQ(i.name);
+const subFor = (dish, i) => (dish.subs && dish.subs[subKeyOf(i)]) || null;
 
 // Every ingredient is verified against the pantry at read time: matched by name, so a
 // scan or a check-in re-checks every recipe, then judged on amount. status is one of
@@ -752,8 +909,9 @@ function analyze(dish) {
     const fromAmount = builtin ? null : servingsFor(key, i.amt);
     const need = Math.max(0, Number(fromAmount > 0 ? fromAmount : (i.servings_used ?? i.need)) || 1);
     const avail = available(key);
-    const status = staple ? 'staple' : avail <= 0 ? 'missing' : avail + 1e-9 < need ? 'short' : 'have';
-    return { ...i, key, need, item: findItem(key), avail, approx: Boolean(m && m.approx), status, staple, have: status === 'have' || status === 'staple' };
+    const sub = staple ? null : subFor(dish, i);
+    const status = staple ? 'staple' : sub ? 'have' : avail <= 0 ? 'missing' : avail + displaySlack(key) < need ? 'short' : 'have';
+    return { ...i, key, need, item: sub ? null : findItem(key), avail, approx: Boolean(sub || (m && m.approx)), sub, status, staple, have: status === 'have' || status === 'staple' };
   });
   const have = ings.filter(i => i.have);
   const short = ings.filter(i => i.status === 'short');
@@ -810,7 +968,11 @@ const state = {
   history: [],              // swipes in order, { id, dir: 'skip'|'cook', tab }, so Undo can bring the last one back
   undoing: null,            // the dish Undo just brought back: buildDeck puts it on top for one render
   saved: [],                // dishes kept from the photo flow, newest first; replaced by loadSavedDishes() at boot
-  photoDishes: new Map(),   // photo dishes picked for tonight, by id, so they stay findable if removed from Saved
+  extraDishes: new Map(),   // dishes outside the deck that must still open (photo dishes on Tonight, "Cook again" snapshots), by id
+  ratings: {},              // { [titleKey]: { title, value: 1|-1, at, dishId } }; replaced by loadRatings() at boot
+  cookedLog: [],            // [{ id, title, at, rating, dishId, dish }] newest first, capped; replaced by loadCooked() at boot
+  events: [],               // what happened to each lot (see shared/report.js), oldest first, capped; replaced by loadEvents() at boot
+  savedTab: 'saved',        // the Saved sheet's tab: saved | cooked
   shopping: [],             // the shopping list, see the Shopping list section; replaced by loadShopping() at boot
   expanded: new Set(),      // pantry stack keys that are open
   prefs: normalizePrefs(DEFAULT_PREFS),   // cooking preferences; replaced by loadPrefs() at boot
@@ -840,6 +1002,7 @@ function buildDeck() {
   const cmp = (SORTS[state.sortMode] || SORTS.urgent).cmp;
   state.deck = all
     .filter(a => !state.skipped.has(a.dish.id) && !state.cooked.has(a.dish.id) && !state.chosen.has(a.dish.id))
+    .filter(a => !isDisliked(a.dish))   // rated down: not dealt again (it stays under Cooked so the rating can be flipped)
     .sort((a, b) => cmp(a, b) || (a.stretch - b.stretch) || (b.fit - a.fit));
   // the dish Undo brought back goes on top, whatever the sort says, until it is painted
   if (state.undoing) {
@@ -861,7 +1024,57 @@ const el = {
   veil: $('#veil'), sheet: $('#sheet'), panel: $('#pantry-screen'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
   shoppingScreen: $('#shopping-screen'), shoppingBody: $('#shopping-body'), shoppingCount: $('#shopping-count'),
   toast: $('#toast'), file: $('#file-input'), dishFile: $('#dish-input'), savedBtn: $('#btn-saved'),
+  progress: $('#progress'), busyPill: $('#busy-pill'), busyLabel: $('#busy-label'),
+  chat: $('#chat'), chatFab: $('#btn-chat'),
 };
+
+/* ---------- the loading bar and pill ----------
+   One indeterminate bar along the bottom edge of the top bar and a small glass pill
+   naming the job, driven by a counter so overlapping jobs (a refresh behind a plan)
+   keep them up until the last one ends. The pill waits 300 ms, so a fast job never
+   flashes it. `const busy = beginBusy('Finding recipes…'); … busy.end()`. */
+let busyJobs = [];
+let busyPillTimer = 0;
+let recipesLoading = 0;   // refreshRecipes() calls in flight, for the deck's skeleton cards
+function paintBusy() {
+  const on = busyJobs.length > 0;
+  el.progress.hidden = !on;
+  el.progress.setAttribute('aria-busy', String(on));
+  if (on) {
+    el.busyLabel.textContent = busyJobs[busyJobs.length - 1].label;
+    if (!busyPillTimer && !el.busyPill.classList.contains('in')) {
+      busyPillTimer = setTimeout(() => { busyPillTimer = 0; if (busyJobs.length) { el.busyPill.hidden = false; el.busyPill.classList.add('in'); } }, 300);
+    }
+  } else {
+    clearTimeout(busyPillTimer); busyPillTimer = 0;
+    el.busyPill.classList.remove('in');
+    setTimeout(() => { if (!busyJobs.length) el.busyPill.hidden = true; }, reduceMotion ? 0 : 200);
+  }
+}
+function beginBusy(label = 'Working…') {
+  const job = { label, done: false };
+  busyJobs.push(job);
+  paintBusy();
+  return { end() { if (job.done) return; job.done = true; busyJobs = busyJobs.filter(j => j !== job); paintBusy(); } };
+}
+
+// Photos fade in once they have loaded; until then their frame shimmers. A generated
+// picture that replaces a stand-in later (shared/dish-images.js swaps the src) fades in
+// over the old one. Idempotent: safe after every render.
+function watchImages(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  for (const img of root.querySelectorAll('.card-img img, .hero img, img.thumb, img.chat-thumb')) {
+    if (img.dataset.watched) continue;
+    img.dataset.watched = '1';
+    const mark = () => img.classList.add('loaded');
+    if (img.complete && img.naturalWidth > 0) mark();
+    img.addEventListener('load', () => {
+      if (!img.classList.contains('loaded')) return mark();
+      img.classList.remove('swap'); void img.offsetWidth; img.classList.add('swap');   // a new src arrived: crossfade
+    });
+    img.addEventListener('error', mark);   // a broken picture must not shimmer forever
+  }
+}
 
 // The choke point after every mutation: everything derived is rebuilt here, then saved.
 function renderAll(opts = {}) {
@@ -881,6 +1094,7 @@ function renderAll(opts = {}) {
   if (isShoppingTab()) renderShopping();
   saveState({ pantry: state.pantry, skipped: [...state.skipped], cooked: [...state.cooked], chosen: [...state.chosen] });
   if (shoppingDirty) { shoppingDirty = false; saveShopping(state.shopping); }
+  if (eventsDirty) { eventsDirty = false; saveEvents(state.events); }
 }
 
 /* ---------- sections ---------- */
@@ -950,6 +1164,7 @@ function chipHTML(i, dish) {
   if (i.status === 'staple') return `<button class="chip staple${on}"${attrs}><span>${esc(i.name)}</span>${plus}</button>`;
   if (i.status === 'short') return `<button class="chip low${on}"${using}${attrs}><span class="dot"></span><span>Low on ${esc(i.name)}</span>${plus}</button>`;
   if (i.status === 'missing') return `<button class="chip missing${on}"${attrs}><span>${esc(i.name)}</span>${plus}</button>`;
+  if (i.sub) return `<button class="chip have sub${on}" title="Instead of ${esc(i.name)}"${attrs}>${ICON.checkSm}<span>Using ${esc(i.sub.use)}</span>${plus}</button>`;
   return `<button class="chip have${on}"${using}${attrs}>${ICON.checkSm}<span>${esc(i.name)}</span>${plus}</button>`;
 }
 // "missing 2: fresh noodles, lime · low on: garlic"
@@ -963,7 +1178,7 @@ function cardHTML(a) {
   const d = a.dish;
   return `
     <div class="card-img">
-      <img src="${esc(d.img)}" alt="" draggable="false"${dishImgAttrs(d)}>
+      <img${imgSrcAttr(d)} alt="" draggable="false"${dishImgAttrs(d)}>
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
     </div>
     <div class="card-body">
@@ -988,12 +1203,22 @@ const END_COPY = {
   explore: { title: 'Nothing to explore right now', copy: 'Everything you can cook is in Curated. Scan a receipt for new ideas.' },
   done:    { title: 'That’s everything we can make right now', copy: 'Scan another receipt for new dishes, or reshuffle to see the ones you skipped.' },
 };
+// Three stand-in cards while the first deck is still being written: the shape of a card, shimmering.
+const skeletonCardHTML = () => `
+    <div class="card-img"></div>
+    <div class="card-body">
+      <span class="sk t1"></span><span class="sk t2"></span><span class="sk m"></span>
+      <div class="chips"><span class="sk c"></span><span class="sk c"></span><span class="sk c"></span><span class="sk c"></span></div>
+    </div>`;
 function renderDeck(opts = {}) {
   const hasPantry = state.pantry.length > 0;
   const deckTab = isDeckTab();
+  // Nothing to deal only because the recipes are still on their way (no cached deck yet):
+  // skeleton cards instead of an end-of-deck message that would be wrong in a moment.
+  const loading = deckTab && hasPantry && state.deck.length === 0 && recipesLoading > 0 && !liveDishes && apiConfigured();
   el.emptyScreen.classList.toggle('hidden', !deckTab || hasPantry);
-  el.deckScreen.classList.toggle('hidden', !deckTab || !hasPantry || state.deck.length === 0);
-  el.endScreen.classList.toggle('hidden', !deckTab || !hasPantry || state.deck.length > 0);
+  el.deckScreen.classList.toggle('hidden', !deckTab || !hasPantry || (state.deck.length === 0 && !loading));
+  el.endScreen.classList.toggle('hidden', !deckTab || !hasPantry || state.deck.length > 0 || loading);
   // End of deck: the preferences hid everything, this tab holds nothing, or they went through it
   const end = state.prefsHid ? 'prefs' : state.tabTotal === 0 && END_COPY[state.tab] ? state.tab : 'done';
   el.endTitle.textContent = END_COPY[end].title;
@@ -1003,6 +1228,12 @@ function renderDeck(opts = {}) {
   el.goExplore.hidden = end !== 'curated';
   el.endUndo.hidden = end === 'prefs' || state.history.length === 0;   // the last swipe emptied the deck: bring it back
   el.deck.innerHTML = '';
+  if (loading) {
+    el.deck.innerHTML = [2, 1, 0].map(pos => `<article class="card skeleton pos${pos}" aria-hidden="true">${skeletonCardHTML()}</article>`).join('');
+    el.caption.textContent = 'Finding recipes…';
+    if (el.status.textContent !== 'Finding recipes') el.status.textContent = 'Finding recipes';
+    return;
+  }
   const show = state.deck.slice(0, 3);
   // back to front so the top card is last in the DOM. enter: true animates the stack,
   // 'top' only the top card (the one Undo just brought back).
@@ -1022,6 +1253,7 @@ function renderDeck(opts = {}) {
   }
   state.undoing = null;   // painted on top once; the sort owns it from here
   applyDishImages(el.deck);   // generated pictures replace the stand-ins as they arrive
+  watchImages(el.deck);
   const top = $('#deck .pos0');
   if (top) top.addEventListener('pointerdown', onPointerDown);
   const n = state.deck.length;
@@ -1157,10 +1389,19 @@ function commit(dir, fromDx = 0) {
 }
 
 /* ---------- sheets (modals) ---------- */
-// While a sheet is open the rest of the page is inert: no Tab into it, no clicks.
+// While a sheet is open the rest of the page is inert: no Tab into it, no clicks. The
+// helper (#chat, #btn-chat) is never inerted: "Ask a question" floats it over the sheet.
 function syncInert() {
   const modal = !!state.sheet;
   for (const n of $$('.topbar, .stage, .foot')) n.inert = modal;   // the section tabs are inside the top bar
+}
+// The recipe the helper is being asked about ("Ask a question" on the recipe sheet): while
+// set, every turn carries it as focus_recipe and the panel floats above the sheet.
+let chatFocus = null;
+const askedAbout = new Set();   // dish ids that already got the "Ask me anything about…" line
+function clearChatFocus() {
+  chatFocus = null;
+  el.chat.classList.remove('over');
 }
 // The file inputs live in their dropzone while an upload sheet is open; park them before the sheet's markup is replaced.
 function parkFileInput() {
@@ -1173,6 +1414,9 @@ function openSheet(kind, html, cls = '') {
   el.sheet.className = `sheet glass ${cls}`;
   el.sheet.innerHTML = html;
   applyDishImages(el.sheet);
+  watchImages(el.sheet);
+  el.chatFab.classList.add('over');   // the helper stays reachable above the veil while a sheet is open
+  if (kind !== 'detail' && kind !== 'rate') clearChatFocus();   // a different sheet: the helper is no longer about that recipe
   const h = $('h2', el.sheet);
   if (h) { h.id = h.id || 'sheet-title'; el.sheet.setAttribute('aria-labelledby', h.id); }
   else el.sheet.removeAttribute('aria-labelledby');
@@ -1190,6 +1434,8 @@ function closeSheet() {
   if (state.sheet === 'onboarding' && draft) return finishOnboarding();
   state.sheet = null;
   syncInert();
+  clearChatFocus();
+  el.chatFab.classList.remove('over');
   el.sheet.classList.remove('in');
   el.veil.classList.remove('in');
   // hand focus back to whatever opened the sheet, unless the user already clicked somewhere else
@@ -1232,10 +1478,10 @@ function openScanUpload() {
         <small>Photos and PDFs · one receipt at a time</small>
       </label>
       <div class="sheet-note wrap">
-        <span>${apiConfigured() ? 'Items, prices and dates are read with Gemini.' : 'Backend offline — use the sample receipt, or set apiBaseUrl.'}</span>
+        <span>${apiConfigured() ? 'Items, prices and dates are read with Gemini.' : 'Connect the API in shared/config.js to scan receipts, or add items by hand from the Pantry tab.'}</span>
         <span class="note-links">
           <button class="linkish" type="button" data-dish-upload>Have a photo of a dish instead?</button>
-          <button class="linkish accent" type="button" data-sample>Use sample receipt</button>
+          ${apiConfigured() ? '' : '<button class="linkish accent" type="button" data-go-pantry>Open the Pantry tab</button>'}
         </span>
       </div>
     </div>`);
@@ -1248,28 +1494,23 @@ function openScanUpload() {
 el.file.addEventListener('change', () => { const f = el.file.files[0]; if (f) startProcessing(f); el.file.value = ''; });
 
 /* ---------- scan: processing ---------- */
+// The receipt being read: the photo itself, or a paper-shaped stand-in naming a PDF.
 function receiptHTML(file) {
   if (file && file.type.startsWith('image/')) return `<img src="${URL.createObjectURL(file)}" alt="">`;
-  const rows = [
-    '<div class="b"><span>WHOLE FOODS MARKET</span></div>', '<div><span>SEP 19 2026  6:42 PM</span></div>', '<hr>',
-    ...SAMPLE_RECEIPT.lines.map(l => `<div><span>${esc(l.raw)}</span><span>${l.price.toFixed(2)}</span></div>`),
-    '<hr>', `<div class="b"><span>TOTAL</span><span>${SAMPLE_RECEIPT.total.toFixed(2)}</span></div>`,
-  ];
-  return `<div class="receipt-lines">${rows.join('')}</div>`;
+  return `<div class="receipt-lines"><div class="b"><span>${esc(file && file.name ? file.name : 'receipt')}</span></div><hr><div><span>Reading the pages…</span></div></div>`;
 }
+/** file: a File from the dropzone or the first-run card. Nothing happens without one. */
 async function startProcessing(file) {
-  const usingSample = !file;
-  const steps = usingSample
-    ? [
-      ['Reading items', '17 lines found, 2 look like non-food'],
-      ['Estimating shelf life', 'Milk, spinach, chicken thighs…'],
-      ['Finding recipes', 'Dishes that use what expires first'],
-    ]
-    : [
-      ['Reading items', 'Sending your receipt to the AI parser'],
-      ['Estimating shelf life', 'Servings, burn rate, and use-by dates'],
-      ['Finding recipes', 'We’ll refresh the deck once it’s in your pantry'],
-    ];
+  if (!file) return;
+  if (!apiConfigured()) {
+    toast('Backend not configured', 'Set apiBaseUrl in shared/config.js');
+    return openScanUpload();
+  }
+  const steps = [
+    ['Reading items', 'Sending your receipt to the AI parser'],
+    ['Estimating shelf life', 'Servings, burn rate, and use-by dates'],
+    ['Finding recipes', 'We’ll refresh the deck once it’s in your pantry'],
+  ];
   openSheet('processing', `
     <div class="sheet-head"><h2>Reading your receipt</h2>${closeBtn()}</div>
     <div class="sheet-body">
@@ -1278,33 +1519,11 @@ async function startProcessing(file) {
         <div class="steps">${steps.map(([t, s]) => `<div class="step"><span class="mark">${ICON.checkMd}</span><div><strong>${t}</strong><small>${s}</small></div></div>`).join('')}</div>
       </div>
       <div class="sheet-note">
-        <span>${usingSample
-          ? (apiConfigured() ? 'Sample receipt — skip the camera when you just want to try the flow.' : 'Demo mode: sample receipt (API not configured).')
-          : 'Parsing with Gemini. Keep this tab open.'}</span>
+        <span>Parsing with Gemini. Keep this tab open.</span>
         <button class="linkish" type="button" data-back-upload>Cancel</button>
       </div>
     </div>`);
   const stepEls = $$('.step', el.sheet);
-
-  if (usingSample) {
-    for (let i = 0; i < stepEls.length; i++) {
-      if (state.sheet !== 'processing') return;
-      stepEls[i].classList.add('active');
-      await wait(1100);
-      stepEls[i].classList.remove('active');
-      stepEls[i].classList.add('done');
-    }
-    if (state.sheet !== 'processing') return;
-    await wait(250);
-    lastReceipt = { store: SAMPLE_RECEIPT.store, date: SAMPLE_RECEIPT.date, total: SAMPLE_RECEIPT.total };
-    openReview(SAMPLE_RECEIPT.lines.map(l => ({ ...l, id: uid(), dropped: false })));
-    return;
-  }
-
-  if (!apiConfigured()) {
-    toast('Backend not configured', 'Set apiBaseUrl in shared/config.js');
-    return openScanUpload();
-  }
 
   // Animate steps while the request runs
   let stepIdx = 0;
@@ -1330,7 +1549,8 @@ async function startProcessing(file) {
       date: formatReceiptDate(parsed.purchase_date),
       total: Number(parsed.total) || 0,
     };
-    const lines = (parsed.items || []).map(lineFromScanItem);
+    const lines = [];
+    for (const item of parsed.items || []) lines.push(lineFromScanItem(item, lines));
     if (!lines.length) {
       toast('No food items found', 'Try a clearer photo');
       return openScanUpload();
@@ -1448,7 +1668,7 @@ function saveReviewEdit(id, name, qty) {
   if (!l) return null;
   const newName = String(name || '').trim() || l.name;
   if (newName !== l.name) { l.name = newName; l.key = keyForName(newName); }
-  l.qty = formatQuantity(String(qty || '').trim());
+  l.qty = qtyInPantryUnit(l.key, formatQuantity(String(qty || '').trim()));
   l.initial = lineServings(l);
   l.editing = false; l.fixed = true;
   return l;
@@ -1470,6 +1690,7 @@ function addToPantry() {
       purchase: l.purchase,
       expiry: l.expiry,
       variant: l.variant,
+      price: l.price > 0 ? l.price : null,   // the receipt's price, so the kitchen report can say what it saved
     });
   }
   closeSheet();
@@ -1495,12 +1716,21 @@ function detailBody(a, people) {
   const short = a.short || [];
   const needed = [...a.missing, ...short];
   // amount, then which pantry row a stand-in uses ("· your chicken thighs") or how low they are
-  const note = i => {
-    if (i.status === 'short') return ` <small>· low, ~${fmt1(i.avail)} of ${fmt1(i.need * factor)}</small>`;
+  const note = (i, take) => {
+    if (i.sub) return ` <small>· using ${esc(i.sub.use)}</small> <button class="linkish sm" type="button" data-unswap="${esc(i.name)}">Undo</button>`;
+    if (i.status === 'short') return ` <small>· low, ${esc(servingsText(i.key, i.avail))} of ${esc(take.text)}</small>`;
     if (i.approx && i.item) return ` <small>· your ${esc(i.item.name.toLowerCase())}</small>`;
     return '';
   };
-  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmount(i.amt, factor))}${note(i)}</span>${listBtnHTML(i, d, { qty: scaleAmount(i.amt, factor) })}</div>`;
+  // Under "You'll need", each row offers a swap; the suggestions open in a slot below it.
+  const swapBtn = i => `<button class="linkish sm swap" type="button" data-swap="${esc(i.name)}">Swap?</button>`;
+  // Amounts are quoted in the unit the pantry keeps that food in: 12 bananas on the
+  // shelf means this row asks for bananas, never servings or grams.
+  const ing = (i, cls) => {
+    const take = takeFor(i, factor);
+    return `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(take.text)}${note(i, take)}</span>${cls !== 'have' ? swapBtn(i) : ''}${listBtnHTML(i, d, { qty: take.text })}</div>`
+      + (cls !== 'have' ? `<div class="subs-slot" data-subs-for="${esc(i.name)}" hidden></div>` : '');
+  };
   // everything under "You'll need" is already on the list: say so instead of offering it again
   const listed = needed.length > 0 && needed.every(i => onShoppingList(i.key));
   const shopBtn = needed.length
@@ -1520,7 +1750,7 @@ function detailBody(a, people) {
       : `<button class="linkish" type="button" data-close>Back to deck</button>`;
   return `
     <div class="hero">
-      <img src="${esc(d.img)}" alt=""${dishImgAttrs(d)}>
+      <img${imgSrcAttr(d)} alt=""${dishImgAttrs(d)}>
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
       ${closeBtn()}
       <div class="hero-text">
@@ -1566,7 +1796,9 @@ function detailBody(a, people) {
       ${kept ? `<button class="linkish dim" type="button" data-remove-saved="${d.id}">Remove</button>` : ''}
       <span class="grow"></span>
       ${cookBtn}
-      <button class="pill prominent lg" type="button" data-madeit="${d.id}">${ICON.checkMd}<span>I made this</span></button>
+      <button class="pill glass" type="button" data-ask-dish="${esc(d.id)}">${ICON.chat}<span>Ask a question</span></button>
+      <button class="pill prominent" type="button" data-cook-mode="${esc(d.id)}">${ICON.flame}<span>Start cooking</span></button>
+      <button class="pill glass" type="button" data-madeit="${d.id}">${ICON.checkMd}<span>I made this</span></button>
     </div>`;
 }
 const DETAIL_FROM = new Set(['tonight', 'saved', 'plan']);   // sheets a recipe may open on top of
@@ -1586,6 +1818,7 @@ function rerenderDetail() {
   if (!d) return;
   el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
   applyDishImages(el.sheet);
+  watchImages(el.sheet);
 }
 // A chat or plan recipe arrives without steps (kept fast); the first time one is opened
 // we fetch its steps and fill them into the open sheet.
@@ -1602,6 +1835,7 @@ async function openGeneratedDish(d) {
   } finally {
     d.stepsLoading = false;
     if (state.detailDishId === d.id) rerenderDetail();
+    if (cookState.open && cookState.dish === d && typeof renderCook === 'function') renderCook();   // cook mode was waiting on the steps
   }
 }
 // Tonight, without a swipe: chat and plan recipes, saved photos, or a deck dish opened from
@@ -1610,7 +1844,7 @@ async function openGeneratedDish(d) {
 function cookTonight(id) {
   const d = dishById(id);
   if (!d || state.chosen.has(id)) return;
-  if (isPhotoId(id)) state.photoDishes.set(id, d);   // stays openable even if removed from Saved
+  if (isPhotoId(id)) state.extraDishes.set(id, d);   // stays openable even if removed from Saved
   state.chosen.add(id);
   if (onDeck(id)) state.history.push({ id, dir: 'cook', tab: isDeckTab() ? state.tab : 'curated' });
   closeSheet();
@@ -1643,21 +1877,24 @@ function openMadeIt(dishId) {
   const factor = state.detailServings / Math.max(1, a.dish.servings || 1);
   // what they have, plus what they are low on: the pantry gives up whatever it holds of those
   const rows = [...a.have, ...(a.short || [])].filter(i => i.item).map(original => {
-    const i = { ...original, need: original.need * factor };
+    const t = takeFor(original, factor);          // the same number the recipe sheet showed
+    const i = { ...original, need: t.servings };
     const cur = i.avail;
     const take = Math.min(cur, i.need);
     const after = cur - take;
     const low = i.need > cur + 1e-9;
     const last = low || after <= OUT;
     const lots = lotsFor(i.key).filter(it => !needsCheckin(it) && current(it) > 0);
+    const amt = n => servingsText(i.key, n);      // said in the unit this food is kept in
     let note;
-    if (low) note = `You’re low on this · uses all ${fmt1(cur)} you have`;
+    if (low) note = `You’re low on this · uses all ${amt(cur)} you have`;
     else if (i.item.burn > 0 && i.item.initial >= 20) note = 'Staple, barely moves';
     else if (last) note = 'This uses the last of it';
-    else if (lots.length > 1) note = `Uses oldest pack first · ${fmt1(after)} left after`;
-    else note = `${fmt1(after)} left after this`;
-    return { ...i, cur, take, last, note };
+    else if (lots.length > 1) note = `Uses oldest pack first · ${amt(after)} left after`;
+    else note = `${amt(after)} left after this`;
+    return { ...i, cur, take, last, note, takeText: amt(take), curText: amt(cur), listQty: t.text };
   });
+  rows.push(...subDeductions(a, factor));   // a swapped ingredient gives up the swap's foods instead
   openSheet('madeit', `
     <div class="sheet-head"><h2>Update your pantry</h2>${closeBtn()}</div>
     <div class="sheet-sub"><span>${esc(a.dish.name)}</span><i></i><span>uncheck anything you skipped</span></div>
@@ -1665,7 +1902,7 @@ function openMadeIt(dishId) {
       <div class="deduct" id="deduct">
         ${rows.map(r => `<div class="drow"><label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
           <span class="name"><strong>${esc(r.name)}</strong><small class="${r.last ? 'warn' : ''}">${esc(r.note)}</small></span>
-          <span class="amt">${fmt1(r.take)} of ${fmt1(r.cur)}</span></label>${listBtnHTML(r, a.dish, { qty: r.amt || '', source: 'pantry' })}</div>`).join('')
+          <span class="amt">${esc(r.takeText)} of ${esc(r.curText)}</span></label>${listBtnHTML(r, a.dish, { qty: r.listQty || '', source: 'pantry' })}</div>`).join('')
           || '<p class="empty-note">Nothing in this dish is tracked in your pantry yet.</p>'}
       </div>
     </div>
@@ -1694,21 +1931,33 @@ function finishMadeIt(dishId) {
   const used = [];
   for (const i of [...a.have, ...(a.short || [])]) {
     if (!i.item || !checked.includes(i.key)) continue;
-    const want = i.need * factor;
+    const want = takeFor(i, factor).servings;   // exactly what the sheet said would be used
     if (want > i.avail + 1e-9) low.push(i.name.toLowerCase());
     const batch = deductServings(i.key, want);   // takes what is there and no more
     if (!batch.length) continue;
     used.push(...batch);
     if (available(i.key) <= OUT) ranOut.push(i.name.toLowerCase());
   }
+  // the swaps they picked: their pantry foods go instead of the ingredient they replace
+  for (const r of subDeductions(a, factor)) {
+    if (!checked.includes(r.key)) continue;
+    const batch = deductServings(r.key, r.need);
+    if (!batch.length) continue;
+    used.push(...batch);
+    if (available(r.key) <= OUT) ranOut.push(r.name.toLowerCase());
+  }
+  // the report's input: one cook event per lot that gave something up, and one for the meal
+  for (const u of used) { const lot = state.pantry.find(x => x.id === u.id); if (lot) recordLotEvent('cook', lot, u.servings, { dishId: dish.id, title: dish.name }); }
+  logEvent(lotEvent('cook', null, { now: Date.now(), dishId: dish.id, title: dish.name }));
+  const entry = rememberCooked(dish);
   state.chosen.delete(dishId);
   state.cooked.add(dishId);
   state.history = state.history.filter(h => h.id !== dishId);   // cooked is cooked: Undo cannot deal it again
-  closeSheet();
   renderAll({ enter: true });
   const notes = [ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '', low.length ? `You were low on ${low.join(', ')}.` : ''].filter(Boolean).join(' ');
   toast('Pantry updated', `${plural(checked.length, 'item')} used`, notes);
   logCook({ recipeId: dish.id, title: dish.name, items: used });
+  openRate(entry);   // sheet-to-sheet: how was it?
   refreshRecipes();
 }
 
@@ -1938,7 +2187,7 @@ function keepResult({ cook = false } = {}) {
   saveDish(dish);   // localStorage now, public.recipes in the background; never throws
   state.saved = [dish, ...state.saved.filter(d => d.id !== dish.id)];
   if (cook) {
-    state.photoDishes.set(dish.id, dish);
+    state.extraDishes.set(dish.id, dish);
     state.chosen.add(dish.id);
   }
   closeSheet();
@@ -1949,7 +2198,7 @@ function removeSaved(id) {
   const dish = state.saved.find(d => d.id === id);
   state.saved = state.saved.filter(d => d.id !== id);
   removeDish(id);
-  if (dish && state.chosen.has(id)) state.photoDishes.set(id, dish);   // still on tonight's list: keep it openable
+  if (dish && state.chosen.has(id)) state.extraDishes.set(id, dish);   // still on tonight's list: keep it openable
   renderAll();
   toast('Removed from saved', dish ? dish.name : '');
   openSaved();   // back to the list (sheet-to-sheet from the detail)
@@ -1974,16 +2223,47 @@ function savedRowHTML(d, i) {
     </button>
   </div>`;
 }
-function openSaved() {
-  if (state.sheet && state.sheet !== 'detail') return;   // the detail's "Back to saved" and Remove reopen it sheet-to-sheet
-  openSheet('saved', `
-    <div class="sheet-head"><h2>Saved dishes</h2>${closeBtn()}</div>
+// The Cooked tab: every dish they made, newest first, with its rating and a way back to it.
+const relativeDay = ms => { const d = Math.floor((Date.now() - ms) / DAY); return d <= 0 ? 'today' : d === 1 ? 'yesterday' : d < 7 ? `${d} days ago` : shortDate(ms); };
+function cookedRowHTML(e, i) {
+  const live = dishById(e.dishId);
+  const d = live && titleKey(live.name) === titleKey(e.title) ? live : e.dish;   // the deck's copy while it lasts, else the snapshot
+  const img = (d && d.img) || '';
+  const thumb = img ? `<img class="thumb" src="${esc(img)}" alt="" draggable="false"${d ? dishImgAttrs(d) : ''}>` : `<span class="thumb" aria-hidden="true">${ICON.camera}</span>`;
+  return `<div class="rrow cooked" style="animation-delay:${i * 50}ms">
+    ${thumb}
+    <div class="name"><strong>${esc(e.title)}</strong><small>${esc(relativeDay(e.at))}${d && d.time ? ` · ${esc(d.time)}` : ''}</small></div>
+    <span class="rate-mini" role="group" aria-label="Rate ${esc(e.title)}">
+      <button class="circle xs glass${e.rating > 0 ? ' on' : ''}" type="button" data-rate-toggle="${esc(e.id)}" data-value="1" aria-pressed="${e.rating > 0}" aria-label="Loved it">${ICON.thumbUpSm}</button>
+      <button class="circle xs glass${e.rating < 0 ? ' on' : ''}" type="button" data-rate-toggle="${esc(e.id)}" data-value="-1" aria-pressed="${e.rating < 0}" aria-label="Not again">${ICON.thumbDownSm}</button>
+    </span>
+    ${e.dish ? `<button class="pill glass sm" type="button" data-cook-again="${esc(e.id)}">Cook again</button>` : ''}
+  </div>`;
+}
+function savedSheetHTML() {
+  const tab = state.savedTab === 'cooked' ? 'cooked' : 'saved';
+  const tab_ = (id, label, n) => `<button class="ptab${tab === id ? ' on' : ''}" type="button" role="tab" aria-selected="${tab === id}" data-saved-tab="${id}">${label}${n ? ` <small>${n}</small>` : ''}</button>`;
+  const body = tab === 'cooked'
+    ? (state.cookedLog.length ? state.cookedLog.map(cookedRowHTML).join('') : '<p class="empty-note">Nothing cooked yet. “I made this” on a recipe puts it here, with a thumbs up or down.</p>')
+    : (state.saved.length ? state.saved.map(savedRowHTML).join('') : '<p class="empty-note">Nothing saved yet. Snap a dish and keep the recipe here.</p>');
+  return `
+    <div class="sheet-head"><h2>${tab === 'cooked' ? 'Cooked' : 'Saved dishes'}</h2>${closeBtn()}</div>
     <div class="sheet-body">
-      <button class="pill prominent full" type="button" data-dish-upload>${ICON.camera}<span>Identify a dish from a photo</span></button>
-      <div class="dlist" id="saved-list">
-        ${state.saved.length ? state.saved.map(savedRowHTML).join('') : '<p class="empty-note">Nothing saved yet. Snap a dish and keep the recipe here.</p>'}
-      </div>
-    </div>`, 'w-520');
+      <div class="ptabs" role="tablist">${tab_('saved', 'Saved', state.saved.length)}${tab_('cooked', 'Cooked', state.cookedLog.length)}</div>
+      ${tab === 'saved' ? `<button class="pill prominent full" type="button" data-dish-upload>${ICON.camera}<span>Identify a dish from a photo</span></button>` : ''}
+      <div class="dlist" id="saved-list">${body}</div>
+    </div>`;
+}
+function openSaved(tab) {
+  if (tab === 'saved' || tab === 'cooked') state.savedTab = tab;
+  if (state.sheet && state.sheet !== 'detail' && state.sheet !== 'saved') return;   // the detail's "Back to saved" and Remove reopen it sheet-to-sheet
+  openSheet('saved', savedSheetHTML(), 'w-520');
+}
+function rerenderSaved() {
+  if (state.sheet !== 'saved') return;
+  el.sheet.innerHTML = savedSheetHTML();
+  applyDishImages(el.sheet);
+  watchImages(el.sheet);
 }
 
 /* ---------- pantry page ---------- */
@@ -1993,15 +2273,22 @@ const shortDate = ms => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 function boughtLabel(it) {
   return `bought ${shortDate(it.purchase)}`;
 }
+// "4.5 bananas of 8 bananas", or just "8 bananas" while none of it has gone.
+function amountOfLabel(it) {
+  const left = lotAmountText(it);
+  const full = qtyText(it);
+  return !full || left === full ? left : `${left} of ${full}`;
+}
 function lotLabel(it) {
   const bits = [];
   if (it.variant) bits.push(it.variant);
   bits.push(boughtLabel(it));
-  if (it.qty) bits.push(formatQuantity(it.qty));
+  if (it.qty) bits.push(amountOfLabel(it));
   return bits.join(' · ');
 }
-// The stored quantity string is left as it was typed or scanned; only the display is standardised.
-const qtyText = it => (it.qty ? formatQuantity(it.qty) : '');
+// The stored quantity string is left as it was typed or scanned; only the display is
+// standardised — and a count reads with the food's own noun, as the amount left does.
+const qtyText = it => (it.qty ? formatQuantity(lotSize(it) || it.qty) : '');
 function stackDisplayName(lots) {
   const names = [...new Set(lots.map(l => l.name))];
   if (names.length === 1) return names[0];
@@ -2012,8 +2299,9 @@ function prowHTML(it, { lot = false } = {}) {
   const cur = current(it);
   const pctLeft = it.initial > 0 ? clamp(cur / it.initial, 0, 1) : 0;
   const lvl = amountLevel(pctLeft);
-  const sub = lot ? esc(lotLabel(it)) : `${esc(qtyText(it))}${it.qty ? ' · ' : ''}~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
-  return `<div class="prow${lot ? ' lot' : ''}" data-id="${it.id}">
+  // What is left is said in the unit this lot is kept in, not in servings.
+  const sub = lot ? esc(lotLabel(it)) : `${esc(amountOfLabel(it))} left`;
+  return `<div class="prow${lot ? ' lot' : ''}${pantrySeen.has(it.id) ? '' : ' enter'}" data-id="${it.id}">
     <div class="name"><strong>${esc(lot && it.variant ? it.variant : it.name)}</strong><small>${sub}</small></div>
     <div class="fresh amt-${lvl}">
       <div class="bar"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div>
@@ -2036,7 +2324,7 @@ function stackHTML(lots) {
   return `<div class="prow stack${open ? ' open' : ''}" data-key="${esc(key)}">
     <button class="stack-main" type="button" data-toggle-stack="${esc(key)}" aria-expanded="${open}">
       <span class="chev">${ICON.chevron}</span>
-      <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · ~${plural(Math.max(1, Math.round(total)), 'serving')} left</small></div>
+      <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · ${esc(stackAmountText(lots))} left</small></div>
       <div class="fresh amt-${lvl}">
         <div class="bar"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div>
         <div class="fmeta"><span class="pct">${Math.round(pctLeft * 100)}% left</span><span class="exp">exp ${esc(shortDate(primary.expiry))}</span></div>
@@ -2078,6 +2366,10 @@ function checkinHTML(it) {
     </div></div>`;
 }
 const stackAmountPct = lots => { const t = lots.reduce((s, it) => s + current(it), 0), ti = lots.reduce((s, it) => s + it.initial, 0); return ti > 0 ? t / ti : 0; };
+// Rows already painted once do not replay their entrance on the next render; only new
+// lots (and, on the shopping list, rows that just changed group) rise in.
+const pantrySeen = new Set();
+const shopSeen = new Map();   // row id → done, as last painted
 function renderPanel() {
   const mem = focusIndexIn(el.panelBody, '.checkin, .prow');
   const tab = state.panelTab || 'expiring';
@@ -2101,7 +2393,8 @@ function renderPanel() {
   }
   const tab_ = (id, label) => `<button class="ptab${tab === id ? ' on' : ''}" type="button" role="tab" aria-selected="${tab === id}" data-ptab="${id}">${label}</button>`;
   const tabs = stacks.length ? `<div class="ptabs" role="tablist">${tab_('expiring', 'Expiring')}${tab_('amount', 'Amount left')}${tab_('category', 'Category')}</div>` : '';
-  el.panelBody.innerHTML = checkins + tabs + body;
+  el.panelBody.innerHTML = reportStripHTML() + checkins + tabs + body;
+  for (const it of state.pantry) pantrySeen.add(it.id);
   restoreFocusIn(el.panelBody, '.checkin, .prow', mem, $('#btn-add'));   // the page itself is not focusable; its add button is
 }
 
@@ -2164,7 +2457,7 @@ function addShopping(items, { source = 'manual' } = {}) {
 function neededForDish(d, people = servingsTarget(state.prefs)) {
   const a = analyze(d);
   const factor = people / Math.max(1, d.servings || 1);
-  return [...a.missing, ...a.short].map(i => ({ name: i.name, key: i.key, qty: scaleAmount(i.amt, factor), dishId: d.id, dishName: d.name }));
+  return [...a.missing, ...a.short].map(i => ({ name: i.name, key: i.key, qty: takeFor(i, factor).text, dishId: d.id, dishName: d.name }));
 }
 const addDishToShopping = (d, people) => addShopping(neededForDish(d, people), { source: 'recipe' });
 
@@ -2174,7 +2467,7 @@ const addDishToShopping = (d, people) => addShopping(neededForDish(d, people), {
    carries what the list needs as data attributes; listAddFromEl reads them back. */
 function listAttrs(i, dish, source = 'recipe', qty) {
   const factor = dish ? servingsTarget(state.prefs) / Math.max(1, dish.servings || 1) : 1;
-  const amount = qty != null ? qty : (i.amt ? scaleAmount(i.amt, factor) : '');
+  const amount = qty != null ? qty : (i.amt ? takeFor(i, factor).text : '');
   return ` data-list-add="${esc(i.name)}" data-list-key="${esc(i.key || keyForName(i.name))}" data-list-qty="${esc(amount)}"`
     + ` data-list-dish="${esc(dish ? dish.id : '')}" data-list-dish-name="${esc(dish ? dish.name : '')}" data-list-source="${esc(source)}"`;
 }
@@ -2234,7 +2527,7 @@ function clearBought() {
 // Checked rows become pantry lots, servings read from their quantity, and leave the list.
 function moveBoughtToPantry() {
   const bought = state.shopping.filter(s => s.done);
-  for (const s of bought) addLot(s.name, s.key, s.qty ? formatQuantity(s.qty) : '', '');
+  for (const s of bought) addLot(s.name, s.key, s.qty ? formatQuantity(s.qty) : '', '');   // addLot says it in the unit that food is kept in
   state.shopping = state.shopping.filter(s => !s.done);
   if (bought.length) shoppingDirty = true;
   return bought.length;
@@ -2255,7 +2548,8 @@ function shopSourceLine(s) {
 }
 function shopRowHTML(s) {
   const sub = [s.qty ? formatQuantity(s.qty) : '', shopSourceLine(s), s.note].filter(Boolean).join(' · ');
-  return `<div class="prow shop${s.done ? ' done' : ''}" data-id="${s.id}">
+  const enter = !shopSeen.has(s.id) || shopSeen.get(s.id) !== s.done;   // new, or just moved between To buy and Bought
+  return `<div class="prow shop${s.done ? ' done' : ''}${enter ? ' enter' : ''}" data-id="${s.id}">
     <button class="shop-chk" type="button" role="checkbox" aria-checked="${s.done}" data-shop-toggle="${s.id}" aria-label="Mark ${esc(s.name)} as ${s.done ? 'still to buy' : 'bought'}">${ICON.checkSm}</button>
     <div class="name"><strong>${esc(s.name)}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</div>
     <button class="circle sm glass del" type="button" data-shop-remove="${s.id}" aria-label="Remove ${esc(s.name)}">${ICON.xSm}</button>
@@ -2272,6 +2566,8 @@ function renderShopping() {
   const move = $('#btn-shop-move'), clear = $('#btn-shop-clear');
   if (move) move.hidden = done.length === 0;
   if (clear) clear.hidden = done.length === 0;
+  shopSeen.clear();
+  for (const s of state.shopping) shopSeen.set(s.id, s.done);
   restoreFocusIn(el.shoppingBody, '.prow', mem, $('#btn-shop-add'));
 }
 
@@ -2374,6 +2670,7 @@ async function ensurePlan({ force = false } = {}) {
   if (apiConfigured() && items.length) {
     planLoading = true;
     renderPlanSheet();
+    const busy = beginBusy('Planning your week…');
     try {
       const data = await fetchMealPlan(items, { prefs: normalizePrefs(state.prefs), days: PLAN_DAYS, start });
       if (token !== planToken) return plan;
@@ -2393,9 +2690,13 @@ async function ensurePlan({ force = false } = {}) {
         return plan;
       }
     } finally {
+      busy.end();
       if (token === planToken) planLoading = false;
     }
   }
+  // Nothing in the kitchen yet: a week dealt from the built-in dishes would be seven days
+  // of things they cannot cook. The sheet's own empty state says it better.
+  if (!state.pantry.length) return plan;
   adoptPlan(buildLocalPlan(start), { source: 'local', signature });
   savePlan(plan);
   return plan;
@@ -2722,10 +3023,279 @@ async function doSignOut(btn) {
   clearLocalDeck();    // nor its deck, which is cached on the account anyway
   clearLocalShopping();   // nor the shopping list and the week, which live on app_state too
   clearLocalPlan();
+  clearLocalRatings(); clearLocalCooked(); clearLocalEvents();   // nor the ratings, the cooked log and the report's events
   await clearDishImages();   // generated pictures are per dish, not per pantry: only a sign-out drops them
   await signOut();
   location.replace('../login/');
 }
+
+/* =========================================================================
+   Wave 2 — the events log and the kitchen report, ratings and the cooked
+   log, substitutions on the recipe sheet. (Cook mode and voice input own
+   their DOM and live with the wiring below.)
+   ========================================================================= */
+
+/* ---------- the events log ----------
+   What happened to each lot, for shared/report.js: a cook event per lot a dish took
+   from (and one for the meal), a check-in that consumed something, a lot marked gone,
+   a lot found past its date. Written here, saved by renderAll like the shopping list. */
+let eventsDirty = false;
+const costFor = key => nutriFor(key).cost;   // a typical cost per serving, when a lot has no receipt price
+function logEvent(e) {
+  if (!e || !e.type) return;
+  state.events.push(e);
+  if (state.events.length > MAX_EVENTS) state.events = state.events.slice(-MAX_EVENTS);
+  eventsDirty = true;
+}
+// One lot's event: `servings` is what left it (cook, checkin) or what was still in it (gone, expired).
+function recordLotEvent(type, lot, servings, extra = {}) {
+  if (!lot || !(servings > 0)) return null;
+  const e = lotEvent(type, lot, { servings, now: Date.now(), costPerServing: costFor(lot.key), ...extra });
+  e.lotId = lot.id;   // so the boot sweep never logs the same lot twice, whatever the flag says
+  logEvent(e);
+  return e;
+}
+// The boot sweep: lots past their date with something left get one `expired` event, once.
+function sweepExpired() {
+  const now = Date.now();
+  let n = 0;
+  for (const it of expiredLots(state.pantry, now)) {
+    if (!state.events.some(e => e.type === 'expired' && e.lotId === it.id)) {
+      const left = current(it);
+      if (left > OUT) { recordLotEvent('expired', it, left); n++; }
+    }
+    it.wasteLogged = true;
+  }
+  if (n) console.info(`[pantry] ${plural(n, 'lot')} found past their date`);
+  return n;
+}
+
+/* ---------- ratings and the cooked log ----------
+   A thumbs up or down after "I made this", kept by title so a regenerated deck's copy of
+   the dish still carries it, and mirrored into prefs.liked / prefs.disliked so every
+   model call knows (which also changes the deck signature: the deck regenerates). */
+function syncRatingsToPrefs() {
+  const all = Object.values(state.ratings).sort((a, b) => b.at - a.at);
+  const next = normalizePrefs({ ...state.prefs, liked: all.filter(r => r.value > 0).map(r => r.title), disliked: all.filter(r => r.value < 0).map(r => r.title) });
+  if (JSON.stringify(next) === JSON.stringify(state.prefs)) return false;
+  state.prefs = next;
+  savePrefs(state.prefs);
+  return true;
+}
+// value: 1, -1, or 0 to clear. Returns whether the preferences changed.
+function rateDish({ title, dishId = '', logId = '' }, value) {
+  const key = titleKey(title);
+  if (!key) return false;
+  if (value) state.ratings[key] = { title, value, at: Date.now(), dishId };
+  else delete state.ratings[key];
+  for (const e of state.cookedLog) if (logId ? e.id === logId : titleKey(e.title) === key) e.rating = value;
+  saveRatings(state.ratings);
+  saveCooked(state.cookedLog);
+  return syncRatingsToPrefs();
+}
+// Tapping the thumb it already has clears it. Returns whether the preferences changed.
+function applyRating(logId, value) {
+  const e = state.cookedLog.find(x => x.id === logId);
+  if (!e) return false;
+  return rateDish({ title: e.title, dishId: e.dishId, logId: e.id }, e.rating === value ? 0 : value);
+}
+// What "Cook again" needs: the dish without its runtime flags. A photo's data: URL is
+// dropped (a hundred of those would not fit in localStorage); the saved copy still has it.
+function cookedSnapshot(dish) {
+  const { stepsLoading, ...rest } = dish;
+  return JSON.parse(JSON.stringify({ ...rest, img: String(dish.img || '').startsWith('data:') ? '' : dish.img }));
+}
+function rememberCooked(dish) {
+  const entry = { id: uid(), title: dish.name, at: Date.now(), rating: (ratingOf(dish) || {}).value || 0, dishId: dish.id, dish: cookedSnapshot(dish) };
+  state.cookedLog = [entry, ...state.cookedLog].slice(0, MAX_COOKED);
+  saveCooked(state.cookedLog);
+  return entry;
+}
+function openRate(entry) {
+  if (!entry) return closeSheet();
+  openSheet('rate', `
+    <div class="sheet-head"><h2>How was ${esc(entry.title)}?</h2>${closeBtn()}</div>
+    <div class="sheet-body rate-body">
+      <p class="rate-help">A thumbs up brings more like it. A thumbs down keeps it off the deck.</p>
+      <div class="rate-btns">
+        <button class="circle glass rate up" type="button" data-rate="1" data-rate-log="${esc(entry.id)}" aria-label="Loved it">${ICON.thumbUp}</button>
+        <button class="circle glass rate down" type="button" data-rate="-1" data-rate-log="${esc(entry.id)}" aria-label="Not again">${ICON.thumbDown}</button>
+      </div>
+      <button class="linkish dim" type="button" data-close>Skip</button>
+    </div>`, 'w-520 rate-sheet');
+}
+// A cooked snapshot back onto Tonight. The deck's copy is used while it still exists
+// (same id, same title); otherwise the snapshot is registered as an extra dish.
+function cookAgain(logId) {
+  const e = state.cookedLog.find(x => x.id === logId);
+  if (!e || !e.dish) return;
+  let d = dishById(e.dishId);
+  if (!d || titleKey(d.name) !== titleKey(e.title)) {
+    d = { ...e.dish, id: e.dish.id && !dishById(e.dish.id) ? e.dish.id : `cooked-${uid()}` };
+    state.extraDishes.set(d.id, d);
+  }
+  if (state.chosen.has(d.id)) { toast('Already on Tonight', d.name); return; }
+  state.cooked.delete(d.id);   // being cooked again: the deck may deal it once more later
+  cookTonight(d.id);
+}
+
+/* ---------- the kitchen report ---------- */
+const REPORT_RANGES = {
+  week:  { days: 7,    title: 'Your kitchen this week',  label: 'Week' },
+  month: { days: 30,   title: 'Your kitchen this month', label: 'Month' },
+  all:   { days: null, title: 'Your kitchen so far',     label: 'All' },
+};
+let reportRange = 'week';
+const reportFor = (range = reportRange) => summarize({ events: state.events, lots: state.pantry, now: Date.now(), days: REPORT_RANGES[range].days, costFor });
+const approxMoney = v => `~$${Math.round(Number(v) || 0)}`;   // estimates read better rounded
+// The strip on top of the Pantry tab: this week in one line.
+function reportStripHTML() {
+  if (!state.events.length) return '';
+  const r = reportFor('week');
+  return `<div class="pstrip"><span>This week · ${plural(r.used.items, 'item')} used before expiring · ${approxMoney(r.savedValue)} saved</span><button class="linkish accent" type="button" data-report>See report</button></div>`;
+}
+function reportHTML() {
+  const range = REPORT_RANGES[reportRange];
+  const r = reportFor();
+  const now = Date.now();
+  const soon = expiringSoon(state.pantry, { now, limit: 5 }).filter(it => current(it) > OUT);
+  const max = Math.max(1, ...r.weekly.map(w => w.value));
+  const bars = r.weekly.map((w, i) => `<div class="rbar"><b>$${w.value.toFixed(0)}</b><span class="col"><i style="height:${Math.max(4, Math.round(w.value / max * 100))}%"></i></span><small>${i === 3 ? 'this week' : `${3 - i} wk ago`}</small></div>`).join('');
+  const tabs = Object.entries(REPORT_RANGES).map(([id, x]) => `<button class="ptab${reportRange === id ? ' on' : ''}" type="button" role="tab" aria-selected="${reportRange === id}" data-report-range="${id}">${x.label}</button>`).join('');
+  const tile = (n, label, sub = '') => `<div class="rtile"><strong>${n}</strong><small>${label}</small>${sub ? `<small class="sub">${esc(sub)}</small>` : ''}</div>`;
+  const streak = r.streakDays > 0
+    ? `<p class="rstreak"><span class="tick">${ICON.checkMd}</span><span><b>${plural(r.streakDays, 'day')} no-waste streak</b> · cooked every day, nothing expired</span></p>`
+    : '<p class="rstreak dim"><span>No streak yet: cook something today and let nothing expire to start one.</span></p>';
+  const next = soon.length
+    ? `<div class="rnext">${soon.map(it => `<div class="prow"><div class="name"><strong>${esc(it.name)}</strong><small>${esc(shortDays(daysLeft(it)))}</small></div>${listBtnHTML(it, null, { qty: it.qty || '', source: 'pantry', size: 'sm' })}</div>`).join('')}</div>`
+    : '<p class="ing-note">Nothing in the pantry is close to its date.</p>';
+  const empty = !state.events.length;
+  return `
+    <div class="sheet-head"><h2 id="report-title">${range.title}</h2>${closeBtn()}</div>
+    <div class="sheet-body report-body">
+      <div class="ptabs" role="tablist">${tabs}</div>
+      ${empty ? '<p class="empty-note">Nothing to report yet. Cook something from the deck and what you saved shows up here.</p>' : `
+      <div class="rtiles">
+        ${tile(r.used.items, 'used before expiry', plural(Math.round(r.used.servings), 'serving'))}
+        ${tile(r.cooked.meals, 'meals cooked', r.cooked.titles.slice(0, 2).join(', '))}
+        ${tile(approxMoney(r.savedValue), 'saved', 'estimated')}
+        ${tile(r.wasted.items, 'wasted', `${approxMoney(r.wasted.value)} · ${plural(Math.round(r.wasted.servings), 'serving')}`)}
+      </div>
+      <div class="rchart" role="img" aria-label="Value saved per week over the last four weeks">${bars}</div>
+      ${streak}
+      <p class="rnote">Money is an estimate: receipt prices where a lot has one, typical costs otherwise.</p>`}
+      <div class="eyebrow">Use these next</div>
+      ${next}
+    </div>
+    <div class="sheet-foot">
+      <button class="linkish" type="button" data-close>Close</button>
+      <span class="grow"></span>
+      ${soon.length ? `<button class="pill prominent" type="button" data-find-dish>${ICON.checkMd}<span>Find a dish</span></button>` : ''}
+    </div>`;
+}
+function openReport(range) {
+  if (range && REPORT_RANGES[range]) reportRange = range;
+  if (state.sheet && state.sheet !== 'report') return;
+  openSheet('report', reportHTML(), 'w-720');
+}
+function rerenderReport() { if (state.sheet === 'report') el.sheet.innerHTML = reportHTML(); }
+
+/* ---------- substitutions ("Swap?" on the recipe sheet) ----------
+   The backend answers first (POST /substitutions, pantry-based swaps from the model);
+   the table in shared/substitutions.js stands in when it is not there. Both give the
+   same shape, so one template renders either. "Use this" stores the swap on the dish
+   (dish.subs) and analyze() treats the ingredient as had, approximately. */
+const swapResults = new Map();   // `${dishId}|${ingredient}` → the suggestions last shown, so "Use this" can pick one by index
+const pantryNamesForSubs = () => state.pantry.filter(it => !needsCheckin(it)).map(it => ({ key: it.key, name: it.name }));
+async function findSubstitutions(dish, name) {
+  const local = () => localSubstitutions(name, pantryNamesForSubs());
+  if (!apiConfigured()) return { list: local(), source: 'local' };
+  const busy = beginBusy('Finding swaps…');
+  try {
+    const { substitutions } = await fetchSubstitutions({
+      ingredient: name, dishTitle: dish.name,
+      dishIngredients: dish.ingredients.map(i => `${i.amt || ''} ${i.name}`.trim()),
+      pantry: pantryForApi(), prefs: normalizePrefs(state.prefs),
+    });
+    return substitutions.length ? { list: substitutions, source: 'api' } : { list: local(), source: 'local' };
+  } catch (err) {
+    console.warn('[pantry] substitutions failed, using the table', err);   // unconfigured, unreachable or an http error alike
+    return { list: local(), source: 'local' };
+  } finally {
+    busy.end();
+  }
+}
+function subsHTML(dish, name, list) {
+  if (!list.length) return `<div class="subs"><span class="eyebrow">Suggestions</span><p class="ing-note">Nothing sensible stands in for ${esc(name.toLowerCase())} here.</p></div>`;
+  return `<div class="subs"><span class="eyebrow">Suggestions</span>${list.map((s, i) => `
+    <div class="sub${s.from_pantry ? ' from-pantry' : ''}">
+      <div class="sub-text"><strong>${esc(s.use)}</strong>${s.from_pantry ? `<span class="sub-from">${ICON.checkSm}<span>from your pantry</span></span>` : ''}<small>${esc([s.ratio, s.note].filter(Boolean).join(' · '))}</small></div>
+      <button class="pill glass sm" type="button" data-use-sub="${i}" data-use-for="${esc(name)}" data-use-dish="${esc(dish.id)}">Use this</button>
+    </div>`).join('')}</div>`;
+}
+async function openSwap(dish, name) {
+  const slot = $$('.subs-slot', el.sheet).find(s => s.dataset.subsFor === name);
+  if (!slot) return;
+  slot.hidden = false;
+  slot.innerHTML = '<div class="subs"><span class="eyebrow">Suggestions</span><p class="ing-note"><span class="dots"><i></i><i></i><i></i></span> Looking for a swap…</p></div>';
+  const { list } = await findSubstitutions(dish, name);
+  swapResults.set(`${dish.id}|${name}`, list);
+  if (state.detailDishId !== dish.id || !slot.isConnected) return;   // the sheet moved on
+  slot.innerHTML = subsHTML(dish, name, list);
+}
+function useSubstitution(dish, name, s) {
+  dish.subs = { ...(dish.subs || {}), [normQ(name)]: { use: String(s.use || ''), ratio: String(s.ratio || ''), pantry_names: Array.isArray(s.pantry_names) ? s.pantry_names.slice() : [] } };
+  if (isSaved(dish.id)) saveDish(dish);   // a saved dish remembers its swaps
+  return dish.subs;
+}
+function dropSubstitution(dish, name) {
+  if (!dish.subs) return;
+  delete dish.subs[normQ(name)];
+  if (isSaved(dish.id)) saveDish(dish);
+}
+// The pantry lot a swap's food names: the pantry's own spelling first, then its key.
+function lotForPantryName(name) {
+  const n = normQ(name);
+  return state.pantry.find(it => !needsCheckin(it) && normQ(it.name) === n)
+    || state.pantry.find(it => !needsCheckin(it) && it.key === keyForName(name))
+    || null;
+}
+// What a swap takes of one pantry food when the dish is made: one serving, unless the
+// ratio carries an amount for that food ("¾ cup milk + ¼ cup butter" → 0.75 of milk).
+function subServings(key, food, ratio) {
+  const head = normalizeName(food).split(' ').pop();
+  const part = String(ratio || '').split(/\s*(?:\+|,|;)\s*/).find(p => normalizeName(p).split(' ').includes(head)) || '';
+  const q = parseQuantity(part);
+  if (q.qty == null || !q.unit) return 1;
+  return servingsFor(key, part) ?? 1;
+}
+// The made-it rows a substituted ingredient contributes: its pantry foods instead of itself.
+function subDeductions(a, factor = 1) {
+  const rows = [];
+  for (const i of (a.ings || [])) {
+    if (!i.sub) continue;
+    for (const pn of (i.sub.pantry_names || [])) {
+      const lot = lotForPantryName(pn);
+      if (!lot || rows.some(r => r.key === lot.key)) continue;
+      const cur = available(lot.key);
+      if (cur <= 0) continue;
+      const need = subServings(lot.key, pn, i.sub.ratio) * factor;
+      const take = Math.min(cur, need);
+      const after = cur - take;
+      const last = need > cur + 1e-9 || after <= OUT;
+      const amt = n => (typeof servingsText === 'function' ? servingsText(lot.key, n) : fmt1(n));   // in the unit the pantry keeps it in
+      rows.push({
+        key: lot.key, name: lot.name, amt: '', need, cur, avail: cur, take, last, item: lot,
+        note: `Instead of ${i.name.toLowerCase()} · ${last ? 'uses the last of it' : `${amt(after)} left after this`}`,
+        takeText: amt(take), curText: amt(cur), listQty: '',
+      });
+    }
+  }
+  return rows;
+}
+
+/* ---------- cook mode's state (its DOM lives with the wiring) ---------- */
+const cookState = { dish: null, step: 0, open: false };
 
 /* =========================================================================
    Wiring
@@ -2735,7 +3305,9 @@ el.savedBtn.addEventListener('click', openSaved);
 el.week.addEventListener('click', openPlan);
 $('#btn-scan-2').addEventListener('click', openScanUpload);
 $('#empty-drop').addEventListener('click', () => el.file.click());   // "click to browse" means the file picker
-$('#empty-sample').addEventListener('click', () => startProcessing(null));
+// Without a backend the first-run card cannot scan: say so and point at the Pantry tab instead.
+$('#empty-offline').hidden = apiConfigured();
+$('#empty-offline').addEventListener('click', e => { if (e.target.closest('[data-go-pantry]')) setTab('pantry'); });
 el.tabs.addEventListener('click', e => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
 el.goExplore.addEventListener('click', () => setTab('explore'));
 $('#btn-tonight').addEventListener('click', openTonight);
@@ -2775,6 +3347,7 @@ profileMenu.addEventListener('click', e => {
   const b = e.target.closest('[data-profile]'); if (!b) return;
   closeProfileMenu();
   if (b.dataset.profile === 'preferences') return openProfile();
+  if (b.dataset.profile === 'report') return openReport('week');
   if (b.dataset.profile === 'clear') return clearPantry();
   if (b.dataset.profile === 'theme') return toggleTheme();
   if (b.dataset.profile === 'auth') return b.dataset.action === 'signin'
@@ -2824,7 +3397,7 @@ el.sheet.addEventListener('click', e => {
   const t = e.target.closest('button');
   if (!t) return;
   if (t.hasAttribute('data-close')) return closeSheet();
-  if (t.hasAttribute('data-sample')) return startProcessing(null);
+  if (t.hasAttribute('data-go-pantry')) { closeSheet(); return setTab('pantry'); }
   if (t.hasAttribute('data-back-upload')) return openScanUpload();
   if (t.hasAttribute('data-add-pantry')) return addToPantry();
   if (t.hasAttribute('data-toggle-nonfood')) { state.nonfoodOpen = !state.nonfoodOpen; return renderReview(); }
@@ -2866,6 +3439,41 @@ el.sheet.addEventListener('click', e => {
   if (t.hasAttribute('data-open-saved')) return openSaved();
   if (t.dataset.openSavedDish) return openDetail(dishById(t.dataset.openSavedDish));
   if (t.dataset.removeSaved) return removeSaved(t.dataset.removeSaved);
+  if (t.dataset.savedTab) { state.savedTab = t.dataset.savedTab; return rerenderSaved(); }
+  // the recipe sheet: ask the helper, cook mode, swaps
+  if (t.dataset.askDish) return askAboutDish(t.dataset.askDish);
+  if (t.dataset.cookMode) return openCookMode(t.dataset.cookMode);
+  if (t.dataset.swap) { const d = dishById(state.detailDishId); if (d) openSwap(d, t.dataset.swap); return; }
+  if (t.dataset.unswap) { const d = dishById(state.detailDishId); if (d) { dropSubstitution(d, t.dataset.unswap); renderAll(); rerenderDetail(); } return; }
+  if (t.dataset.useSub) {
+    const d = dishById(t.dataset.useDish), name = t.dataset.useFor;
+    const s = d ? (swapResults.get(`${d.id}|${name}`) || [])[Number(t.dataset.useSub)] : null;
+    if (!s) return;
+    useSubstitution(d, name, s);
+    toast(`Using ${s.use}`, `instead of ${name.toLowerCase()}`);
+    renderAll();   // the card's chips and the "Add N" count follow
+    return rerenderDetail();
+  }
+  // ratings, the cooked log and the report
+  if (t.dataset.rate) {
+    const value = Number(t.dataset.rate);
+    const changed = applyRating(t.dataset.rateLog, value);
+    closeSheet();
+    toast(value > 0 ? 'Noted: more like this' : 'Noted: not that one again', changed && apiConfigured() ? 'Refreshing the deck…' : '');
+    renderAll();
+    if (changed) refreshRecipes();
+    return;
+  }
+  if (t.dataset.rateToggle) {
+    const changed = applyRating(t.dataset.rateToggle, Number(t.dataset.value));
+    rerenderSaved();
+    renderAll();
+    if (changed) refreshRecipes();
+    return;
+  }
+  if (t.dataset.cookAgain) return cookAgain(t.dataset.cookAgain);
+  if (t.dataset.reportRange) { reportRange = t.dataset.reportRange; return rerenderReport(); }
+  if (t.hasAttribute('data-find-dish')) { closeSheet(); setSort('urgent'); return setTab('curated'); }
   // onboarding
   if (state.sheet === 'onboarding' && draft) {
     if (obChange(t)) return;
@@ -2906,8 +3514,14 @@ el.panel.addEventListener('click', e => {
     else state.expanded.add(key);
     return renderPanel();
   }
-  if (t.dataset.remove) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.remove); renderAll(); return refreshRecipes(); }
-  if (t.dataset.gone) { state.pantry = state.pantry.filter(x => x.id !== t.dataset.gone); renderAll(); return refreshRecipes(); }
+  if (t.hasAttribute('data-report')) return openReport('week');
+  if (t.dataset.remove || t.dataset.gone) {
+    const it = item(t.dataset.remove || t.dataset.gone);
+    if (it) { const left = current(it); recordLotEvent('gone', it, left, { wasted: left > OUT }); }   // whatever was still in it counts as waste
+    state.pantry = state.pantry.filter(x => x !== it);
+    renderAll();
+    return refreshRecipes();
+  }
   if (t.dataset.ask) { const it = item(t.dataset.ask); if (it) it.asking = true; return renderPanel(); }
   if (t.dataset.unask) { const it = item(t.dataset.unask); if (it) it.asking = false; return renderPanel(); }
   if (t.dataset.setamt) {
@@ -2915,14 +3529,13 @@ el.panel.addEventListener('click', e => {
     if (it) {
       const slider = el.panel.querySelector(`.amt-slider[data-slider="${it.id}"]`);
       const pct = slider ? clamp(Number(slider.value), 0, 100) : 50;
+      const before = current(it);
       if (pct <= 0) {
+        recordLotEvent('gone', it, before, { wasted: before > OUT });
         state.pantry = state.pantry.filter(x => x.id !== it.id);   // slid to empty = gone
       } else {
-        // The check-in is a correction: reset the estimate from what they told us, as a
-        // share of what the pack held (its quantity, or the package default).
-        it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (pct / 100));
-        it.purchase = Date.now(); it.deducted = 0; it.asking = false;
-        it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
+        rebaseLot(it, pct);
+        recordLotEvent('checkin', it, before - current(it));   // what went since the estimate, if anything
       }
     }
     renderAll();
@@ -2973,7 +3586,7 @@ function foodSuggestions() {
   const names = new Map();               // key -> display name (first one wins)
   const add = (key, name) => { const k = String(key || '').toLowerCase(); if (k && !names.has(k)) names.set(k, name || sentenceCase(k)); };
   for (const d of activeDishes()) for (const i of (d.ingredients || [])) add(i.key || i.name, i.name);   // generated dishes carry no key
-  for (const l of SAMPLE_RECEIPT.lines) if (!l.nonFood) add(l.key || l.name, l.name);
+  for (const it of state.pantry) add(it.key || it.name, it.name);   // what they already buy
   for (const k of Object.keys(CATALOG)) add(k, sentenceCase(k));
   return [...names.values()].sort((a, b) => a.localeCompare(b));
 }
@@ -3017,6 +3630,12 @@ initDropdown($('#dd-sort'), v => {
   buildDeck();
   renderDeck({ enter: true });
 });
+// The report's "Find a dish" sorts the deck by what expires first; the control follows.
+function setSort(v) {
+  state.sortMode = SORTS[v] ? v : 'urgent';
+  const dd = $('#dd-sort');
+  if (dd) { dd.dataset.value = state.sortMode; const l = $('.dd-label', dd); if (l) l.textContent = SORTS[state.sortMode].label; }
+}
 
 /* ---------- kitchen helper (chat: "what do I buy to make X?") ---------- */
 const chatEl = { fab: $('#btn-chat'), panel: $('#chat'), log: $('#chat-log'), form: $('#chat-form'), input: $('#chat-input'), close: $('#btn-chat-close') };
@@ -3034,6 +3653,7 @@ function addChat(who, html) {
 }
 function chatOpen() {
   chatEl.panel.hidden = false;
+  if (state.sheet) chatEl.panel.classList.add('over');   // above the veil and the sheet, never behind them
   requestAnimationFrame(() => chatEl.panel.classList.add('in'));
   chatEl.panel.setAttribute('aria-hidden', 'false');
   chatEl.fab.setAttribute('aria-expanded', 'true');
@@ -3050,7 +3670,50 @@ function chatClose() {
   chatEl.panel.classList.remove('in');
   chatEl.panel.setAttribute('aria-hidden', 'true');
   chatEl.fab.setAttribute('aria-expanded', 'false');
-  setTimeout(() => { chatEl.panel.hidden = true; }, 200);
+  setTimeout(() => { chatEl.panel.hidden = true; chatEl.panel.classList.remove('over'); }, 200);
+}
+// "Ask a question" on the recipe sheet: the helper opens over the sheet, about that dish.
+// chatFocus stays set while the sheet is open (closeSheet clears it), so a closed and
+// reopened panel is still about the same recipe.
+function askAboutDish(id) {
+  const d = dishById(id);
+  if (!d) return;
+  chatFocus = { dish: d };
+  chatEl.panel.classList.add('over');
+  chatOpen();
+  if (askedAbout.has(d.id)) return;
+  askedAbout.add(d.id);
+  addChat('bot', apiConfigured()
+    ? `Ask me anything about <strong>${esc(d.name)}</strong> — swaps, timing, technique, or what to serve it with.`
+    : `The assistant isn’t connected, but I can list the steps for <strong>${esc(d.name)}</strong> (say “steps”) and suggest swaps (“no cream?”).`);
+}
+// The recipe on screen, as the backend's focus_recipe.
+function focusRecipeFor(d) {
+  return {
+    title: d.name,
+    servings: state.detailDishId === d.id ? state.detailServings : (d.servings || 2),
+    ingredients: d.ingredients.map(i => `${i.amt || ''} ${i.name}`.trim()),
+    steps: d.steps || [],
+    missing: analyze(d).missing.map(i => i.name),
+  };
+}
+// Offline, about the dish on screen: its steps, or a swap from the table.
+const CMD_NO = /^(?:no|out of|without|(?:i )?don'?t have|(?:i )?have no|what (?:can i use |to use )?instead of|swap|replace|sub(?:stitute)?(?: for)?)\s+(?:any |the |some )?(.+?)$/i;
+function focusOfflineAnswer(text) {
+  if (!chatFocus) return null;
+  const d = chatFocus.dish;
+  const t = String(text || '').trim().replace(/[.!?]+$/, '');
+  if (/^(?:steps?|the steps|how (?:do|would) i (?:make|cook) (?:it|this)|how is it made)$/i.test(t)) {
+    return d.steps && d.steps.length
+      ? `<strong>${esc(d.name)}</strong>:<br>${d.steps.map((s, i) => `${i + 1}. ${esc(s)}`).join('<br>')}`
+      : `I don’t have the steps for <strong>${esc(d.name)}</strong> yet.`;
+  }
+  const m = CMD_NO.exec(t);
+  if (!m) return null;
+  const name = m[1].trim();
+  const subs = localSubstitutions(name, pantryNamesForSubs());
+  if (!subs.length) return `I don’t know a good swap for <b>${esc(name)}</b> in ${esc(d.name)}.`;
+  return `Instead of <b>${esc(name)}</b>: ${subs.map(s => `<b>${esc(s.use)}</b> (${esc(s.ratio)}${s.note ? `; ${esc(s.note)}` : ''}${s.from_pantry ? ' — you have it' : ''})`).join('; ')}.`;
 }
 // Best recipe match for a free-text query, by name then name+ingredient word overlap.
 function findDishForQuery(text) {
@@ -3125,26 +3788,39 @@ function applyChatActions(actions) {
   let listChanged = false;   // only the shopping list moved: re-render is enough
   for (const a of actions || []) {
     if (a.type === 'update_preference') {
-      state.prefs = normalizePrefs({ ...state.prefs, [a.field]: a.value });
-      savePrefs(state.prefs);
+      if (a.field === 'liked' || a.field === 'disliked') {
+        // the complete list: the ratings follow it, and the prefs are derived from the ratings
+        const titles = (Array.isArray(a.value) ? a.value : [a.value]).map(t => String(t || '').trim()).filter(Boolean);
+        const value = a.field === 'liked' ? 1 : -1;
+        const keep = new Set(titles.map(titleKey));
+        for (const [k, r] of Object.entries(state.ratings)) if (r.value === value && !keep.has(k)) delete state.ratings[k];
+        for (const t of titles) state.ratings[titleKey(t)] = { title: t, value, at: Date.now(), dishId: '' };
+        saveRatings(state.ratings);
+        syncRatingsToPrefs();
+      } else {
+        state.prefs = normalizePrefs({ ...state.prefs, [a.field]: a.value });
+        savePrefs(state.prefs);
+      }
       changed = true;
     } else if (a.type === 'mark_food_gone') {
       const lot = state.pantry.find(x => x.id === a.id);
       const key = lot ? lot.key : null;
       const before = state.pantry.length;
+      for (const it of state.pantry.filter(x => (key ? x.key === key : x.id === a.id))) { const left = current(it); recordLotEvent('gone', it, left, { wasted: left > OUT }); }
       state.pantry = state.pantry.filter(x => (key ? x.key !== key : x.id !== a.id));
       if (state.pantry.length !== before) changed = true;
     } else if (a.type === 'record_checkin') {
       const it = state.pantry.find(x => x.id === a.id);
       if (it) {
         const key = it.key;
+        const before = current(it);
         state.pantry = state.pantry.filter(x => x.key !== key || x.id === it.id);
         if (Number(a.percent) <= 0) {
+          recordLotEvent('gone', it, before, { wasted: before > OUT });
           state.pantry = state.pantry.filter(x => x.id !== it.id);
         } else {
-          it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (Number(a.percent) / 100));
-          it.purchase = Date.now(); it.deducted = 0; it.asking = false;
-          it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
+          rebaseLot(it, clamp(Number(a.percent), 0, 100));
+          recordLotEvent('checkin', it, before - current(it));
         }
         changed = true;
       }
@@ -3259,6 +3935,7 @@ async function handleChat(text) {
           prefs: normalizePrefs(state.prefs),
           recentMeals: recentMealsForApi(),
           shopping: shoppingForApi(),
+          focusRecipe: chatFocus ? focusRecipeFor(chatFocus.dish) : null,   // the recipe on screen, if they asked from it
         }),
         new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 25000); }),
       ]);
@@ -3277,8 +3954,8 @@ async function handleChat(text) {
 
   if (!done) {
     thinking.remove();
-    // a plain "add X to my pantry / list" needs no model at all
-    const local = localChatCommand(text);
+    // a plain "add X to my pantry / list" needs no model at all, nor do the steps and swaps of the dish on screen
+    const local = focusOfflineAnswer(text) || localChatCommand(text);
     if (local) {
       chatHistory.push({ role: 'assistant', content: local.replace(/<[^>]+>/g, '') });
       addChat('bot', local);
@@ -3298,6 +3975,69 @@ chatEl.form.addEventListener('submit', e => {
   chatEl.input.value = '';
   handleChat(t);
 });
+
+/* ---------- voice input ----------
+   The browser's own speech recognition, where it has one (Chrome, Safari, Edge): the mic
+   fills the input as it hears, and the final result sends itself after a beat unless the
+   user started typing. Errors say why in plain words and the button goes back to idle. */
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const micBtn = $('#btn-mic');
+const MIC_PLACEHOLDER = chatEl.input.placeholder;
+let rec = null, recTimer = 0, recTyped = false;
+if (!SpeechRec) micBtn.hidden = true;
+function micIdle() {
+  rec = null;
+  clearTimeout(recTimer);
+  micBtn.classList.remove('listening');
+  micBtn.setAttribute('aria-pressed', 'false');
+  chatEl.input.placeholder = MIC_PLACEHOLDER;
+}
+function micStart() {
+  if (!SpeechRec || rec) return;
+  try {
+    const r = new SpeechRec();
+    r.lang = navigator.language || 'en-US';
+    r.interimResults = true;
+    r.continuous = false;
+    recTyped = false;
+    let heard = '';
+    r.onresult = e => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) heard += res[0].transcript; else interim += res[0].transcript;
+      }
+      if (recTyped) return;   // they took over the field: leave their words alone
+      chatEl.input.value = (heard || interim).trim();
+      if (heard) {
+        clearTimeout(recTimer);
+        recTimer = setTimeout(() => {
+          if (recTyped || !chatEl.input.value.trim()) return;
+          if (chatEl.form.requestSubmit) chatEl.form.requestSubmit(); else chatEl.form.dispatchEvent(new Event('submit', { cancelable: true }));
+        }, 700);
+      }
+    };
+    r.onerror = e => {
+      const why = { 'not-allowed': 'Microphone access was blocked', 'service-not-allowed': 'Microphone access was blocked', 'no-speech': 'Didn’t catch anything', network: 'Voice input needs a connection', 'audio-capture': 'No microphone found' }[e.error] || 'Couldn’t listen just now';
+      toast(why, e.error === 'not-allowed' ? 'Allow the microphone for this site and try again' : '');
+      micIdle();
+    };
+    r.onend = micIdle;
+    r.start();
+    rec = r;
+    micBtn.classList.add('listening');
+    micBtn.setAttribute('aria-pressed', 'true');
+    chatEl.input.placeholder = 'Listening…';
+    chatEl.input.focus();
+  } catch (err) {
+    console.warn('[pantry] voice input failed', err);
+    toast('Couldn’t start listening');
+    micIdle();
+  }
+}
+function micStop() { const r = rec; micIdle(); try { r && r.stop(); } catch (_) { /* already stopped */ } }
+micBtn.addEventListener('click', () => (rec ? micStop() : micStart()));
+chatEl.input.addEventListener('input', () => { if (rec) { recTyped = true; clearTimeout(recTimer); } });
 // Open a recipe from a chat card: the panel folds away and the step-less card opens like a
 // plan cell does (steps written on first open, see openGeneratedDish).
 function openChatDish(d) {
@@ -3327,7 +4067,187 @@ chatEl.log.addEventListener('click', e => {
   if (d && !passesPrefs(d)) { toast('This recipe no longer matches your preferences'); return; }
   if (d) openChatDish(d);
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden && !cookState.open) chatClose(); });
+
+/* ---------- cook mode ----------
+   One step at a time in big type, the durations in it as tappable timers, the
+   ingredients the step mentions as chips. The overlay owns the whole screen (over the
+   recipe sheet it came from); timers keep running when it closes, behind a floating
+   pill that reopens it. Only the arithmetic lives in shared/timers.js; this ticks. */
+const cookEl = {
+  root: $('#cook-mode'), title: $('#cook-title'), count: $('#cook-count'), bar: $('#cook-progress'), step: $('#cook-step'), ings: $('#cook-ings'),
+  prev: $('#cook-prev'), next: $('#cook-next'), tray: $('#cook-tray'), actions: $('#cook-actions'), pill: $('#timer-pill'), pillText: $('#timer-pill-text'),
+};
+let timers = [];       // [{ t: createTimer(), dish, alerted }]
+let timerTick = 0;     // the one setInterval, only while a timer exists
+let wakeLock = null;
+const timerChip = d => `<button class="tchip" type="button" data-timer-seconds="${d.seconds}" data-timer-label="${esc(d.label)}">${ICON.clock}<span>${esc(d.label)}</span></button>`;
+// Ingredients a step mentions: any word of the name (singularised, fillers dropped) that is in the step.
+function stepIngredients(dish, text) {
+  const words = new Set(normalizeName(text).split(' '));
+  return (dish.ingredients || []).filter(i => normalizeName(i.name).split(' ').some(w => w.length > 2 && words.has(w)));
+}
+function openCookMode(id) {
+  const d = dishById(id);
+  if (!d) return;
+  if (cookState.dish !== d) cookState.step = 0;
+  cookState.dish = d;
+  cookState.open = true;
+  cookEl.root.hidden = false;
+  requestAnimationFrame(() => cookEl.root.classList.add('in'));
+  renderCook();
+  renderTray();
+  if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then(l => { wakeLock = l; }).catch(() => { /* not granted: the screen may dim */ });
+  setTimeout(() => (cookEl.next.disabled ? cookEl.root : cookEl.next).focus({ preventScroll: true }), 50);
+}
+function closeCookMode() {
+  if (!cookState.open) return;
+  cookState.open = false;
+  cookEl.root.classList.remove('in');
+  setTimeout(() => { if (!cookState.open) cookEl.root.hidden = true; }, reduceMotion ? 0 : 200);
+  if (wakeLock) { try { wakeLock.release(); } catch (_) { /* already released */ } wakeLock = null; }
+  renderTimerPill();
+}
+function cookStep(delta) {
+  const d = cookState.dish;
+  if (!d || !(d.steps || []).length) return;
+  cookState.step = clamp(cookState.step + delta, 0, d.steps.length - 1);
+  renderCook();
+}
+function renderCook() {
+  const d = cookState.dish;
+  if (!d || !cookState.open) return;
+  const steps = d.steps || [];
+  const n = steps.length, i = clamp(cookState.step, 0, Math.max(0, n - 1));
+  cookEl.title.textContent = d.name;
+  const blank = html => {
+    cookEl.count.textContent = '';
+    cookEl.bar.style.width = '0%';
+    cookEl.step.innerHTML = html;
+    cookEl.ings.innerHTML = '';
+    cookEl.prev.disabled = cookEl.next.disabled = true;
+  };
+  if (d.stepsLoading) {
+    blank('<p class="cook-note"><span class="dots"><i></i><i></i><i></i></span> Writing the steps…</p>');
+    cookEl.actions.innerHTML = '';
+    return;
+  }
+  if (!n) {
+    blank('<p class="cook-note">No steps for this one yet.</p>');
+    cookEl.actions.innerHTML = `<button class="pill glass" type="button" data-ask-dish="${esc(d.id)}">${ICON.chat}<span>Ask a question</span></button>`;
+    return;
+  }
+  const text = steps[i];
+  const escaped = esc(text);
+  cookEl.count.textContent = `Step ${i + 1} of ${n}`;
+  cookEl.bar.style.width = `${Math.round(((i + 1) / n) * 100)}%`;
+  cookEl.step.innerHTML = `<p class="cook-text">${highlightDurations(escaped, findDurations(escaped), timerChip)}</p>`;
+  const factor = (state.detailDishId === d.id ? state.detailServings : servingsTarget(state.prefs)) / Math.max(1, d.servings || 1);
+  cookEl.ings.innerHTML = stepIngredients(d, text).map((ing, k) => {
+    const amt = scaleAmount(ing.amt || '', factor);
+    return `<span class="cook-ing"><button class="chip have" type="button" data-cook-ing="${k}" aria-expanded="false"><span>${esc(ing.name)}</span><small class="amt" hidden>${esc(amt || 'to taste')}</small></button>${listBtnHTML(ing, d, { qty: amt })}</span>`;
+  }).join('');
+  cookEl.prev.disabled = i === 0;
+  cookEl.next.disabled = i === n - 1;
+  cookEl.actions.innerHTML = i === n - 1
+    ? `<button class="pill prominent" type="button" data-cook-madeit="${esc(d.id)}">${ICON.checkMd}<span>I made this</span></button><button class="pill glass" type="button" data-cook-done>Done</button>`
+    : '';
+}
+/* timers */
+function ensureTick() {
+  if (timers.length && !timerTick) timerTick = setInterval(tickTimers, 250);
+  if (!timers.length && timerTick) { clearInterval(timerTick); timerTick = 0; }
+}
+function startTimer(seconds, label) {
+  const t = createTimer({ seconds, label, now: Date.now() });
+  timers.push({ t, dish: cookState.dish ? cookState.dish.name : '', alerted: false });
+  renderTray();
+  ensureTick();
+  toast(`Timer started · ${t.label}`);
+}
+function tickTimers() {
+  const now = Date.now();
+  for (const x of timers) if (!x.alerted && x.t.running && x.t.done(now)) { x.alerted = true; alertTimer(x); }
+  for (const row of $$('.trow', cookEl.tray)) {
+    const x = timers.find(y => y.t.id === row.dataset.timer);
+    if (!x) continue;
+    const left = $('.tleft', row);
+    const txt = formatRemaining(x.t.remaining(now));
+    if (left.textContent !== txt) left.textContent = txt;
+  }
+  renderTimerPill();
+}
+// Two short 880 Hz tones; no audio (autoplay rules, no speakers) is fine: the toast and the red row still say so.
+function beep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    [0, 0.35].forEach(at => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.25);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + at); o.stop(ctx.currentTime + at + 0.3);
+    });
+    setTimeout(() => { ctx.close().catch(() => {}); }, 1200);
+  } catch (_) { /* no audio */ }
+}
+function alertTimer(x) {
+  beep();
+  try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (_) { /* not on this device */ }
+  toast(`${x.t.label} is up`, x.dish);
+  renderTray();
+}
+function renderTray() {
+  const now = Date.now();
+  cookEl.tray.hidden = timers.length === 0;
+  cookEl.tray.innerHTML = timers.map(x => `<div class="trow${x.alerted && x.t.done(now) ? ' done' : ''}${x.t.running ? '' : ' paused'}" data-timer="${esc(x.t.id)}">
+    <span class="tlabel">${ICON.clock}<span>${esc(x.t.label)}</span></span>
+    <strong class="tleft">${formatRemaining(x.t.remaining(now))}</strong>
+    <button class="linkish sm" type="button" data-timer-toggle="${esc(x.t.id)}">${x.t.running ? 'Pause' : 'Resume'}</button>
+    <button class="linkish sm" type="button" data-timer-reset="${esc(x.t.id)}">Reset</button>
+    <button class="circle xs glass muted" type="button" data-timer-del="${esc(x.t.id)}" aria-label="Dismiss timer">${ICON.xSm}</button>
+  </div>`).join('');
+  renderTimerPill();
+}
+// Cook mode closed, timers still running: the soonest one, bottom-left, reopens it.
+function renderTimerPill() {
+  const show = timers.length > 0 && !cookState.open;
+  cookEl.pill.hidden = !show;
+  if (!show) return;
+  const now = Date.now();
+  const live = timers.filter(x => x.t.running && !x.t.done(now)).sort((a, b) => a.t.remaining(now) - b.t.remaining(now))[0] || timers[0];
+  cookEl.pill.classList.toggle('done', Boolean(live.alerted && live.t.done(now)));
+  const txt = `${formatRemaining(live.t.remaining(now))}${live.dish ? ` · ${live.dish}` : ''}`;
+  if (cookEl.pillText.textContent !== txt) cookEl.pillText.textContent = txt;
+}
+cookEl.root.addEventListener('click', e => {
+  const t = e.target.closest('button');
+  if (!t) return;
+  if (t.dataset.timerSeconds) return startTimer(Number(t.dataset.timerSeconds), t.dataset.timerLabel);
+  if (t.dataset.cookIng != null) { const amt = $('.amt', t); if (amt) { amt.hidden = !amt.hidden; t.setAttribute('aria-expanded', String(!amt.hidden)); } return; }
+  const timer = id => timers.find(y => y.t.id === id);
+  if (t.dataset.timerToggle) { const x = timer(t.dataset.timerToggle); if (x) { x.t.toggle(Date.now()); renderTray(); } return; }
+  if (t.dataset.timerReset) { const x = timer(t.dataset.timerReset); if (x) { x.t.reset(); x.t.start(Date.now()); x.alerted = false; renderTray(); } return; }
+  if (t.dataset.timerDel) { timers = timers.filter(y => y.t.id !== t.dataset.timerDel); renderTray(); ensureTick(); return; }
+  if (t.id === 'cook-prev') return cookStep(-1);
+  if (t.id === 'cook-next') return cookStep(1);
+  if (t.id === 'cook-close' || t.hasAttribute('data-cook-done')) return closeCookMode();
+  if (t.dataset.cookMadeit) { closeCookMode(); return openMadeIt(t.dataset.cookMadeit); }
+  if (t.dataset.askDish) { closeCookMode(); return askAboutDish(t.dataset.askDish); }
+});
+cookEl.pill.addEventListener('click', () => { if (cookState.dish) openCookMode(cookState.dish.id); });
+// a swipe across the step moves on (touch only: a mouse drag over the text is a selection)
+let cookSwipeX = null;
+cookEl.root.addEventListener('pointerdown', e => { cookSwipeX = e.pointerType === 'touch' && !e.target.closest('button') ? e.clientX : null; });
+cookEl.root.addEventListener('pointerup', e => {
+  if (cookSwipeX == null) return;
+  const dx = e.clientX - cookSwipeX; cookSwipeX = null;
+  if (Math.abs(dx) > 60) cookStep(dx < 0 ? 1 : -1);
+});
 
 // Default use-by tracks the food's own shelf life (7 days only for unknown items).
 const shelfExpiryStr = name => isoDay(Date.now() + catalog(keyForName(name || '')).shelf * DAY);
@@ -3348,7 +4268,7 @@ $('#add-form').addEventListener('submit', e => {
   if (!name || !amount) return;   // name and quantity are both required
   const key = keyForName(name);
   const unit = $('#dd-unit').dataset.value;
-  const qty = formatQuantity({ amount: Number(amount), unit });   // "24 pcs", "1.5 kg": one spelling everywhere
+  const qty = qtyInPantryUnit(key, { amount: Number(amount), unit });   // one spelling everywhere, and the unit this food is already kept in
   const expVal = $('#add-expiry').value;
   const expiry = expVal ? new Date(`${expVal}T12:00:00`).getTime() : Date.now() + 7 * DAY;
   upsert(sentenceCase(name), key, qty, '', { expiry });   // servings come from the quantity (addLot)
@@ -3363,12 +4283,21 @@ $('#add-form').addEventListener('submit', e => {
 document.addEventListener('keydown', e => {
   if (e.isComposing) return;
   if (e.key === 'Escape') {
+    if (cookState.open) return closeCookMode();                 // the top layer goes first
+    if (!chatEl.panel.hidden) return;                          // the helper's own listener closed it; the sheet waits for the next Escape
     // an open row editor is what Escape cancels, not the whole review
     if (state.sheet === 'review' && review.some(l => l.editing)) { review.forEach(l => { l.editing = false; }); renderReview(); return; }
     if (state.sheet) closeSheet();
     return;
   }
   const t = e.target instanceof Element ? e.target : document.body;   // a keydown can target the document itself
+  // cook mode: Left/Right move between steps
+  if (cookState.open) {
+    if (t.matches('input, textarea, select')) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); cookStep(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); cookStep(1); }
+    return;
+  }
   // on the tab bar, Left/Right move between sections
   if (el.tabs.contains(t) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault();
@@ -3422,10 +4351,16 @@ user = session && session.user ? session.user : null;
 renderAvatar();
 // Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
 onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
-const [saved, prefs, kept, cachedDeck, shopping, cachedPlan] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes(), loadDeck(), loadShopping(), loadPlan()]);
+const [saved, prefs, kept, cachedDeck, shopping, cachedPlan, ratings, cookedLog, events] = await Promise.all([
+  loadState(), loadPrefs(), loadSavedDishes(), loadDeck(), loadShopping(), loadPlan(), loadRatings(), loadCooked(), loadEvents(),
+]);
 state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
 state.saved = Array.isArray(kept) ? kept.filter(d => d && d.id && Array.isArray(d.ingredients)) : [];   // before renderAll, so a photo dish on tonight's list resolves
 state.shopping = Array.isArray(shopping) ? shopping : [];
+state.ratings = ratings && typeof ratings === 'object' ? ratings : {};
+state.cookedLog = Array.isArray(cookedLog) ? cookedLog : [];
+state.events = Array.isArray(events) ? events : [];
+syncRatingsToPrefs();   // the ratings are the truth; the prefs' liked/disliked lists follow them
 if (saved) {
   state.pantry = saved.pantry;
   state.skipped = new Set(saved.skipped);
@@ -3433,8 +4368,9 @@ if (saved) {
   state.chosen = new Set(saved.chosen);
   rekeyLots(state.pantry);                  // lots stacked by a coarse scan group split back into their own foods, once
   recomputeDefaultServings(state.pantry);   // lots saved with the package default get their servings from their quantity, once
+  sweepExpired();                           // lots found past their date get their one `expired` event for the report
 } else {
-  state.pantry = seedPantry();
+  state.pantry = [];   // a new account starts empty: the first receipt or hand-added item fills it
 }
 // last week's plan comes back with the same plan- ids, so a meal on Tonight still opens
 if (cachedPlan) adoptPlan(cachedPlan, { source: cachedPlan.source, signature: cachedPlan.signature, at: cachedPlan.at });
@@ -3444,8 +4380,9 @@ if (cachedPlan) adoptPlan(cachedPlan, { source: cachedPlan.source, signature: ca
 const deckFresh = adoptCachedDeck(cachedDeck);
 populateFoodOptions();
 setTab(state.tab, { render: false });   // the section from last time in this session, before the first paint
+await warmDishImages(liveDishes || [], { timeoutMs: 400 });   // cached pictures into memory first, so the first paint is already right
 renderAll({ enter: true });
 if (!deckFresh) refreshRecipes({ quiet: Boolean(liveDishes) });
 // First visit (a fresh sign-in, or once per browser in demo mode): ask the five questions before anything else.
 if (!state.prefs.onboarded) openOnboarding();
-window.pantry = { state, drag, session, setTab, undo, analyze, openDetail, openOnboarding, openProfile, openDishUpload, openSaved, openPlan, addShopping, get prefs() { return state.prefs; }, get user() { return user; }, get plan() { return plan; } };   // module scope hides these; handy in the console and in scripts/merge-browser-check.js
+window.pantry = { state, drag, session, setTab, undo, analyze, openDetail, openOnboarding, openProfile, openDishUpload, openSaved, openPlan, openReport, openCookMode, askAboutDish, rateDish, addShopping, beginBusy, get prefs() { return state.prefs; }, get user() { return user; }, get plan() { return plan; }, get timers() { return timers; } };   // module scope hides these; handy in the console and in scripts/merge-browser-check.js

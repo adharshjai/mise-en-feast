@@ -392,3 +392,23 @@ test('chat sends the shopping list alongside pantry, prefs and recent meals', as
     assert.deepEqual(stub.calls[1].body.shopping, []);
   } finally { stub.restore(); }
 });
+
+test('peekDishImage answers synchronously from memory and warmDishImages fills it from the store', async () => {
+  const { _configure, peekDishImage, warmDishImages, getDishImage } = await import('../frontend/shared/dish-images.js');
+  const rows = new Map([['cached-soup', { blob: { size: 3 }, at: 1 }]]);
+  let fetched = 0;
+  _configure({
+    store: { get: async k => rows.get(k), put: async () => {}, clear: async () => { rows.clear(); } },
+    fetchImpl: async () => { fetched++; return { ok: true, status: 200, blob: async () => ({ size: 9 }) }; },
+    createObjectURL: blob => `blob:${blob.size}`,
+  });
+  const cached = { id: 'ai-cached-soup-0', name: 'Cached soup', ingredients: [] };
+  const fresh = { id: 'ai-fresh-toast-1', name: 'Fresh toast', ingredients: [] };
+  assert.equal(peekDishImage(cached), '');                      // nothing in memory yet
+  const ready = await warmDishImages([cached, fresh], { network: false, timeoutMs: 200 });
+  assert.equal(ready, 1);                                       // the store had one; no network without network:true
+  assert.equal(peekDishImage(cached), 'blob:3');
+  assert.equal(fetched, 0);
+  await getDishImage(fresh, '');
+  assert.equal(peekDishImage(fresh), 'blob:9');
+});

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor,
-  SERVING_SIZES, DEFAULT_SERVING,
+  SERVING_SIZES, DEFAULT_SERVING, PIECE_GRAMS, DENSITY, roundHalf, pieceGrams, densityOf,
+  convertCanonical, convertQuantity,
 } from '../frontend/shared/units.js';
 
 const near = (actual, expected, eps = 0.01, msg = '') =>
@@ -279,7 +280,7 @@ test('scaleAmount multiplies the quantity after standardizing', () => {
   assert.equal(scaleAmount('1 bunch', 2), '2 bunches');
   assert.equal(scaleAmount('3 cups, cooked', 0.5), '360 ml, cooked');
   assert.equal(scaleAmount('2', 2), '4');
-  assert.equal(scaleAmount('1', 2 / 3), '0.7');
+  assert.equal(scaleAmount('1', 2 / 3), '0.5');   // a bare number is a count: nearest half, like any other
   assert.equal(scaleAmount('12', 0.5), '6');
   assert.equal(scaleAmount('1.5 kg', 2), '3 kg');
   assert.equal(scaleAmount('800 g', 1.5), '1.2 kg');
@@ -350,10 +351,11 @@ test('servingsFor treats a head of garlic as ten cloves and refuses to guess pac
 });
 
 test('servingsFor bridges families sensibly when the quantity is in a different unit', () => {
-  assert.equal(servingsFor('cherry tomatoes', '500 g'), 5);    // pcs food, mass given -> 100 g default
-  near(servingsFor('greek yogurt', '1 L'), 6.67);              // g food, volume given -> g ≈ ml
-  near(servingsFor('cream', '250 g'), 4.17);                   // ml food, mass given -> g ≈ ml
-  assert.equal(servingsFor('milk', '2'), 2);                   // ml food, count given -> 1 pcs default
+  near(servingsFor('cherry tomatoes', '500 g'), 29.41);        // pcs food, mass given -> 17 g a cherry tomato
+  near(servingsFor('greek yogurt', '1 L'), 6.87);              // g food, volume given -> 1.03 g per ml
+  near(servingsFor('cream', '250 g'), 4.17);                   // ml food, mass given -> water, so g = ml
+  assert.equal(servingsFor('milk', '2'), 2);                   // ml food, count given, no piece weight -> 1 pcs default
+  assert.equal(servingsFor('chili flakes', '1 pinch'), 1);     // the head noun is "flakes": never weighed as a whole chili
   assert.equal(servingsFor('eggs', { quantity: 24, unit: '' }), 24);   // chat-action shape
   assert.equal(servingsFor('eggs', { amount: 24, unit: 'pcs' }), 24);
 });
@@ -363,4 +365,49 @@ test('serving tables are exported for callers that need the raw sizes', () => {
   assert.deepEqual(SERVING_SIZES.eggs, { size: 1, unit: 'pcs' });
   assert.deepEqual(SERVING_SIZES.garlic, { size: 1, unit: 'pcs', head: 10 });
   assert.deepEqual(SERVING_SIZES.spaghetti, { size: 90, unit: 'g' });
+});
+
+/* ---------- crossing families: count <-> weight <-> volume ---------- */
+
+test('counts round to the nearest half, and a remainder never rounds away to nothing', () => {
+  assert.equal(roundHalf(3.3), 3.5);
+  assert.equal(roundHalf(4.2), 4);
+  assert.equal(roundHalf(4.3), 4.5);
+  assert.equal(roundHalf(0.1), 0.5);
+  assert.equal(roundHalf(0), 0);
+  assert.equal(formatQuantity({ amount: 3.3, unit: 'pcs', label: 'bananas' }), '3.5 bananas');
+  assert.equal(formatQuantity({ amount: 4.2, unit: 'pcs' }), '4 pcs');
+  assert.equal(formatQuantity({ amount: 1, unit: 'pcs', label: 'bananas' }), '1 banana');
+  assert.equal(formatQuantity({ amount: 1, unit: 'pcs', label: 'tomatoes' }), '1 tomato');
+});
+
+test('pieceGrams and densityOf match a food key the way serving sizes do', () => {
+  assert.equal(pieceGrams('banana'), PIECE_GRAMS.banana);
+  assert.equal(pieceGrams('bananas'), PIECE_GRAMS.banana);     // plurals either way
+  assert.equal(pieceGrams('roma tomatoes'), PIECE_GRAMS.tomatoes);   // the trailing phrase
+  assert.equal(pieceGrams('unobtainium'), null);
+  assert.equal(densityOf('olive oil'), DENSITY['olive oil']);
+  assert.equal(densityOf('water'), 1);                          // the honest default
+});
+
+test('convertCanonical says a quantity in another family using piece weight and density', () => {
+  const bananas = { unit: 'pcs', label: 'bananas' };
+  near(convertQuantity('4 kg', bananas, 'bananas').amount, 4000 / 118, 0.01);
+  assert.equal(formatQuantity(convertQuantity('4 kg', bananas, 'bananas')), '34 bananas');
+  assert.equal(formatQuantity(convertQuantity('240 g', bananas, 'bananas')), '2 bananas');
+  assert.equal(formatQuantity(convertQuantity('2 pcs', { unit: 'g' }, 'bananas')), '235 g');
+  // same family: the amount is untouched, the target's wording is adopted
+  assert.deepEqual(convertQuantity('8 oz', { unit: 'g' }, 'spaghetti'), { amount: 226.8, unit: 'g' });
+  // volume crosses by density
+  near(convertQuantity('1 cup', { unit: 'g' }, 'olive oil').amount, 240 * 0.92, 0.01);
+  // a head of garlic is ten cloves, the same rule servingsFor uses
+  assert.deepEqual(convertQuantity('1 head', { unit: 'pcs', label: 'clove' }, 'garlic'), { amount: 10, unit: 'pcs', label: 'clove' });
+});
+
+test('convertCanonical refuses to guess rather than inventing a number', () => {
+  assert.equal(convertQuantity('1 bag', { unit: 'g' }, 'spinach'), null);        // a bag has no size
+  assert.equal(convertQuantity('500 g', { unit: 'pack' }, 'spinach'), null);     // nor does a pack
+  assert.equal(convertQuantity('1 kg', { unit: 'pcs' }, 'unobtainium'), null);   // no piece weight to divide by
+  assert.equal(convertQuantity('a pinch', { unit: 'g' }, 'salt'), null);         // no number at all
+  assert.equal(convertQuantity('', { unit: 'g' }, 'salt'), null);
 });

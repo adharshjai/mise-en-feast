@@ -78,3 +78,33 @@ page (no floating cards, no sway, no parallax). The product is shown once, as th
 
 Plain and specific, in the words a person would use. No invented numbers, testimonials, logos or
 prices; a missing fact is a visible placeholder like [HACKATHON NAME].
+
+## Cook mode
+
+"Start cooking" on a recipe opens the one full-screen surface in the app: the page's own ground
+(`--bg`, no glass) over the recipe sheet, a top row with the dish name and `Step 3 of 7`, a 4px
+emerald progress bar, and the current step centred in 28px/500 type on a 640px measure. Every
+duration in the step ("10 to 12 minutes") is a small emerald chip inside the sentence; tapping it
+starts that timer. Under the step, the ingredients it mentions as `.chip.have` chips (tap for the
+amount), each with the universal "+". Prev / next are the deck's circles; on the last step
+"I made this" (prominent) and "Done". Timers live in a tray along the bottom: label, `mm:ss` in
+tabular figures, Pause / Reset, a dismiss circle; a finished timer's row turns to the red tint until
+dismissed. When cook mode closes with a timer running, a glass `.timer-pill` sits bottom-left
+(`⏱ 04:12 · Risotto`) and reopens it. Escape closes, arrows step, a touch swipe steps.
+
+## Loading
+
+There is one loading language: a 3px accent sweep along the bottom edge of the top bar and,
+after 300 ms, a small glass pill under the bar naming the job ("Finding recipes…"). While the
+first deck is still being written the deck shows three skeleton cards (the card's shape with a
+shimmer: ink at 6% moving to 12%). Photos fade in over 250 ms once loaded and shimmer before.
+Under `prefers-reduced-motion` every sweep and shimmer becomes a static tint.
+
+## The kitchen report
+
+A strip at the top of the Pantry tab (`This week · 9 items used before expiring · ~$14 saved`,
+accent tint) and a `w-720` sheet: a Week / Month / All switch in the pantry's `.ptabs`, four
+tiles (used before expiry, meals cooked, saved, wasted) in the quiet `rgba(var(--ink), .045)`
+well, four plain accent columns for value saved per week on a hairline, the streak line with
+the toast's emerald tick, and "Use these next" as pantry rows with the "+". Money is always
+written as an estimate (`~$14`) and the sheet says where it comes from.

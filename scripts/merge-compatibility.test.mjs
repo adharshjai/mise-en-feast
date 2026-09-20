@@ -6,6 +6,9 @@ import * as preferences from '../frontend/shared/store.js';
 import * as ingredients from '../frontend/shared/ingredients.js';
 import * as units from '../frontend/shared/units.js';
 import * as dishImages from '../frontend/shared/dish-images.js';
+import * as report from '../frontend/shared/report.js';
+import * as timers from '../frontend/shared/timers.js';
+import * as substitutions from '../frontend/shared/substitutions.js';
 
 function app({ chat = false } = {}) {
   const full = readFileSync(new URL('../frontend/app/app.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -19,7 +22,8 @@ function app({ chat = false } = {}) {
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
   };
   const context = vm.createContext({
-    ...preferences, ...ingredients, ...units, ...dishImages, console, crypto, setTimeout, clearTimeout,
+    ...preferences, ...ingredients, ...units, ...dishImages, ...report, ...timers, ...substitutions,
+    console, crypto, setTimeout, clearTimeout,
     window: { matchMedia: () => ({ matches: true }) },
     document: { querySelector: () => node },
   });
@@ -51,7 +55,7 @@ test('cooking confirmation and actual deductions both follow selected servings',
     openSheet = (kind, html) => { globalThis.html = html; };
     updateDeductSummary = () => {};
     openMadeIt('test');`);
-  assert.equal(run('html.includes("4 of 10")'), true);
+  assert.equal(run('html.includes("~4 servings of ~10 servings")'), true);   // no quantity on the lot: servings are all we know
   assert.equal(run('html.includes("Salt")'), false);
   // The app's query helper delegates to querySelectorAll.
   run(`document.querySelectorAll = () => [{checked: true, dataset: {key: 'eggs'}}];
@@ -145,7 +149,7 @@ test('recipe refresh failure falls back to built-in recipes', async () => {
 });
 
 /* ---------- tabs, ingredient verification and undo (frontend-1) ---------- */
-const lot = (name, key, initial) => `{id: '${key}', name: '${name}', key: '${key}', initial: ${initial}, deducted: 0, burn: 0, purchase: Date.now(), expiry: Date.now() + 5 * 86400000}`;
+const lot = (name, key, initial, qty = '') => `{id: '${key}', name: '${name}', key: '${key}', qty: '${qty}', initial: ${initial}, deducted: 0, burn: 0, purchase: Date.now(), expiry: Date.now() + 5 * 86400000}`;
 
 test('analyze verifies each ingredient against the pantry by name: have, short, missing, staple, approx', () => {
   const run = app();
@@ -227,15 +231,15 @@ test('setTab persists the section and undo brings the last swipe back on top of 
 test('the made-it sheet lists what they are low on with one-decimal numbers and takes what is there', () => {
   const run = app();
   run(`state.prefs = normalizePrefs({household: {adults: 3, kids: 0}});
-    state.pantry = [${lot('Eggs', 'eggs', 10)}, ${lot('Garlic', 'garlic', 1)}];
+    state.pantry = [${lot('Eggs', 'eggs', 10, '10 pcs')}, ${lot('Garlic', 'garlic', 1, '1 head')}];
     const dish = {id: 'd', name: 'Dish', servings: 2, ingredients: [{name: 'Eggs', need: 1}, {name: 'Garlic', need: 1}]};
     liveDishes = [dish];
     state.detailServings = 3;
     openSheet = (kind, html) => { globalThis.html = html; };
     updateDeductSummary = () => {};
     openMadeIt('d');`);
-  assert.equal(run('html.includes("1.5 of 10")'), true);        // eggs: 1 × 3/2 people
-  assert.equal(run('html.includes("1 of 1")'), true);           // garlic: wants 1.5, has 1 — takes the 1
+  assert.equal(run('html.includes("1.5 eggs of 10 eggs")'), true);   // eggs: 1 × 3/2 people, in the unit the pantry keeps them in
+  assert.equal(run('html.includes("1 head of 1 head")'), true);      // garlic: wants 1.5, has 1 — takes the 1
   assert.equal(run('html.includes("low on this")'), true);
   assert.equal(run('/\\d\\.\\d{2,}/.test(html)'), false);        // never 1.4999999
   run(`document.querySelectorAll = () => [{checked: true, dataset: {key: 'eggs'}}, {checked: true, dataset: {key: 'garlic'}}];
@@ -324,7 +328,7 @@ test('on boot, untouched package defaults are recomputed from the quantity; chec
 
 test('what a generated dish takes is read off its amounts; built-in dishes keep their hand-set needs', () => {
   const run = app();
-  run(`state.pantry = [${lot('Spaghetti', 'spaghetti', 4)}, ${lot('Garlic', 'garlic', 1)}];
+  run(`state.pantry = [${lot('Spaghetti', 'spaghetti', 4, '360 g')}, ${lot('Garlic', 'garlic', 1, '1 head')}];
     globalThis.a = analyze({ id: 'ai-pasta-0', name: 'Pasta', servings: 2, ingredients: [
       { name: 'Spaghetti', amt: '8 oz', servings_used: 1 },
       { name: 'Garlic', amt: '2 cloves', servings_used: 1 },
@@ -339,8 +343,8 @@ test('what a generated dish takes is read off its amounts; built-in dishes keep 
   run(`liveDishes = [a.dish]; state.detailServings = 2;
     openSheet = (kind, html) => { globalThis.html = html; }; updateDeductSummary = () => {};
     openMadeIt('ai-pasta-0');`);
-  assert.equal(run('html.includes("2.5 of 4")'), true);
-  assert.equal(run('html.includes("1 of 1")'), true);
+  assert.equal(run('html.includes("225 g of 360 g")'), true);   // "8 oz" said in the grams the pantry keeps
+  assert.equal(run('html.includes("1 head of 1 head")'), true);
 });
 
 test('shopping: rows merge by food, the larger like amount wins, unlike amounts go in the note, bought rows become lots', () => {
@@ -555,4 +559,235 @@ test('pantry keys stack only the same food: brand groups split, look-alikes stay
   // a catalog-keyed lot is left alone by the boot pass
   run(`state.pantry = [${lot('2% Milk', 'milk', 8)}]; globalThis.n2 = rekeyLots(state.pantry);`);
   assert.equal(run('n2'), 0);
+});
+
+/* ---------- one unit per food: the pantry's own ---------- */
+// The pantry decides how a food is measured. Whatever arrives after the first lot is
+// converted into that unit — a receipt's weight becomes a count when that is how the
+// shelf already reads — and recipes quote the same unit back.
+
+test('a new account starts with an empty pantry', () => {
+  const run = app();
+  assert.equal(run('typeof seedPantry'), 'undefined');
+  assert.equal(run('state.pantry.length'), 0);
+});
+
+test('a second lot of a food is converted into the unit the pantry already uses, and still stacks separately', () => {
+  const run = app();
+  run(`${quiet} state.pantry = [];
+    addLot('Bananas', 'bananas', '8 pcs');
+    addLot('Bananas', 'bananas', '4 kg');`);
+  assert.equal(run(`state.pantry[0].qty`), '8 pcs');            // the first lot sets the unit, untouched
+  assert.equal(run(`state.pantry[1].qty`), '34 bananas');       // 4 kg at about 118 g a banana
+  assert.equal(run(`state.pantry[1].initial`), 34);             // servings follow the converted quantity
+  assert.equal(run(`state.pantry.length`), 2);                  // separate use-by dates: never merged
+  assert.equal(run(`JSON.stringify(pantryUnitOf('bananas'))`), JSON.stringify({ unit: 'pcs', label: 'bananas', perServing: 1 }));
+  assert.equal(run(`stackAmountText(state.pantry)`), '42 bananas');
+  assert.equal(run(`lotAmountText(state.pantry[0])`), '8 bananas');
+  // a food the pantry has never held keeps whatever unit it came in
+  run(`addLot('Jasmine rice', 'jasmine rice', '2 lb')`);
+  assert.equal(run(`state.pantry[2].qty`), '2 lb');
+});
+
+test('a receipt line lands in the unit the pantry already keeps that food in', () => {
+  const run = app();
+  run(`${quiet} state.pantry = []; addLot('Bananas', 'bananas', '8 pcs');
+    globalThis.line = lineFromScanItem({ name: 'Bananas', quantity: 4, unit: 'kg', price: 6.5, is_food: true });`);
+  assert.equal(run('line.qty'), '34 bananas');
+  assert.equal(run('line.initial'), 34);
+  // two lines of a food new to the pantry agree with each other: the first one sets the unit
+  run(`state.pantry = []; globalThis.rows = [];
+    for (const it of [{ name: 'Apples', quantity: 6, unit: 'ct', price: 4 }, { name: 'Apples', quantity: 1, unit: 'kg', price: 3 }]) {
+      rows.push(lineFromScanItem({ ...it, is_food: true }, rows));
+    }`);
+  assert.equal(run('rows[0].qty'), '6 pcs');
+  assert.equal(run('rows[1].qty'), '5.5 apples');   // 1 kg at about 182 g an apple
+});
+
+test('recipes quote amounts in the pantry\'s unit, and cooking takes them in the same unit', () => {
+  const run = app();
+  // a pantry kept by the piece never hears about grams
+  run(`state.pantry = [${lot('Bananas', 'bananas', 12, '12 pcs')}];
+    globalThis.a = analyze({ id: 'x', name: 'Smoothie', servings: 2, ingredients: [{ name: 'Bananas', amt: '240 g' }] });`);
+  assert.equal(run('takeFor(a.ings[0], 1).text'), '2 bananas');
+  // a pantry kept by weight hears grams, whatever the recipe wrote
+  run(`state.pantry = [${lot('Spaghetti', 'spaghetti', 4, '360 g')}];
+    globalThis.b = analyze({ id: 'y', name: 'Pasta', servings: 2, ingredients: [{ name: 'Spaghetti', amt: '8 oz' }] });`);
+  assert.equal(run('takeFor(b.ings[0], 1).text'), '225 g');
+  assert.equal(run('takeFor(b.ings[0], 1).servings'), 2.52);   // 226.8 g at the lot's 90 g a serving
+});
+
+test('counts read at the nearest half, and what is left after cooking reads the same way', () => {
+  const run = app();
+  run(`${quiet} state.pantry = [${lot('Bananas', 'bananas', 5, '5 pcs')}];
+    globalThis.a = analyze({ id: 'x', name: 'Banana bread', servings: 2, ingredients: [{ name: 'Bananas', amt: '1.7' }] });
+    deductServings('bananas', takeFor(a.ings[0], 1).servings);`);
+  assert.equal(run('state.pantry[0].deducted'), 1.7);             // the real amount leaves the pantry
+  assert.equal(run('Math.round(current(state.pantry[0]) * 10) / 10'), 3.3);
+  assert.equal(run('lotAmountText(state.pantry[0])'), '3.5 bananas');   // and reads at the nearest half
+  assert.equal(run('servingsText("bananas", 4.2)'), '4 bananas');
+  assert.equal(run('servingsText("bananas", 4.3)'), '4.5 bananas');
+  assert.equal(run('servingsText("bananas", 0.1)'), '0.5 bananas');     // some left never rounds away to none
+});
+
+/* ---------- wave 2: cross-verify (K), timers, ratings, the report, swaps, the cooked log (J7) ---------- */
+
+test('K: the chips, the missing line, the tab and the "Add N" count all come from one analyze() against the pantry as it is now', () => {
+  const run = app();
+  run(`renderAll = () => {}; state.shopping = [];
+    state.pantry = [${lot('Milk (1 gal)', 'milk', 8)}, ${lot('Spaghetti', 'spaghetti', 4)}, ${lot('Egg noodles', 'egg noodles', 4)}, ${lot('Chicken thighs', 'chicken thighs', 3)}, ${lot('Roma tomatoes', 'tomatoes', 6)}, ${lot('Garlic', 'garlic', 10)}];
+    const dish = { id: 'ai-test-0', name: 'Test bowl', servings: 2, ingredients: [
+      { name: 'Coconut milk', amt: '1 can' }, { name: 'Penne', amt: '8 oz' }, { name: 'Fresh noodles', amt: '200 g' }, { name: 'Chicken breast', amt: '8 oz' },
+      { name: 'Tomato paste', amt: '1 tbsp' }, { name: 'Garlic', amt: '2 cloves' }, { name: 'Cherry tomatoes', amt: '1 cup' }, { name: 'Garlic powder', amt: '1 tsp' },
+    ] };
+    liveDishes = [dish];
+    globalThis.a = analyze(dish);
+    globalThis.card = cardHTML(a);`);
+  assert.equal(run('JSON.stringify(a.ings.map(i => i.status))'), JSON.stringify(['missing', 'have', 'have', 'have', 'missing', 'have', 'have', 'missing']));
+  assert.equal(run('a.ings[1].approx && a.ings[3].approx'), true);   // penne via the pasta family, breast via the chicken family
+  assert.equal(run('a.ings[2].key'), 'egg noodles');                  // "fresh noodles" is their egg noodles
+  assert.equal(run('a.ings[5].need'), 2);                             // 2 cloves of garlic
+  // exactly three dashed chips, and the line names the same three
+  assert.equal(run('(card.match(/class="chip missing/g) || []).length'), 3);
+  assert.equal(run('/missing 3: coconut milk, tomato paste, garlic powder/.test(card)'), true);
+  // the tab placement and the shopping "Add N" count read the same analysis
+  run(`state.tab = 'explore'; buildDeck(); globalThis.explore = state.deck.map(x => x.dish.id);
+    state.tab = 'curated'; buildDeck(); globalThis.curated = state.deck.map(x => x.dish.id);
+    globalThis.needed = neededForDish(dish).map(i => i.name);`);
+  assert.equal(run('JSON.stringify(explore)'), JSON.stringify(['ai-test-0']));
+  assert.equal(run('JSON.stringify(curated)'), '[]');
+  assert.equal(run('JSON.stringify(needed)'), JSON.stringify(['Coconut milk', 'Tomato paste', 'Garlic powder']));
+  // the pantry changes: coconut milk arrives, and the same dish re-verifies at read time
+  run(`addLot('Coconut milk', keyForName('Coconut milk'), '400 ml'); globalThis.b = analyze(dish); globalThis.card2 = cardHTML(b);`);
+  assert.equal(run('b.ings[0].status'), 'have');
+  assert.equal(run('b.missing.map(i => i.name).join()'), 'Tomato paste,Garlic powder');
+  assert.equal(run('(card2.match(/class="chip missing/g) || []).length'), 2);
+  assert.equal(run('neededForDish(dish).length'), 2);
+});
+
+test('cook mode reads the timers out of a real step', () => {
+  const run = app();
+  run(`globalThis.d = findDurations(DISHES.find(x => x.id === 'shakshuka').steps[2]);`);   // "…simmer until thick, 10 to 12 minutes."
+  assert.equal(run('d.length'), 1);
+  assert.equal(run('d[0].seconds'), 720);
+  assert.equal(run('d[0].label'), '12 min');
+  assert.equal(run(`highlightDurations(esc('Simmer 10 to 12 minutes.'), findDurations(esc('Simmer 10 to 12 minutes.')), d => '<b>' + d.label + '</b>')`), 'Simmer <b>12 min</b>.');
+  assert.equal(run(`findDurations('Heat the oven to 350°F.').length`), 0);
+});
+
+test('a rating after cooking feeds prefs.liked / disliked, sorts alike dishes up and keeps a rated-down dish off the deck', () => {
+  const run = app({ chat: true });
+  run(`${quiet} savePrefs = saveRatings = saveCooked = () => {};
+    state.pantry = [${lot('Eggs', 'eggs', 12)}];
+    state.prefs = normalizePrefs({}); state.ratings = {}; state.cookedLog = []; state.cooked = new Set();
+    liveDishes = [
+      { id: 'a', name: 'Eggs on toast', servings: 2, ingredients: [{ name: 'Eggs', need: 2 }] },
+      { id: 'b', name: 'Cheesy eggs', servings: 2, ingredients: [{ name: 'Eggs', need: 2 }] },
+    ];
+    globalThis.e = rememberCooked(liveDishes[0]);
+    globalThis.changed = applyRating(e.id, 1);`);
+  assert.equal(run('changed'), true);
+  assert.equal(run('JSON.stringify(state.prefs.liked)'), JSON.stringify(['Eggs on toast']));
+  assert.equal(run('state.cookedLog[0].rating'), 1);
+  assert.equal(run('prefFit(liveDishes[0])'), 2);
+  assert.equal(run('prefFit(liveDishes[1])'), 2);   // every one of its ingredients is in a dish they rated up
+  run(`globalThis.e2 = rememberCooked(liveDishes[1]); applyRating(e2.id, -1); state.tab = 'curated'; buildDeck();`);
+  assert.equal(run('JSON.stringify(state.prefs.disliked)'), JSON.stringify(['Cheesy eggs']));
+  assert.equal(run('JSON.stringify(state.deck.map(x => x.dish.id))'), JSON.stringify(['a']));
+  // the same thumb again clears it
+  run('applyRating(e2.id, -1); buildDeck();');
+  assert.equal(run('state.prefs.disliked.length'), 0);
+  assert.equal(run('state.deck.length'), 2);
+  // the assistant's update_preference carries the complete list, and the ratings follow it
+  run(`applyChatActions([{ type: 'update_preference', field: 'disliked', value: ['Eggs on toast'] }]); buildDeck();`);
+  assert.equal(run('JSON.stringify(state.prefs.disliked)'), JSON.stringify(['Eggs on toast']));
+  assert.equal(run('JSON.stringify(state.prefs.liked)'), '[]');
+  assert.equal(run('JSON.stringify(state.deck.map(x => x.dish.id))'), JSON.stringify(['b']));
+  // the deck signature carries the ratings, so the deck regenerates for them
+  assert.equal(run(`deckSignature().includes('Eggs on toast')`), true);
+});
+
+test('"I made this" writes the cook events the report sums, then asks for a rating; a lot found expired counts as waste once', () => {
+  const run = app();
+  run(`${quiet} closeSheet = logCook = () => {}; saveCooked = saveRatings = savePrefs = () => {};
+    openSheet = (kind, html) => { state.sheet = kind; globalThis.html = html; };
+    state.prefs = normalizePrefs({ household: { adults: 2, kids: 0 } });
+    state.events = []; state.cookedLog = []; state.ratings = {}; state.shopping = [];
+    state.pantry = [${lot('Eggs', 'eggs', 12)}, ${lot('Tomatoes', 'tomatoes', 6)}];
+    state.pantry[0].price = 4.80;   // a receipt price: 40¢ an egg
+    const dish = { id: 'd', name: 'Shakshuka', servings: 2, ingredients: [{ name: 'Eggs', need: 4 }, { name: 'Tomatoes', need: 4 }] };
+    liveDishes = [dish]; state.detailServings = 2;
+    document.querySelectorAll = () => [{ checked: true, dataset: { key: 'eggs' } }, { checked: true, dataset: { key: 'tomatoes' } }];
+    finishMadeIt('d');`);
+  assert.equal(run(`state.events.filter(e => e.type === 'cook' && e.key).length`), 2);
+  assert.equal(run(`state.events.filter(e => e.type === 'cook' && !e.key).length`), 1);   // the meal itself
+  assert.equal(run(`state.events.find(e => e.key === 'eggs').value`), 1.6);               // 4 eggs at the receipt's 40¢
+  assert.equal(run(`state.events.find(e => e.key === 'eggs').beforeExpiry`), true);
+  assert.equal(run('state.sheet'), 'rate');
+  assert.equal(run('html.includes("How was Shakshuka?")'), true);
+  assert.equal(run('state.cookedLog[0].title'), 'Shakshuka');
+  run(`globalThis.r = summarize({ events: state.events, lots: state.pantry, now: Date.now(), days: 7, costFor });`);
+  assert.equal(run('r.used.items'), 2);
+  assert.equal(run('r.cooked.meals'), 1);
+  assert.equal(run('r.savedValue'), 3.6);   // 1.60 for the eggs + 4 tomatoes at the typical 50¢
+  assert.equal(run('r.streakDays >= 1'), true);
+  // a lot past its date with something left is logged as expired once, not on every boot
+  run(`state.pantry.push({ id: 'old', name: 'Spinach', key: 'spinach', initial: 4, deducted: 0, burn: 0, purchase: Date.now() - 9 * 86400000, expiry: Date.now() - 2 * 86400000 });
+    globalThis.n1 = sweepExpired(); globalThis.n2 = sweepExpired();
+    globalThis.r2 = summarize({ events: state.events, lots: state.pantry, now: Date.now(), days: 7, costFor });`);
+  assert.equal(run('n1 + ":" + n2'), '1:0');
+  assert.equal(run('r2.wasted.items'), 1);
+  assert.equal(run('r2.wasted.value'), 2.8);   // 4 servings of spinach at 70¢
+  assert.equal(run('r2.streakDays'), 0);       // something expired today: no streak
+  assert.equal(run('reportHTML().includes("used before expiry") && reportHTML().includes("Use these next")'), true);
+  assert.equal(run('reportStripHTML().includes("This week")'), true);
+});
+
+test('"Use this" on a swap makes the ingredient had (approximately), deducts the swap\'s foods and leaves it off the list', () => {
+  const run = app();
+  run(`${quiet} state.shopping = []; state.saved = [];
+    state.pantry = [${lot('Milk', 'milk', 8)}, ${lot('Butter', 'butter', 10)}, ${lot('Arborio rice', 'arborio rice', 6)}];
+    const dish = { id: 'ai-risotto-0', name: 'Creamy risotto', servings: 2, ingredients: [{ name: 'Arborio rice', amt: '1 cup' }, { name: 'Heavy cream', amt: '½ cup' }, { name: 'Parmesan', amt: '1 oz' }] };
+    liveDishes = [dish];
+    globalThis.before = analyze(dish);
+    globalThis.subs = localSubstitutions('Heavy cream', state.pantry);
+    useSubstitution(dish, 'Heavy cream', subs[0]);
+    globalThis.after = analyze(dish);`);
+  assert.equal(run('before.missing.map(i => i.name).join()'), 'Heavy cream,Parmesan');
+  assert.equal(run('subs[0].use + ":" + subs[0].from_pantry'), 'milk + butter:true');
+  assert.equal(run('after.missing.map(i => i.name).join()'), 'Parmesan');
+  assert.equal(run('after.ings[1].status + ":" + after.ings[1].approx + ":" + after.ings[1].sub.use'), 'have:true:milk + butter');
+  assert.equal(run('chipHTML(after.ings[1], after.dish).includes("Using milk + butter")'), true);
+  assert.equal(run('neededForDish(after.dish).map(i => i.name).join()'), 'Parmesan');   // "Add N" no longer counts the swapped one
+  // the made-it sheet lists milk and butter instead of the cream
+  run(`state.detailServings = 2; openSheet = (kind, html) => { globalThis.html = html; }; updateDeductSummary = () => {}; openMadeIt('ai-risotto-0');`);
+  assert.equal(run('html.includes("Milk") && html.includes("Butter")'), true);
+  assert.equal(run('html.includes("Instead of heavy cream")'), true);
+  // saved dishes keep their swaps; undoing one puts the ingredient back on the list
+  assert.equal(run('normalizeDish(dish).subs["heavy cream"].use'), 'milk + butter');
+  run(`dropSubstitution(dish, 'Heavy cream');`);
+  assert.equal(run('analyze(dish).missing.length'), 2);
+});
+
+test('the cooked log keeps the newest 100 entries, and "Cook again" puts a snapshot on Tonight', () => {
+  const run = app();
+  run(`${quiet} saveCooked = () => {}; closeSheet = () => {}; state.cookedLog = []; state.ratings = {}; state.chosen = new Set(); liveDishes = [];
+    for (let i = 0; i < 105; i++) rememberCooked({ id: 'd' + i, name: 'Dish ' + i, servings: 2, ingredients: [{ name: 'Eggs', need: 1 }], steps: ['Cook.'] });`);
+  assert.equal(run('state.cookedLog.length'), 100);
+  assert.equal(run('state.cookedLog[0].title'), 'Dish 104');
+  assert.equal(run('state.cookedLog.at(-1).title'), 'Dish 5');
+  run('cookAgain(state.cookedLog[0].id);');
+  assert.equal(run('chosenDishes().map(d => d.name).join()'), 'Dish 104');
+  run(`state.savedTab = 'cooked';`);
+  assert.equal(run('savedSheetHTML().includes("Cook again")'), true);
+  assert.equal(run('savedSheetHTML().includes("data-rate-toggle")'), true);
+});
+
+test('the sample receipt is gone: processing needs a real file and the review starts with no store', async () => {
+  const run = app();
+  run(`globalThis.opened = null; openSheet = kind => { opened = kind; }; toast = () => {};`);
+  await run('startProcessing(null)');
+  assert.equal(run('opened'), null);
+  assert.equal(run('typeof SAMPLE_RECEIPT'), 'undefined');
+  assert.equal(run('lastReceipt.store + "|" + lastReceipt.total'), '|0');
 });

@@ -1,5 +1,6 @@
 /* mise en feast — FastAPI client (receipt scan, recipes, chat, weekly plan, dish photo → recipe,
-   generated dish images). Base URL comes from window.PANTRY_CONFIG.apiBaseUrl (see shared/config.js). */
+   generated dish images, ingredient substitutions). Base URL comes from
+   window.PANTRY_CONFIG.apiBaseUrl (see shared/config.js). */
 
 const cfg = () => (typeof window !== 'undefined' && window.PANTRY_CONFIG) || {};
 
@@ -97,12 +98,16 @@ export async function fetchMealPlan(items, { prefs = null, days = 7, start = nul
 
 /**
  * POST /chat — the in-app assistant (Claude via Bedrock, with controlled pantry tools).
- * body: { messages, pantry, prefs, recent_meals, shopping }.
+ * body: { messages, pantry, prefs, recent_meals, shopping, focus_recipe? }.
  *   messages    [{ role: 'user'|'assistant', content }]  the turn history
  *   pantry      the aggregated PantryItem array (same as fetchRecipes)
  *   prefs       the v2 preferences object
  *   recentMeals [{ title, cooked_at? }]  newest first (optional)
  *   shopping    [{ name, quantity: number|null, unit, done }]  the shopping list (optional)
+ *   focusRecipe { title, servings, ingredients: string[], steps: string[], missing: string[] }
+ *               the dish the user is looking at ("Ask a question" from the recipe sheet), sent
+ *               as `focus_recipe` so the assistant answers about it; omitted from the body
+ *               when null so older backends see the exact request they know
  * Resolves to { reply, actions, recipes }. Each action is one the client applies:
  *   { type: 'update_preference',     field, value }
  *   { type: 'mark_food_gone',        id, name, key }
@@ -113,15 +118,66 @@ export async function fetchMealPlan(items, { prefs = null, days = 7, start = nul
  * Units in actions are already canonical ('g', 'kg', 'ml', 'l', 'pcs', 'pack' or '').
  * `recipes` are step-less suggestion cards; fetch steps with recipeDetail() when opened.
  */
-export async function chat(messages, { pantry = [], prefs = null, recentMeals = [], shopping = [] } = {}) {
+export async function chat(messages, { pantry = [], prefs = null, recentMeals = [], shopping = [], focusRecipe = null } = {}) {
   if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
+  const body = { messages, pantry, prefs, recent_meals: recentMeals, shopping };
+  if (focusRecipe && typeof focusRecipe === 'object') {
+    body.focus_recipe = {
+      title: String(focusRecipe.title ?? ''),
+      servings: Math.max(1, Math.round(Number(focusRecipe.servings) || 2)),
+      ingredients: (focusRecipe.ingredients || []).map(s => String(s ?? '').trim()).filter(Boolean),
+      steps: (focusRecipe.steps || []).map(s => String(s ?? '').trim()).filter(Boolean),
+      missing: (focusRecipe.missing || []).map(s => String(s ?? '').trim()).filter(Boolean),
+    };
+  }
   const res = await fetch(`${baseUrl()}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, pantry, prefs, recent_meals: recentMeals, shopping }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+/**
+ * POST /substitutions — what to use instead of one ingredient, pantry-based first.
+ * body: { ingredient, dish_title, dish_ingredients, pantry, prefs }.
+ *   ingredient      the ingredient they do not have ("heavy cream")
+ *   dishTitle       the dish it is for, so the swap suits it (optional)
+ *   dishIngredients the dish's ingredient names, so a swap never doubles one already in it
+ *   pantry          the aggregated PantryItem array (same as fetchRecipes)
+ *   prefs           the v2 preferences object (allergies and diet are enforced server-side)
+ * Resolves to { substitutions: [{ use, from_pantry, ratio, note, pantry_names }] }, always an
+ * array (empty when the model found nothing safe). Rejects with an Error carrying a `code` so
+ * the app can fall back to shared/substitutions.js localSubstitutions():
+ *   'unconfigured'  apiBaseUrl is empty (demo build)
+ *   'unreachable'   the request never got an HTTP answer (offline, CORS, DNS)
+ *   'http'          any other non-2xx (503 no model credentials, 502 model failure); `status` is set
+ */
+export async function fetchSubstitutions({ ingredient, dishTitle = '', dishIngredients = [], pantry = [], prefs = null } = {}) {
+  if (!apiConfigured()) throw withCode(new Error('API base URL is not set in shared/config.js'), 'unconfigured');
+  const name = String(ingredient ?? '').trim();
+  if (!name) throw withCode(new Error('No ingredient to substitute'), 'http', { status: 400 });
+  const body = {
+    ingredient: name,
+    dish_title: String(dishTitle ?? ''),
+    dish_ingredients: (Array.isArray(dishIngredients) ? dishIngredients : []).map(s => String(s ?? '').trim()).filter(Boolean),
+    pantry,
+    prefs,
+  };
+  let res;
+  try {
+    res = await fetch(`${baseUrl()}/substitutions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw withCode(new Error('Could not reach the recipe backend', { cause: err }), 'unreachable');
+  }
+  if (!res.ok) throw withCode(new Error(await readError(res)), 'http', { status: res.status });
+  const data = await res.json();
+  return { substitutions: Array.isArray(data && data.substitutions) ? data.substitutions : [] };
 }
 
 /**

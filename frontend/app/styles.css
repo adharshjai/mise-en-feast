@@ -798,3 +798,187 @@ select.field option { background: var(--surface); color: var(--text); }
 .choose .option .go { color: var(--text-3); flex-shrink: 0; }
 
 .chat-source { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }
+
+/* =========================================================================
+   Wave 2: loading, cook mode, swaps, ratings, the kitchen report, voice
+   ========================================================================= */
+
+/* ---------- the helper over a sheet ("Ask a question") ---------- */
+/* The sheet is z 30 over its veil at 20; while one is open the FAB rises above it, and the
+   panel above both, so a question about the recipe never lands behind it. */
+.chat-fab.over { z-index: 34; }
+/* over a sheet the panel carries the sheet's denser glass, so the recipe behind it does not read through */
+.chat.over { z-index: 35; background: var(--sheet-bg); -webkit-backdrop-filter: blur(40px) saturate(160%); backdrop-filter: blur(40px) saturate(160%); }
+.chat-form .circle.sm { width: 40px; height: 40px; flex-shrink: 0; }
+/* the mic: a red dot pulses beside the icon while it listens */
+#btn-mic { position: relative; }
+#btn-mic.listening { color: var(--red); }
+#btn-mic.listening::after { content: ""; position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 1.1s ease-in-out infinite; }
+
+/* ---------- loading: the bar under the top bar and the busy pill ---------- */
+.progress { position: fixed; left: 0; right: 0; top: calc(var(--topbar-h, 88px) - 3px); height: 3px; z-index: 6; overflow: hidden; background: rgba(var(--accent-rgb), .12); pointer-events: none; }
+.progress i { display: block; width: 40%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, rgba(var(--accent-rgb), 0), var(--accent) 40%, var(--accent) 60%, rgba(var(--accent-rgb), 0)); animation: sweep 1.3s ease-in-out infinite; }
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+.busy-pill {
+  position: fixed; left: 50%; top: calc(var(--topbar-h, 88px) + 8px); z-index: 38; transform: translateX(-50%) translateY(-8px); opacity: 0;
+  display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 16px 0 12px; border-radius: 999px;
+  font-size: 13px; font-weight: 500; color: var(--text-2); pointer-events: none; transition: transform .3s var(--spring), opacity .2s ease;
+}
+.busy-pill.in { transform: translateX(-50%); opacity: 1; }
+
+/* ---------- skeleton cards and image loading ---------- */
+/* The shimmer is a moving band of ink at 6% → 12%: quiet on cream, quiet on the dark ground. */
+.sk, .card.skeleton .card-img, .card-img img:not(.loaded), .hero img:not(.loaded) {
+  background: linear-gradient(100deg, rgba(var(--ink), .06) 30%, rgba(var(--ink), .12) 50%, rgba(var(--ink), .06) 70%);
+  background-size: 300% 100%; animation: shimmer 1.6s ease-in-out infinite;
+}
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.card.skeleton { pointer-events: none; }
+.card.skeleton .card-img { background-color: var(--img-ph); }
+.card.skeleton .card-body { gap: 12px; }
+.sk { display: block; border-radius: 8px; }
+.sk.t1 { width: 70%; height: 30px; }
+.sk.t2 { width: 45%; height: 30px; margin-top: -4px; }
+.sk.m { width: 55%; height: 14px; }
+.sk.c { width: 84px; height: 28px; border-radius: 999px; }
+.card.skeleton .chips { gap: 6px; }
+/* a photo fades in once it has loaded; before that its frame shimmers (the background above) */
+.card-img img, .hero img { transition: opacity .25s ease; }
+.card-img img:not(.loaded), .hero img:not(.loaded) { opacity: 0; }
+/* a generated picture arriving later: a short fade from the stand-in it replaces */
+.card-img img.swap, .hero img.swap, img.thumb.swap, img.chat-thumb.swap { animation: img-in .35s ease; }
+@keyframes img-in { from { opacity: .35; } }
+/* pantry and shopping rows rise in when they are new (or, on the list, just moved groups) */
+.prow.enter { animation: rise .4s var(--ease) both; }
+
+/* ---------- the empty state without a backend ---------- */
+.empty-offline { font-size: 14px; color: var(--text-2); text-align: center; max-width: 420px; line-height: 1.5; }
+.empty-offline code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+.empty-offline .linkish { display: inline; padding: 0; min-height: 0; font-size: inherit; }
+
+/* ---------- swaps on the recipe sheet ---------- */
+.linkish.sm { font-size: 13px; padding: 0 4px; }
+.ing .swap { flex-shrink: 0; color: var(--accent-text); }
+.subs-slot[hidden] { display: none; }
+.subs { display: flex; flex-direction: column; gap: 8px; margin: -4px 0 4px 34px; padding: 12px 14px; border-radius: 14px; background: rgba(var(--ink), .045); }
+.subs .eyebrow { font-size: 11px; }
+.sub { display: flex; align-items: center; gap: 12px; }
+.sub-text { flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sub-text strong { font-size: 14px; font-weight: 600; }
+.sub-text small { font-size: 12px; color: var(--text-2); }
+.sub-from { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--accent-text); font-weight: 600; }
+.chip.have.sub { background: rgba(var(--accent-rgb), .14); }
+
+/* ---------- ratings ---------- */
+.rate-body { align-items: center; text-align: center; gap: 22px; padding-bottom: 28px; }
+.rate-help { font-size: 14px; color: var(--text-2); max-width: 340px; }
+.rate-btns { display: flex; gap: 24px; }
+.circle.rate { width: 84px; height: 84px; }
+.circle.rate.up:hover { color: var(--accent-text); }
+.circle.rate.down:hover { color: var(--red); }
+.rate-mini { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.rate-mini .circle.on { color: var(--accent-text); background: rgba(var(--accent-rgb), .16); }
+.rate-mini .circle[data-value="-1"].on { color: var(--red); background: rgba(var(--red-rgb), .14); }
+.rrow.cooked { padding: 8px 14px; gap: 12px; }
+.rrow.cooked .name { flex-grow: 1; min-width: 0; }
+.rrow.cooked .pill.sm { flex-shrink: 0; }
+.ptab small { font-size: 11px; color: var(--text-3); font-weight: 600; }
+
+/* ---------- the kitchen report ---------- */
+.pstrip { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; padding: 12px 14px; border-radius: 14px; background: rgba(var(--accent-rgb), .10); font-size: 14px; color: var(--text); }
+.report-body { gap: 18px; }
+.rtiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.rtile { display: flex; flex-direction: column; gap: 2px; padding: 14px 12px; border-radius: 14px; background: rgba(var(--ink), .045); min-width: 0; }
+.rtile strong { font-size: 26px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+.rtile small { font-size: 12px; color: var(--text-2); }
+.rtile small.sub { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* four bars of value saved per week: plain columns on a hairline, labelled */
+.rchart { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: end; height: 150px; padding: 8px 4px 0; border-bottom: 1px solid rgba(var(--ink), .10); }
+.rbar { display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; min-width: 0; }
+.rbar b { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.rbar .col { flex: 1 1 auto; width: 100%; max-width: 64px; display: flex; align-items: flex-end; }
+.rbar .col i { display: block; width: 100%; border-radius: 8px 8px 0 0; background: var(--accent); opacity: .85; transition: height .5s var(--ease); }
+.rbar:last-child .col i { opacity: 1; }
+.rbar small { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.rstreak { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text-2); }
+.rstreak .tick { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.rstreak b { color: var(--text); font-weight: 600; }
+.rstreak.dim { color: var(--text-3); }
+.rnote { font-size: 12px; color: var(--text-3); }
+.rnext { display: flex; flex-direction: column; gap: 2px; }
+.rnext .prow .list { opacity: 1; }
+@media (max-width: 640px) {
+  .rtiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rchart { height: 120px; }
+  .pstrip { font-size: 13px; }
+}
+
+/* ---------- cook mode ---------- */
+/* The one full-screen surface in the app: the page's own ground, no glass, over the recipe
+   sheet it came from (sheet 30, helper 35). */
+.cook {
+  position: fixed; inset: 0; z-index: 45; display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+  opacity: 0; transition: opacity .2s ease;
+}
+.cook.in { opacity: 1; }
+.cook:focus { outline: none; }
+.cook-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; }
+.cook-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cook-head strong { font-size: 18px; font-weight: 700; letter-spacing: -.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cook-head small { font-size: 13px; color: var(--text-2); }
+.cook-bar { height: 4px; margin: 0 24px; border-radius: 999px; background: rgba(var(--ink), .10); overflow: hidden; }
+.cook-bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width .35s var(--ease); }
+.cook-main { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 24px; text-align: center; }
+.cook-step { max-width: 640px; }
+.cook-text { font-size: 28px; line-height: 1.35; letter-spacing: -.015em; font-weight: 500; }
+.cook-note { font-size: 18px; color: var(--text-2); display: flex; align-items: center; gap: 10px; }
+/* a duration inside the step: a small emerald chip you can tap to start that timer */
+.tchip {
+  display: inline-flex; align-items: center; gap: 5px; margin: 0 0 0 1px; padding: 2px 10px 2px 8px; border-radius: 999px; border: 0; vertical-align: baseline;
+  background: rgba(var(--accent-rgb), .16); color: var(--accent-text); font: inherit; font-size: .8em; font-weight: 600; cursor: pointer;
+  transition: background .15s ease, transform .18s var(--spring);
+}
+.tchip:hover { background: rgba(var(--accent-rgb), .26); transform: translateY(-1px); }
+.cook-ings { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 640px; }
+.cook-ing { display: inline-flex; align-items: center; gap: 4px; }
+.cook-ing .chip { height: 32px; font-size: 14px; }
+.cook-ing .chip .amt { font-size: 13px; color: var(--text-2); }
+.cook-ing .chip .amt::before { content: "·"; margin-right: 5px; }
+.cook-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+.cook-nav { display: flex; align-items: center; justify-content: center; gap: 36px; padding: 8px 24px 20px; }
+.cook-nav .circle:disabled { opacity: .35; cursor: default; }
+.cook-nav .circle:disabled:hover { transform: none; }
+/* the timer tray: one row per timer, red once it is up until dismissed */
+.cook-tray { display: flex; flex-direction: column; gap: 4px; padding: 8px 24px 20px; border-top: 1px solid rgba(var(--ink), .08); max-height: 32vh; overflow: auto; }
+.trow { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-radius: 12px; background: rgba(var(--ink), .045); font-size: 14px; }
+.trow .tlabel { display: inline-flex; align-items: center; gap: 6px; flex-grow: 1; min-width: 0; color: var(--text-2); }
+.trow .tleft { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.01em; min-width: 64px; text-align: right; }
+.trow.paused .tleft { color: var(--text-2); }
+.trow.done { background: rgba(var(--red-rgb), .16); box-shadow: inset 0 0 0 1px rgba(var(--red-rgb), .4); }
+.trow.done .tleft { color: var(--red); }
+/* cook mode closed, a timer still going: bottom-left, the soonest one */
+.timer-pill {
+  position: fixed; left: 20px; bottom: 20px; z-index: 24; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px 0 12px; border-radius: 999px;
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); cursor: pointer;
+}
+.timer-pill.done { color: var(--red); box-shadow: inset 0 0 0 1px rgba(var(--red-rgb), .5); }
+@media (max-width: 640px) {
+  .cook-top { padding: 16px 16px 10px; }
+  .cook-bar { margin: 0 16px; }
+  .cook-main { padding: 20px 16px; gap: 18px; }
+  .cook-text { font-size: 24px; }
+  .cook-nav { gap: 24px; }
+  .cook-tray { padding: 8px 16px 16px; }
+  .timer-pill { bottom: 88px; }   /* clear of the helper's own bottom row on a phone */
+}
+
+/* ---------- reduced motion: static tints instead of sweeps and shimmers ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .progress i { animation: none; width: 100%; transform: none; background: var(--accent); }
+  .sk, .card.skeleton .card-img, .card-img img:not(.loaded), .hero img:not(.loaded) { animation: none; background: rgba(var(--ink), .08); }
+  .card-img img, .hero img { transition: none; }
+  .card-img img.swap, .hero img.swap, img.thumb.swap, img.chat-thumb.swap { animation: none; }
+  .prow.enter { animation: none; }
+  #btn-mic.listening::after { animation: none; }
+  .busy-pill { transition: none; }
+}

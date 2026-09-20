@@ -34,8 +34,26 @@ ordered by what's going bad first. Built for VTHacks14.
 - **Generated dish photos** — dishes the model writes get a picture from
   `GET /dish-image`, cached in IndexedDB so each one is made once per device.
 - **Kitchen helper** — a chat panel that can suggest dishes, mark food gone,
-  and now change things: "add eggs to my pantry", "put lemons on my shopping
-  list", "take milk off the list". Those three also work offline.
+  and change things: "add eggs to my pantry", "put lemons on my shopping
+  list", "take milk off the list". Those three also work offline. A mic button
+  takes the question by voice where the browser has speech recognition.
+- **Ask about this dish** — "Ask a question" on a recipe floats the helper over
+  the sheet with that recipe in front of it (`focus_recipe`), so "can I skip the
+  wine?" is answered about that dish. Offline it lists the steps and swaps.
+- **Cook mode** — "Start cooking" shows one step at a time in big type; every
+  "10 to 12 minutes" in a step is a tappable timer (beep, vibrate, a red row
+  until dismissed), the ingredients the step mentions sit under it as chips,
+  and timers keep running behind a small pill after the overlay closes.
+- **Swaps** — "Swap?" beside anything you're missing asks `POST /substitutions`
+  (the table in `shared/substitutions.js` stands in offline) and "Use this"
+  makes the dish cookable with what you have; "I made this" deducts the swap.
+- **Ratings and Cook again** — a thumbs up or down after cooking feeds the
+  model's preferences (`liked` / `disliked`), lifts similar dishes and keeps a
+  rated-down one off the deck; the Saved sheet's Cooked tab brings any dish back.
+- **Kitchen report** — a strip on the Pantry tab and a sheet from the profile
+  menu: items used before expiring, meals cooked, an estimated dollar figure
+  saved and wasted, four weekly bars, a no-waste streak and "Use these next".
+  Figures are estimates from receipt prices and typical costs.
 - **Your preferences** — onboarding captures household size, allergies, diet,
   cuisines, time and skill; recipes scale to the number of people and flag
   anything you avoid.
@@ -53,19 +71,23 @@ frontend/            static web app — no framework, no build step
                      units.js (quantities → g/ml/pcs, servings per food),
                      ingredients.js (recipe ingredient ↔ pantry matching),
                      dish-images.js (generated photos, IndexedDB cache),
+                     timers.js (durations in a step, countdown arithmetic),
+                     substitutions.js (offline swap table),
+                     report.js (the kitchen report's maths),
                      pantry-model.js, foods.js, food-catalog.js, supabase.js
   img/               dish photos (credits in img/CREDITS.md)
 backend/             FastAPI service (receipt OCR, recipes, chat, plan, images)
-  main.py            app, /scan, /cook, /identify, /dish-image, /meal-plan, /health
+  main.py            app, /scan, /cook, /identify, /dish-image, /meal-plan, /substitutions, /health
   recipes.py         recipe generation, ranking and annotate()
   recipes_ai.py      step-less suggestions for the chat (Claude on Bedrock)
-  chat.py            the kitchen helper and its tools
+  chat.py            the kitchen helper and its tools (focus_recipe, suggest_substitutions)
+  substitutions.py   POST /substitutions: what to use instead of one ingredient
   meal_plan.py       POST /meal-plan: a week of meals, chunked
   images.py          GET /dish-image: one picture per dish, cached
   identify.py        photo of a dish → recipe
   llm.py             the shared "answer as this pydantic model" Gemini call
 api/index.py         mounts backend/ as a Vercel Python function under /api
-supabase/            migrations 0001–0006 + schema.sql
+supabase/            migrations 0001–0007 + schema.sql
 scripts/             node --test suites, migration runner, DB smoke test
 vercel.json          routes /api/* to the function, everything else to frontend/
 ```
@@ -106,11 +128,12 @@ GEMINI_MODEL=gemini-2.5-flash          # the text model
 GEMINI_IMAGE_MODEL=gemini-2.5-flash-image   # pin the picture model; unset tries 3.5 → 3 → 2.5 flash-image
 ```
 
-Without a key, `/scan`, `/recipes`, `/meal-plan` and `/dish-image` return 503
-and the app uses its sample receipt, hardcoded dishes, stand-in photos and a
-week dealt from the dishes on hand. The chat runs on Claude via Bedrock and
-needs AWS credentials (see `backend/README.md`); without them the three plain
-commands still work offline.
+Without a key, `/scan`, `/recipes`, `/meal-plan` and `/dish-image` return 503:
+the first-run card says so and points at the Pantry tab (there is no sample
+receipt), and the app uses its hardcoded dishes, stand-in photos and a week
+dealt from the dishes on hand. The chat and `/substitutions` run on Claude via
+Bedrock and need AWS credentials (see `backend/README.md`); without them the
+three plain commands, the recipe's steps and the swap table still work offline.
 
 ## Endpoints
 
@@ -120,7 +143,8 @@ commands still work offline.
 | `POST /recipes` | `{ items, count, max_missing, request, prefs }` → ranked recipes |
 | `POST /cook` | subtract a cooked recipe's servings |
 | `POST /identify` | photo of a dish → its recipe. Set `IDENTIFY_STUB=1` for a canned response that needs no key |
-| `POST /chat` | `{ messages, pantry, prefs, recent_meals, shopping }` → `{ reply, actions, recipes }` |
+| `POST /chat` | `{ messages, pantry, prefs, recent_meals, shopping, focus_recipe? }` → `{ reply, actions, recipes }` |
+| `POST /substitutions` | `{ ingredient, dish_title, dish_ingredients, pantry, prefs }` → `{ substitutions: [{ use, from_pantry, ratio, note, pantry_names }] }` |
 | `POST /recipe-detail` | steps for one step-less recipe, written on demand |
 | `POST /meal-plan` | `{ items, prefs, days, start, request }` → `{ start, days: [{ date, meals }] }` |
 | `GET /dish-image` | `?title=&ingredients=&seed=` → JPEG bytes, cached for a year |
@@ -142,10 +166,13 @@ Sign-in and sync are optional — without them the app runs in demo mode.
 3. Authentication → URL Configuration: add your site URL and
    `http://localhost:4173/app/` to the redirect allow-list.
 
-An existing project needs the newest migration, `supabase/migrations/0006_shopping_plan.sql`
-(it adds `shopping`, `plan` and `plan_at` to `app_state`); `schema.sql` includes the
-same columns for a fresh project. Until it runs, the shopping list and the week
-stay in the browser's localStorage and nothing else breaks.
+An existing project needs the newest migrations: `0006_shopping_plan.sql` (adds
+`shopping`, `plan` and `plan_at` to `app_state`) and `0007_wave2.sql` (adds
+`price` to `pantry_items` and `ratings`, `cooked_log` and `events` to `app_state`
+for the ratings, the cooked log and the kitchen report; the column is
+`cooked_log` because `cooked` already holds the ids of dishes marked cooked).
+`schema.sql` includes the same columns for a fresh project. Until they run,
+those blobs stay in the browser's localStorage and nothing else breaks.
 
 Tables, RLS and the foods/consumption intelligence layer are documented in
 [DATABASE.md](DATABASE.md).
@@ -158,10 +185,11 @@ npm test          # node --test scripts/*.test.mjs
 ```
 
 Suites: the pantry model (expiry, allocation, undo), the units module, the
-ingredient matcher, the dish-image cache, the app itself through the
-Supabase/localStorage merge harness (tabs, servings, shopping list, chat
-actions, the week), the storage layer, and the migrations run against an
-in-process Postgres via PGlite.
+ingredient matcher, the dish-image cache, the timers, the swap table, the
+report's maths, the app itself through the Supabase/localStorage merge harness
+(tabs, servings, shopping list, chat actions, the week, cross-verification
+against the pantry, ratings, swaps, the events log), the storage layer, and the
+migrations run against an in-process Postgres via PGlite.
 
 ## Deploy
 

@@ -226,14 +226,50 @@ export function applyDishImages(root = typeof document === 'undefined' ? null : 
       names: String(img.getAttribute('data-dish-ings') || '').split(',').map(s => s.trim()).filter(Boolean),
       ingredients: [],
     };
-    const fallback = img.src || img.getAttribute('src') || '';
+    // A card may render with no src at all (nothing wrong is ever shown); the stand-in it
+    // would have used travels in data-dish-fallback and is only painted when nothing better comes.
+    const fallback = img.getAttribute('data-dish-fallback') || img.src || img.getAttribute('src') || '';
     getDishImage(dish, fallback).then(url => {
       if (img.isConnected === false || img.getAttribute('data-dish-img') !== slug) return;
       const upgraded = Boolean(url) && url !== fallback;
       if (upgraded) img.src = url;
+      else if (!img.getAttribute('src') && fallback) img.src = fallback;
       img.setAttribute('data-dish-img-done', upgraded ? 'done' : 'fallback');
     });
   }
+}
+
+/** The picture already in memory for a dish, synchronously, or '' — what a card paints
+    with on its first render so a cached picture is never preceded by a stand-in. */
+export function peekDishImage(dish) {
+  if (!dish || !dish.name) return '';
+  return memory.get(dishSlug(dish.name)) || '';
+}
+
+/**
+ * Load pictures into memory ahead of a render. `network: false` reads IndexedDB only (the
+ * cached deck at boot: fast, so the first paint is already right); `network: true` also
+ * fetches (a fresh deck holds its top cards up to `timeoutMs` so they appear correct rather
+ * than corrected). Resolves to how many of `dishes` are ready. Never rejects.
+ */
+export async function warmDishImages(dishes, { network = false, timeoutMs = 400 } = {}) {
+  const list = (Array.isArray(dishes) ? dishes : []).filter(d => d && d.name && needsGeneratedImage(d));
+  if (!list.length) return 0;
+  const gen = generation;
+  const tasks = list.map(async dish => {
+    try {
+      const slug = dishSlug(dish.name);
+      if (memory.has(slug)) return;
+      if (network) { await getDishImage(dish, ''); return; }
+      const cached = await storeGet(slug);
+      if (cached && cached.blob) {
+        const url = toUrl(cached.blob);
+        if (url && gen === generation) memory.set(slug, url);
+      }
+    } catch { /* a picture that cannot be warmed arrives the slow way */ }
+  });
+  await Promise.race([Promise.all(tasks), new Promise(resolve => setTimeout(resolve, Math.max(0, timeoutMs)))]);
+  return list.filter(d => memory.has(dishSlug(d.name))).length;
 }
 
 /** Start fetching pictures for a whole deck (fire-and-forget; the concurrency gate paces it). */

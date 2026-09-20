@@ -54,6 +54,7 @@
       </button>
       <div class="menu glass" id="profile-menu" role="menu" hidden>
         <button class="menu-item" type="button" role="menuitem" data-profile="preferences">Preferences</button>
+        <button class="menu-item" type="button" role="menuitem" data-profile="report">Kitchen report</button>
         <button class="menu-item" type="button" role="menuitem" data-profile="clear">Clear pantry</button>
         <button class="menu-item" type="button" role="menuitem" data-profile="theme" id="menu-theme">Dark mode</button>
         <button class="menu-item danger" type="button" role="menuitem" data-profile="auth" hidden>Sign out</button>
@@ -61,6 +62,10 @@
     </div>
   </div>
 </header>
+<!-- Loading: a thin sweep along the bottom edge of the top bar while recipes, the week or a swap
+     are being written (app.js beginBusy), and a small pill naming the job once it has taken a beat -->
+<div class="progress" id="progress" role="progressbar" aria-busy="false" aria-label="Working" hidden><i></i></div>
+<div class="busy-pill glass" id="busy-pill" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="busy-label"></span></div>
 
 <main class="stage">
   <!-- Curated / Explore: the swipe deck -->
@@ -151,7 +156,8 @@
         <span>Scan a receipt</span>
       </span>
     </button>
-    <button class="linkish" id="empty-sample" type="button">Or try a sample receipt</button>
+    <!-- app.js shows this when there is no backend to scan with -->
+    <p class="empty-offline" id="empty-offline" hidden>Connect the API in <code>shared/config.js</code> to scan receipts, or <button class="linkish accent" type="button" data-go-pantry>add items by hand from the Pantry tab</button>.</p>
   </section>
 
   <!-- Pantry: an in-flow page, not a slide-in panel -->
@@ -247,6 +253,10 @@
   </div>
   <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
   <form class="chat-form" id="chat-form">
+    <!-- voice input: hidden by app.js where the browser has no speech recognition -->
+    <button class="circle sm glass" id="btn-mic" type="button" aria-label="Speak your message" aria-pressed="false">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+    </button>
     <label class="sr-only" for="chat-input">Your message</label>
     <input id="chat-input" class="field" placeholder="What do you want to make?" autocomplete="off" maxlength="120" required>
     <button class="circle prominent" type="submit" aria-label="Send">
@@ -254,6 +264,36 @@
     </button>
   </form>
 </section>
+
+<!-- Cook mode: one step at a time over everything else; app.js fills it and ticks the timers -->
+<section class="cook" id="cook-mode" role="dialog" aria-modal="true" aria-labelledby="cook-title" tabindex="-1" hidden>
+  <div class="cook-top">
+    <div class="cook-head"><strong id="cook-title"></strong><small id="cook-count"></small></div>
+    <button class="circle sm glass muted" id="cook-close" type="button" aria-label="Close cook mode">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="cook-bar" aria-hidden="true"><i id="cook-progress"></i></div>
+  <div class="cook-main">
+    <div class="cook-step" id="cook-step" aria-live="polite"></div>
+    <div class="cook-ings" id="cook-ings"></div>
+    <div class="cook-actions" id="cook-actions"></div>
+  </div>
+  <div class="cook-nav">
+    <button class="circle glass" id="cook-prev" type="button" aria-label="Previous step">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <button class="circle prominent big" id="cook-next" type="button" aria-label="Next step">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+  </div>
+  <div class="cook-tray" id="cook-tray" aria-label="Timers" hidden></div>
+</section>
+<!-- A timer still running after cook mode closed: bottom-left, reopens it -->
+<button class="timer-pill glass" id="timer-pill" type="button" aria-label="Open cook mode" hidden>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+  <span id="timer-pill-text"></span>
+</button>
 
 <div class="toast glass" id="toast" role="status" aria-live="polite"></div>
 

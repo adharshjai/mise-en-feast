@@ -112,11 +112,11 @@ const round2 = n => Math.round(n * 100) / 100;
 /** At most `d` decimals, trailing zeros dropped: 1.5 -> "1.5", 2 -> "2", 3.785 -> "3.8". */
 const fmtNum = (n, d = 1) => Number(n.toFixed(d)).toString();
 
-/** "2 cloves" / "1 clove"; unknown nouns lose a plural s only at exactly one ("1 breast"). */
+/** "2 cloves" / "1 clove"; unknown nouns are singularised only at exactly one ("1 breast"). */
 function inflect(label, n) {
   if (n === 1) {
     if (PLURAL[label]) return label;
-    return label.replace(/([^s])s$/, '$1');
+    return singular(label);
   }
   return PLURAL[label] || label;
 }
@@ -126,6 +126,13 @@ function inflect(label, n) {
 function roundMetric(n) {
   if (n < 10) return Math.max(n > 0 ? 0.5 : 0, Math.round(n * 2) / 2);
   return Math.round(n / 5) * 5;
+}
+
+// Nobody counts 3.3 bananas. Anything counted — pieces and packages — reads at the
+// nearest half, and whatever is left of one never rounds away to nothing.
+export function roundHalf(n) {
+  const r = Math.round(n * 2) / 2;
+  return n > 0 && r <= 0 ? 0.5 : r;
 }
 
 /* ---------- parsing ---------- */
@@ -236,8 +243,8 @@ function formatCanonical({ amount, unit, label }) {
     if (n >= 1000 || r >= 1000) return `${fmtNum(n / 1000, 1)} ${unit === 'g' ? 'kg' : 'L'}`;
     return `${fmtNum(r, 1)} ${unit}`;
   }
-  const q = fmtNum(n, 1);
-  const shown = Number(q);
+  const shown = roundHalf(n);
+  const q = fmtNum(shown, 1);
   if (unit === 'pcs') return label ? `${q} ${inflect(label, shown)}` : `${q} pcs`;
   return `${q} ${inflect(label || 'pack', shown)}`;
 }
@@ -285,7 +292,9 @@ export function scaleAmount(text, factor) {
   const p = parseQuantity(raw);
   if (p.qty == null) return raw;
   const tail = qualifier(raw.replace(/(\d),(\d{3})\b/g, '$1$2'));
-  if (p.unit == null) return fmtNum(p.qty * f, 1) + tail;
+  // A bare number is a count of the ingredient the row already names, so it reads
+  // at the nearest half like every other count: "0.5 onion", never "0.7".
+  if (p.unit == null) return fmtNum(roundHalf(p.qty * f), 1) + tail;
   const c = toCanonical(p);
   c.amount *= f;
   return formatCanonical(c) + tail;
@@ -325,16 +334,27 @@ export const SERVING_SIZES = {
 };
 
 const singular = w => w.replace(/ies$/, 'y').replace(/(sh|ch|ss|x|o)es$/, '$1').replace(/([^s])s$/, '$1');
-const sizeFor = w => SERVING_SIZES[w] || SERVING_SIZES[singular(w)] || SERVING_SIZES[`${w}s`] || SERVING_SIZES[`${w}es`] || null;
+const inTable = (table, w) => table[w] ?? table[singular(w)] ?? table[`${w}s`] ?? table[`${w}es`] ?? null;
+const sizeFor = w => inTable(SERVING_SIZES, w);
+
+/**
+ * Spellings of a food key to try against a table, longest trailing phrase first.
+ * `headOnly` drops the describing words, which is what a table about the whole
+ * object needs: "chili flakes" must not weigh a chili, nor "rice vinegar" pour
+ * like rice — the head noun says what the thing actually is.
+ */
+function candidateNames(key, { headOnly = false } = {}) {
+  const norm = str(key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!norm) return [];
+  const words = norm.split(' ');
+  const out = [];
+  for (let i = 0; i < words.length; i++) out.push(words.slice(i).join(' '));   // whole key, then down to the head noun
+  if (!headOnly) for (let i = 0; i < words.length - 1; i++) out.push(words[i]);
+  return out;
+}
 
 function lookupServing(key) {
-  const norm = str(key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!norm) return null;
-  const words = norm.split(' ');
-  const candidates = [];
-  for (let i = 0; i < words.length; i++) candidates.push(words.slice(i).join(' '));   // whole key, then down to the head noun
-  for (let i = 0; i < words.length - 1; i++) candidates.push(words[i]);               // then the describing words alone
-  for (const c of candidates) { const hit = sizeFor(c); if (hit) return hit; }
+  for (const c of candidateNames(key)) { const hit = sizeFor(c); if (hit) return hit; }
   return null;
 }
 
@@ -342,8 +362,10 @@ function lookupServing(key) {
  * How many servings a pantry quantity represents for the food `key`, or null
  * when the text has no number or is packaging we cannot size ("1 bunch" — the
  * caller uses the catalog's package default). "1 head" of garlic is 10 servings.
- * When the quantity's family differs from the food's serving unit, g and ml are
- * treated as interchangeable and pcs falls back to the family default.
+ * When the quantity's family differs from the food's serving unit it is carried
+ * across by the food's own piece weight or density ("500 g" of cherry tomatoes is
+ * about 29 of them, not five 100 g helpings); only a food we have no figure for
+ * falls back to the family default.
  */
 export function servingsFor(key, text) {
   const c = toCanonical(text);
@@ -353,9 +375,107 @@ export function servingsFor(key, text) {
     if (entry && entry.head && c.label === 'head') return round2((c.amount * entry.head) / entry.size);
     return null;
   }
-  let per;
-  if (entry && entry.unit === c.unit) per = entry.size;
-  else if (entry && entry.unit !== 'pcs' && c.unit !== 'pcs') per = entry.size;   // g ≈ ml for the foods we list
-  else per = DEFAULT_SERVING[c.unit];
-  return round2(c.amount / per);
+  if (entry) {
+    if (entry.unit === c.unit) return round2(c.amount / entry.size);
+    const bridged = convertCanonical(c, { unit: entry.unit }, key);   // the piece weight or density, when we have one
+    if (bridged) return round2(bridged.amount / entry.size);
+    if (entry.unit !== 'pcs' && c.unit !== 'pcs') return round2(c.amount / entry.size);   // g ≈ ml for the foods we list
+  }
+  return round2(c.amount / DEFAULT_SERVING[c.unit]);
+}
+
+/* ---------- crossing families: count <-> weight <-> volume ---------- */
+
+/**
+ * Average grams in one of something people count. A receipt that says "4 kg of
+ * bananas" has to land in the pantry as a number of bananas when that is how the
+ * pantry already keeps them, and these are the weights that estimate stands on.
+ * Keyed like SERVING_SIZES: exact key, then the trailing phrase, plurals either way.
+ */
+export const PIECE_GRAMS = {
+  // fruit
+  apple: 182, apricot: 35, avocado: 170, banana: 118, blueberries: 0.7, cantaloupe: 550,
+  cherries: 8, clementine: 75, coconut: 400, date: 24, fig: 50, grape: 5, grapefruit: 230,
+  kiwi: 75, lemon: 58, lime: 67, mango: 200, nectarine: 140, orange: 131, peach: 150,
+  pear: 178, pineapple: 900, plum: 66, raspberries: 1.7, strawberries: 12, tangerine: 88,
+  // vegetables
+  artichoke: 128, asparagus: 16, beet: 82, 'bell pepper': 119, 'brussels sprout': 19,
+  broccoli: 350, cabbage: 900, carrots: 61, cauliflower: 600, celery: 40, chili: 45,
+  corn: 90, cucumber: 300, eggplant: 458, fennel: 234, 'green bean': 4, jalapeno: 14,
+  kale: 16, leek: 89, lettuce: 600, mushrooms: 18, okra: 11, onion: 150, parsnip: 85,
+  pepper: 119, potato: 173, radish: 4.5, 'red onion': 150, scallions: 15, shallot: 40,
+  'sweet potato': 130, tomatoes: 123, 'cherry tomatoes': 17, turnip: 122, zucchini: 196,
+  squash: 1000, pumpkin: 1000, ginger: 60,
+  garlic: 3,          // a clove, matching SERVING_SIZES; a whole head is ten of them
+  // protein, dairy, bakery
+  bacon: 15, bagel: 95, bread: 30, bun: 60, 'chicken breast': 174, 'chicken thighs': 80,
+  drumstick: 88, eggs: 50, 'hot dog': 45, 'pork chop': 130, salmon: 170, sausage: 75,
+  shrimp: 7, steak: 220, tofu: 400, tortilla: 45, butter: 113,
+  // store cupboard
+  olives: 4, pickles: 65,
+};
+
+/** Grams in one millilitre. Water is the honest default; these are the ones worth knowing. */
+export const DENSITY = {
+  'olive oil': 0.92, oil: 0.92, butter: 0.91, honey: 1.42, syrup: 1.33, 'maple syrup': 1.32,
+  milk: 1.03, cream: 1.0, yogurt: 1.03, yoghurt: 1.03, stock: 1.0, broth: 1.0,
+  'soy sauce': 1.2, vinegar: 1.01, wine: 0.99, 'white wine': 0.99, juice: 1.04,
+  flour: 0.53, sugar: 0.85, rice: 0.85, oats: 0.41, salt: 1.22,
+};
+
+/** Average grams per piece for the food `key`, or null when we have no honest figure. */
+export function pieceGrams(key) {
+  for (const c of candidateNames(key, { headOnly: true })) { const hit = inTable(PIECE_GRAMS, c); if (hit) return hit; }
+  return null;
+}
+/** Grams per millilitre for the food `key`; water (1) when we know nothing better. */
+export function densityOf(key) {
+  for (const c of candidateNames(key, { headOnly: true })) { const hit = inTable(DENSITY, c); if (hit) return hit; }
+  return 1;
+}
+
+/** A canonical amount in grams, or null when the family will not cross over. */
+function toGrams(c, key) {
+  if (c.unit === 'g') return c.amount;
+  if (c.unit === 'ml') return c.amount * densityOf(key);
+  if (c.unit === 'pcs') { const w = pieceGrams(key); return w ? c.amount * w : null; }
+  return null;   // a "pack" has no size of its own
+}
+
+/**
+ * Say a quantity in the unit a food is already kept in. `to` is a canonical-shaped
+ * `{ unit, label? }` — the unit family the pantry uses for this food — and crossing
+ * families leans on the food's average piece weight and density, so "4 kg" of bananas
+ * comes back as about 34 of them. Returns null when the conversion would be a guess
+ * (anything into or out of an unmeasured "1 bag"), and the caller keeps what it had.
+ * @returns {{ amount: number, unit: string, label?: string }|null}
+ */
+export function convertCanonical(from, to, key) {
+  if (!from || from.amount == null || !from.unit || !to || !to.unit) return null;
+  const out = { amount: from.amount, unit: to.unit };
+  if (to.label) out.label = to.label;
+  if (from.unit === to.unit) return out;
+  // A head of garlic and the like: the serving table knows how many pieces are in one.
+  const entry = lookupServing(key);
+  if (from.unit === 'pack' || to.unit === 'pack') {
+    const per = entry && entry.head ? entry.head : null;
+    if (!per || (from.unit === 'pack' ? from.label : to.label) !== 'head') return null;
+    out.amount = from.unit === 'pack' ? from.amount * per : from.amount / per;
+    return to.unit === 'pcs' || from.unit === 'pcs' ? out : null;
+  }
+  const grams = toGrams(from, key);
+  if (grams == null) return null;
+  if (to.unit === 'g') out.amount = grams;
+  else if (to.unit === 'ml') out.amount = grams / densityOf(key);
+  else if (to.unit === 'pcs') { const w = pieceGrams(key); if (!w) return null; out.amount = grams / w; }
+  else return null;
+  return out;
+}
+
+/**
+ * The same, from free text or a parsed object: `convertQuantity('4 kg', { unit: 'pcs',
+ * label: 'bananas' }, 'bananas')` -> `{ amount: 33.9, unit: 'pcs', label: 'bananas' }`.
+ */
+export function convertQuantity(input, to, key) {
+  return convertCanonical(toCanonical(input), to, key);
 }

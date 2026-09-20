@@ -50,9 +50,13 @@ create table if not exists public.pantry_items (
   daily_burn_rate    numeric not null default 0,
   item_type          text not null default 'event' check (item_type in ('continuous', 'event')),
   status             text not null default 'active' check (status in ('active', 'gone')),
-  created_at         timestamptz not null default now()
+  created_at         timestamptz not null default now(),
+  -- What the whole lot cost, from the receipt; null when added by hand (0007).
+  price              numeric
 );
 create index if not exists pantry_items_user_idx on public.pantry_items (user_id, status);
+-- Projects created from an earlier schema.sql pick the 0007 column up here.
+alter table public.pantry_items add column if not exists price numeric;
 
 -- -----------------------------------------------------------------------------
 -- receipts
@@ -117,12 +121,20 @@ create table if not exists public.app_state (
   -- The shopping list and the cached weekly plan, one blob each (0006).
   shopping       jsonb not null default '[]'::jsonb,
   plan           jsonb,
-  plan_at        timestamptz
+  plan_at        timestamptz,
+  -- Ratings, the cooked log (cooked_log: `cooked` above is the id set) and the events
+  -- log behind the kitchen report, one blob each (0007).
+  ratings        jsonb not null default '{}'::jsonb,
+  cooked_log     jsonb not null default '[]'::jsonb,
+  events         jsonb not null default '[]'::jsonb
 );
--- Projects created from an earlier schema.sql pick the 0006 columns up here.
+-- Projects created from an earlier schema.sql pick the 0006 and 0007 columns up here.
 alter table public.app_state add column if not exists shopping jsonb not null default '[]'::jsonb;
 alter table public.app_state add column if not exists plan jsonb;
 alter table public.app_state add column if not exists plan_at timestamptz;
+alter table public.app_state add column if not exists ratings jsonb not null default '{}'::jsonb;
+alter table public.app_state add column if not exists cooked_log jsonb not null default '[]'::jsonb;
+alter table public.app_state add column if not exists events jsonb not null default '[]'::jsonb;
 
 -- =============================================================================
 -- Row Level Security — each user only sees their own rows
