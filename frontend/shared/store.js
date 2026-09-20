@@ -33,6 +33,8 @@
 import { configured, getClient, getSession, getUser } from './supabase.js';
 
 export const LOCAL_KEY = 'pantry.state.v1';
+// A signed-in save the project would not take is parked here rather than dropped; see keepUnsaved.
+export const UNSAVED_KEY = 'pantry.unsaved.v1';
 export const PREFS_KEY = 'pantry.prefs.v1';
 export const SAVED_KEY = 'pantry.saved.v1';
 export const DECK_KEY = 'pantry.deck.v1';
@@ -120,6 +122,11 @@ function toRow(it, userId) {
     daily_burn_rate: it.burn,
     item_type: it.burn > 0 ? 'continuous' : 'event',
     status: 'active',
+    // The app calls it `variant` and the column (0004) is `variety`, so neither side of the
+    // round trip touched the other: a lot's label -- which the pantry row shows in place of
+    // the food's name -- reverted on every refresh. The column is `not null default
+    // 'Regular'`, so that is what "no variant" is stored as.
+    variety: it.variant || 'Regular',
   };
   // The price column arrives with 0007; a project that has not run it keeps saving
   // as long as no lot carries a price (only receipt lots do).
@@ -141,6 +148,7 @@ function fromRow(r) {
     burn: num(r.daily_burn_rate, 0),
     deducted: num(r.deducted_servings, 0),
     price: priceOf(r.price),
+    variant: str(r.variety) === 'Regular' ? '' : str(r.variety),
   };
 }
 
@@ -170,12 +178,83 @@ export function clearLocal() {
   try { localStorage.removeItem(LOCAL_KEY); } catch (err) { console.warn('[pantry] could not clear local state', err); }
 }
 
+/* ---------- a save the project would not take ----------
+   Signed in, the pantry lives in Supabase and nothing is mirrored locally, so a rejected
+   write used to be logged and forgotten: the pantry looked right until the next reload and
+   then came back empty. Park the snapshot instead, tagged with the account it belongs to so
+   one browser's two users never inherit each other's food, and let the next load pick it
+   back up and push it to the project. */
+export function keepUnsaved(userId, state, seq = 0) {
+  try {
+    localStorage.setItem(UNSAVED_KEY, JSON.stringify({ user_id: String(userId || ''), at: Date.now(), seq, state }));
+  } catch (err) {
+    console.warn('[pantry] could not park the unsaved pantry', err);
+  }
+}
+
+export function readUnsaved(userId) {
+  try {
+    const raw = localStorage.getItem(UNSAVED_KEY);
+    if (!raw) return null;
+    const held = JSON.parse(raw);
+    if (!held || String(held.user_id || '') !== String(userId || '')) return null;
+    const state = normalizeState(held.state);
+    if (state) state.parkedAt = Number(held.at) || 0;
+    return state;
+  } catch (err) {
+    console.warn('[pantry] could not read the unsaved pantry', err);
+    return null;
+  }
+}
+
+/** Drop the parked copy. With a `seq`, only if that is still the parked one: saves are
+    serialised but parked ahead of time, so an earlier save landing must not clear the park
+    of a later one that has not gone out yet. */
+export function clearUnsaved(seq) {
+  try {
+    if (seq != null) {
+      const raw = localStorage.getItem(UNSAVED_KEY);
+      if (!raw) return;
+      const held = JSON.parse(raw);
+      if (held && Number(held.seq) !== Number(seq)) return;
+    }
+    localStorage.removeItem(UNSAVED_KEY);
+  } catch (err) {
+    console.warn('[pantry] could not clear the unsaved pantry', err);
+  }
+}
+
+/** How long a park is trusted. Past that the account has almost certainly been used
+    elsewhere, and a copy this stale is likelier to resurrect deleted food than to rescue
+    anything. */
+export const UNSAVED_TTL = 7 * 86400000;
+
+/** Whether a parked save should be preferred over what the project returned. Yes while it
+    holds a lot the project has never seen -- that is the save that never landed. Comparing
+    lot COUNTS instead would throw the park away whenever a receipt added as many lots as
+    were cleared out, which is the case most likely to lose real food. Never on the strength
+    of being newer alone, or a pantry emptied on another device would come back. */
+export function parkedWins(parked, remote, at = 0) {
+  if (!parked || !parked.pantry.length) return false;
+  if (at && Date.now() - at > UNSAVED_TTL) return false;
+  if (!remote) return true;
+  const known = new Set(remote.pantry.map(it => String(it.id)));
+  return parked.pantry.some(it => !known.has(String(it.id)));
+}
+
 /* ---------- who are we saving as? ---------- */
+
+// The last account we resolved. Lets flush() park a snapshot synchronously, before any
+// await, which is the only thing that reliably runs while the page is being torn down.
+let lastUserId = null;
+let parkSeq = 0;         // which parked snapshot a given save is responsible for
 
 async function signedInUser() {
   if (!configured) return null;
   const session = await getSession();
-  return session && session.user ? session.user : null;
+  const user = session && session.user ? session.user : null;
+  if (user) lastUserId = user.id;
+  return user;
 }
 
 /* ---------- load ---------- */
@@ -186,8 +265,9 @@ let knownIds = new Set();
 
 /** Resolve to the saved state or null when nothing has been saved yet. */
 export async function loadState() {
+  let user = null;
   try {
-    const user = await signedInUser();
+    user = await signedInUser();
     if (!user) return readLocal();
 
     const client = await getClient();
@@ -200,17 +280,29 @@ export async function loadState() {
 
     const rows = items.data || [];
     knownIds = new Set(rows.map(r => str(r.id)));
-    if (rows.length === 0 && !meta.data) return null;   // brand-new account: nothing saved yet
+    const remote = rows.length === 0 && !meta.data
+      ? null                                            // brand-new account: nothing saved yet
+      : normalizeState({
+        pantry: rows.map(fromRow),
+        skipped: meta.data ? meta.data.skipped : [],
+        cooked: meta.data ? meta.data.cooked : [],
+        chosen: meta.data ? meta.data.chosen : [],
+      });
 
-    return normalizeState({
-      pantry: rows.map(fromRow),
-      skipped: meta.data ? meta.data.skipped : [],
-      cooked: meta.data ? meta.data.cooked : [],
-      chosen: meta.data ? meta.data.chosen : [],
-    });
+    // A save the project rejected parked its snapshot. Take it back while it still holds
+    // lots the project does not, and the session's first save pushes them up for good.
+    const parked = readUnsaved(user.id);
+    if (parkedWins(parked, remote, parked && parked.parkedAt)) {
+      // knownIds stays the project's ids: the first save upserts the parked lots on top and
+      // deletes nothing the project holds but the park has since dropped.
+      console.warn(`[pantry] restoring ${parked.pantry.length} lot(s) from a save the project would not take; will retry`);
+      return parked;
+    }
+    return remote;
   } catch (err) {
     console.warn('[pantry] loadState failed', err);
-    return null;
+    // Couldn't read the project at all. A parked save is better than an empty pantry.
+    return (user && readUnsaved(user.id)) || null;
   }
 }
 
@@ -225,13 +317,36 @@ let inflight = Promise.resolve();
    entire pantry save. Instead the missing column is dropped, the write retried, and the
    column remembered for the session, so the data the project can hold is always saved. */
 const missingColumns = new Map();   // table -> Set of column names the project does not have
+/* PostgREST names a missing column in two different ways, and a write only ever uses the
+   second. Selecting one is Postgres' own 42703 ("column pantry_items.price does not
+   exist"), but an insert or upsert naming one never reaches Postgres: PostgREST checks its
+   schema cache first and answers PGRST204 ("Could not find the 'price' column of
+   'pantry_items' in the schema cache"). Matching only the 42703 wording meant every save
+   carrying a price -- which is every receipt lot -- threw instead of retrying without it.
+   An error we cannot read a column name out of is a real error, and is rethrown. */
+const MISSING_COLUMN_PATTERNS = [
+  /could not find the '([^']+)' column of '[^']*' in the schema cache/i,   // PGRST204: any write
+  /column (?:[\w$]+\.)?"?([\w$]+)"? does not exist/i,                      // 42703: a select
+];
 const undefinedColumn = error => {
   if (!error) return null;
-  const m = /column (?:[a-z_]+\.)?"?([a-z_]+)"? does not exist/i.exec(String(error.message || ''));
-  if (m) return m[1];
-  return String(error.code) === '42703' ? '' : null;
+  const message = String((error && (error.message || error.msg)) || '');
+  for (const re of MISSING_COLUMN_PATTERNS) {
+    const m = re.exec(message);
+    if (m && m[1]) return m[1];
+  }
+  return null;
 };
 const stripColumns = (rows, cols) => (cols && cols.size ? rows.map(r => { const o = { ...r }; for (const c of cols) delete o[c]; return o; }) : rows);
+/* PostgREST hands back a plain object, not an Error. Thrown as-is it reaches the console as
+   "[object Object]" with no stack and no message, which is how a pantry save could fail on
+   every receipt without leaving a legible trace. Wrap it, keeping the code and hint. */
+const asError = (error, table) => {
+  if (error instanceof Error) return error;
+  const e = new Error(`${table}: ${(error && error.message) || 'upsert failed'}`);
+  if (error) { e.code = error.code; e.details = error.details; e.hint = error.hint; e.postgrest = error; }
+  return e;
+};
 /** Upsert that survives a column the project has not migrated yet. Throws any other error. */
 export async function upsertTolerant(client, table, rows, opts) {
   const list = Array.isArray(rows) ? rows : [rows];
@@ -240,7 +355,7 @@ export async function upsertTolerant(client, table, rows, opts) {
     const { error } = await client.from(table).upsert(Array.isArray(rows) ? batch : batch[0], opts);
     if (!error) return;
     const col = undefinedColumn(error);
-    if (!col) throw error;
+    if (!col) throw asError(error, table);
     if (!missingColumns.has(table)) missingColumns.set(table, new Set());
     missingColumns.get(table).add(col);
     console.warn(`[pantry] ${table} has no "${col}" column yet (run supabase/migrations); saving without it`);
@@ -249,29 +364,35 @@ export async function upsertTolerant(client, table, rows, opts) {
   throw new Error(`${table}: too many missing columns`);
 }
 
-async function persist(state) {
+async function persist(state, seq) {
   const user = await signedInUser();
   if (!user) { writeLocal(state); return; }
 
-  const client = await getClient();
-  const rows = state.pantry.map(it => toRow(it, user.id));
-  const currentIds = new Set(rows.map(r => r.id));
+  try {
+    const client = await getClient();
+    const rows = state.pantry.map(it => toRow(it, user.id));
+    const currentIds = new Set(rows.map(r => r.id));
 
-  if (rows.length) await upsertTolerant(client, 'pantry_items', rows, { onConflict: 'id' });
-  const gone = [...knownIds].filter(id => !currentIds.has(id));
-  if (gone.length) {
-    const { error } = await client.from('pantry_items').delete().eq('user_id', user.id).in('id', gone);
-    if (error) throw error;
+    if (rows.length) await upsertTolerant(client, 'pantry_items', rows, { onConflict: 'id' });
+    const gone = [...knownIds].filter(id => !currentIds.has(id));
+    if (gone.length) {
+      const { error } = await client.from('pantry_items').delete().eq('user_id', user.id).in('id', gone);
+      if (error) throw error;
+    }
+    knownIds = currentIds;
+
+    await upsertTolerant(client, 'app_state', {
+      user_id: user.id,
+      skipped: state.skipped,
+      cooked: state.cooked,
+      chosen: state.chosen,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+    clearUnsaved(seq);                   // it is on the server now; this park is stale
+  } catch (err) {
+    keepUnsaved(user.id, state, seq);    // don't let the pantry die with the tab
+    throw err;
   }
-  knownIds = currentIds;
-
-  await upsertTolerant(client, 'app_state', {
-    user_id: user.id,
-    skipped: state.skipped,
-    cooked: state.cooked,
-    chosen: state.chosen,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: 'user_id' });
 }
 
 function flush() {
@@ -280,9 +401,15 @@ function flush() {
   pending = null;
   if (!state) return;
   // Serialise saves so a slow request can't be overtaken by a later one.
+  // Park the snapshot first, then write. The remote call is async and the browser is free
+  // to cancel it mid-teardown on a refresh, so by the time a failure is observable there
+  // may be no turn left to react in. Written ahead, the copy is already on disk whatever
+  // happens next, and persist() clears it the moment the project confirms the save.
+  const seq = ++parkSeq;
+  if (lastUserId) keepUnsaved(lastUserId, state, seq);
   inflight = inflight
-    .then(() => persist(state))
-    .catch(err => console.warn('[pantry] saveState failed', err));
+    .then(() => persist(state, seq))
+    .catch(err => console.warn('[pantry] saveState failed; the pantry is parked locally and will be retried', err));
 }
 
 /** Queue a save of the given state (~400ms debounce; latest call wins). Never throws. */
@@ -1082,8 +1209,9 @@ async function persistShopping(rows) {
   const user = await signedInUser();
   if (!user) return;
   const client = await getClient();
-  const { error } = await client.from('app_state').upsert({ user_id: user.id, shopping: rows }, { onConflict: 'user_id' });
-  if (error) throw error;
+  // The one app_state write that was not tolerant: on a project that never ran 0006 it took
+  // the whole shopping list down instead of saving what the project can hold.
+  await upsertTolerant(client, 'app_state', { user_id: user.id, shopping: rows }, { onConflict: 'user_id' });
 }
 
 function flushShopping() {
