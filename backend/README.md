@@ -11,7 +11,7 @@ what expires first.
 | `POST /recipes` | `{ items, count, max_missing, request }` → ranked recipes |
 | `POST /cook` | subtract a cooked recipe's servings |
 | `POST /identify` | multipart `file` (photo of a dish) → its recipe. **Skeleton**: 501 until wired up, see below |
-| `GET /health` | `{ ok, model, key_set }` |
+| `GET /health` | `{ ok, provider, model, key_set }`, plus `vision_model`, `nvidia_base_url`, `nvidia_key_set` when the provider is `nvidia` |
 
 ## Run locally
 
@@ -25,6 +25,51 @@ uvicorn main:app --reload --port 8000
 
 Serve the frontend from `frontend/` (`python3 -m http.server 4173`); on localhost
 it talks to `http://localhost:8000` automatically.
+
+## Providers
+
+`POST /scan` reads the receipt with Gemini by default, or with an NVIDIA vision
+model through NVIDIA's OpenAI-compatible API when `LLM_PROVIDER=nvidia`. Only
+`/scan` switches: `/recipes` and `/identify` always use Gemini, so keep
+`GEMINI_API_KEY` set for those.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LLM_PROVIDER` | `gemini` | `nvidia` switches `/scan`; anything else means Gemini |
+| `NVIDIA_API_KEY` | | required when `nvidia`; create one at build.nvidia.com |
+| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | point it at a self-hosted NIM if you run one |
+| `NVIDIA_VISION_MODEL` | `nvidia/nemotron-nano-12b-v2-vl` | any vision-capable chat model on that endpoint |
+
+All four are read per request, so editing `.env` and restarting is enough. On the
+command line they beat `.env` (`load_dotenv` never overrides a variable that is
+already set):
+
+```sh
+cd backend
+LLM_PROVIDER=nvidia NVIDIA_API_KEY=... .venv/bin/uvicorn main:app --port 8000
+
+# in another terminal
+curl -s http://localhost:8000/health
+# {"ok":true,"provider":"nvidia","model":"gemini-3.5-flash-lite","key_set":true,
+#  "vision_model":"nvidia/nemotron-nano-12b-v2-vl","nvidia_base_url":"https://integrate.api.nvidia.com/v1","nvidia_key_set":true}
+curl -s -F file=@dev/receipt.png http://localhost:8000/scan | python3 -m json.tool
+```
+
+(`dev/receipt.png` is the synthetic receipt rendered by `dev/make_receipt.py`;
+any receipt photo works.)
+
+What the NVIDIA path does (`call_nvidia_vision` in `main.py`): one non-streaming
+`chat.completions` call carrying the same `PROMPT` Gemini gets plus a text
+rendering of the `ParsedReceipt` schema (the API has no `response_schema`), and
+the image as a base64 data URL (photos over 4 MB are downscaled to 2048 px JPEG
+first). JSON mode (`response_format: json_object`) is requested; if the model
+rejects it (NVIDIA lists structured output as unsupported for the Nemotron VL
+model, so expect this) the call is retried once without and JSON mode is skipped
+for that model from then on. The reply is parsed leniently either way (code
+fence stripped, outermost `{...}` taken) before `ParsedReceipt` validation and
+the usual `enrich()`. Errors map like Gemini's: 503 when
+`NVIDIA_API_KEY` is missing, 502 when the model call or the parse fails twice,
+400 for a PDF (the NVIDIA path takes images only).
 
 ## Deployed
 
