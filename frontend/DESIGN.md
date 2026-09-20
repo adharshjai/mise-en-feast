@@ -6,15 +6,18 @@ is the identity; everything around it stays still so the glass reads as material
 
 ## Tokens (`shared/tokens.css`)
 
-| Role | Value |
-|---|---|
-| Ground | `#12100E` near-black with a brown undertone, flat (no ambient gradients) |
-| Raised surface | `#1C1917` for content cards |
-| Text | `#F4EFE8`; secondary `#A8A29E`; hints `#8F8880` |
-| Accent | `#FF7A1A` flat orange, dark text on it. Primary actions only (Scan, Cook, Add to pantry, Done, Continue) |
-| Slate | `#64748B` for skip and neutral states |
-| Freshness | green `#3DD68C`, yellow `#F5C242`, red `#FF5A4E` — these three appear nowhere else |
-| Hairline | `rgba(255,255,255,.08)` for dividers |
+| Role | Light (default) | Dark (`html[data-theme="dark"]`) |
+|---|---|---|
+| Ground | `#F5F0E3` cream, flat (no ambient gradients) | `#12100E` near-black with a brown undertone |
+| Raised surface | `#FFFCF4` for content cards | `#1C1917` |
+| Text | `#23211A`; secondary `#5D5B50`; hints `#78766B` | `#F4EFE8`; secondary `#A8A29E`; hints `#8F8880` |
+| Accent | `#0B6E4F` emerald fills, `#0A5C42` for text and icons, cream text on it. Primary actions only (Scan, Cook, Add to pantry, Done, Continue) | `#2EBD7C` fills, `#5FD9A0` text, dark text on it |
+| Slate | `#64748B` for skip and neutral states | same |
+| Freshness | green `#1FA463`, yellow `#E0A100` (`#94650A` as text), red `#D9363E` — these three appear nowhere else | `#3DD68C`, `#F5C242`, `#FF5A4E` |
+| Hairline | `rgba(var(--ink), .08)` for dividers; `--ink` is the text colour as an rgb triplet | same rule, light ink |
+
+The theme is chosen from the profile menu in the app and saved per browser; a head script on every page applies it before first paint. Layout files never hardcode a colour: use the tokens, `rgba(var(--ink), a)` for hairlines and hovers, `rgba(var(--accent-rgb), a)` for tints, and `rgba(var(--shadow), calc(a * var(--shadow-k)))` for shadows.
+
 | Radii | 24px cards, 28px sheets, pills for buttons |
 | Glass | `.glass`: translucent white gradient, `backdrop-filter: blur(28px) saturate(170%)`, a 1px specular top edge, neutral shadow. Navigation layer only: nav capsule, buttons, badges, sheets, side panel, toasts. Never on content blocks. |
 | Shadows | neutral and grey only. No coloured glow shadows, no `0 0 Npx` halos. |

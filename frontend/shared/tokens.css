@@ -1,24 +1,82 @@
-/* Pantry shared tokens: warm dark base, one accent, glass on the navigation layer only.
-   Imported by app/styles.css, the landing page and the login page. */
+/* Pantry shared tokens: cream ground with an emerald accent by default, a warm-dark variant
+   under html[data-theme="dark"]. Imported by app/styles.css, the landing page and the login page.
+   Layout files never hardcode a colour: hairlines, hovers and shadows use the rgb triplets below. */
 
 :root {
-  --bg: #12100E;
-  --surface: #1C1917;
-  --text: #F4EFE8;
-  --text-2: #A8A29E;
-  --text-3: #8F8880;
-  --accent: #FF7A1A;
-  --on-accent: #1A0E05;
-  --slate: #64748B;
-  --green: #3DD68C;
-  --yellow: #F5C242;
-  --red: #FF5A4E;
+  color-scheme: light;
+  --bg: #F5F0E3;            /* cream ground */
+  --surface: #FFFCF4;       /* card / sheet surface */
+  --accent: #0B6E4F;        /* emerald fills */
+  --accent-text: #0A5C42;   /* emerald for text and icons */
+  --accent-hover: #084132;  /* link hover */
+  --on-accent: #FFFCF4;     /* text on emerald */
+  --text: #23211A;
+  --text-2: #5D5B50;
+  --text-3: #78766B;
+  --green: #1FA463;         /* fresh */
+  --yellow: #E0A100;        /* running low */
+  --yellow-text: #94650A;   /* yellow as text */
+  --red: #D9363E;           /* expiring / error */
+  --slate: #64748B;         /* skip / neutral */
+  /* rgb triplets, always used with an alpha */
+  --ink: 35, 33, 26;         /* --text: hairlines, hovers, wells */
+  --accent-rgb: 11, 110, 79; /* --accent: tinted backgrounds */
+  --red-rgb: 217, 54, 62;
+  --yellow-rgb: 224, 161, 0;
+  --green-rgb: 31, 164, 99;
+  --slate-rgb: 100, 116, 139;
+  --shadow: 35, 33, 26;      /* shadow colour; --shadow-k scales every shadow alpha */
+  --shadow-k: .35;
+  --img-ph: #EAE3D2;         /* placeholder behind dish photos while they load */
+  --well: rgba(var(--ink), .05);                /* inputs and segmented controls */
+  --raised: #FFFCF4;                            /* the selected segment / tab */
+  --veil: rgba(35, 33, 26, .38);
+  /* materials */
+  --glass-bg: linear-gradient(135deg, rgba(255,255,255,.62), rgba(255,255,255,.38) 45%, rgba(255,255,255,.50));
+  --glass-bg-hover: linear-gradient(135deg, rgba(255,255,255,.82), rgba(255,255,255,.56) 45%, rgba(255,255,255,.70));
+  --glass-edge: rgba(255,255,255,.85);
+  --glass-edge-lo: rgba(var(--ink), .08);
+  --sheet-bg: linear-gradient(135deg, rgba(255,252,244,.94), rgba(250,246,236,.90) 45%, rgba(255,252,244,.92));
   --radius: 24px;
   --font: "Outfit", "Avenir Next", "Helvetica Neue", sans-serif;
   --spring: cubic-bezier(.2, .9, .25, 1.25);
   --ease: cubic-bezier(.2, .8, .2, 1);
   --card-w: 420px;
   --card-h: 580px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #12100E;
+  --surface: #1C1917;
+  --accent: #2EBD7C;
+  --accent-text: #5FD9A0;
+  --accent-hover: #8AE6BA;
+  --on-accent: #08211A;
+  --text: #F4EFE8;
+  --text-2: #A8A29E;
+  --text-3: #8F8880;
+  --green: #3DD68C;
+  --yellow: #F5C242;
+  --yellow-text: #F5C242;
+  --red: #FF5A4E;
+  --slate: #64748B;
+  --ink: 244, 239, 232;
+  --accent-rgb: 46, 189, 124;
+  --red-rgb: 255, 90, 78;
+  --yellow-rgb: 245, 194, 66;
+  --green-rgb: 61, 214, 140;
+  --shadow: 0, 0, 0;
+  --shadow-k: 1;
+  --img-ph: #0E0C0A;
+  --well: rgba(0, 0, 0, .25);
+  --raised: linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.06));
+  --veil: rgba(18, 16, 14, .62);
+  --glass-bg: linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.035) 45%, rgba(255,255,255,.07));
+  --glass-bg-hover: linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.07) 45%, rgba(255,255,255,.11));
+  --glass-edge: rgba(255,255,255,.22);
+  --glass-edge-lo: rgba(0,0,0,.35);
+  --sheet-bg: linear-gradient(135deg, rgba(44,40,37,.86), rgba(28,25,23,.80) 45%, rgba(36,32,29,.84));
 }
 
 * { box-sizing: border-box; }
@@ -34,8 +92,8 @@ body {
   font-variant-numeric: tabular-nums;
 }
 button { font: inherit; color: inherit; }
-a { color: var(--accent); text-decoration: none; }
-a:hover { color: #FFA05A; }
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
 h1, h2, h3, p { margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .hidden { display: none !important; }
@@ -46,31 +104,31 @@ h1, h2, h3, p { margin: 0; }
 
 /* ---------- materials ---------- */
 .glass {
-  background: linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.035) 45%, rgba(255,255,255,.07));
+  background: var(--glass-bg);
   -webkit-backdrop-filter: blur(28px) saturate(170%);
   backdrop-filter: blur(28px) saturate(170%);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.22),
-    inset 0 -1px 0 rgba(0,0,0,.35),
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 var(--glass-edge-lo),
     inset 1px 0 0 rgba(255,255,255,.05),
-    0 1px 2px rgba(0,0,0,.35),
-    0 14px 40px rgba(0,0,0,.35);
+    0 1px 2px rgba(var(--shadow), calc(.35 * var(--shadow-k))),
+    0 14px 40px rgba(var(--shadow), calc(.35 * var(--shadow-k)));
 }
 .prominent {
   background: var(--accent);
   color: var(--on-accent);
   box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.5),
-    inset 0 -2px 6px rgba(120,40,0,.35),
-    0 1px 2px rgba(0,0,0,.35),
-    0 10px 24px rgba(0,0,0,.35);
+    inset 0 1px 0 rgba(255,255,255,.35),
+    inset 0 -2px 6px rgba(0,0,0,.25),
+    0 1px 2px rgba(var(--shadow), calc(.35 * var(--shadow-k))),
+    0 10px 24px rgba(var(--shadow), calc(.35 * var(--shadow-k)));
 }
 .card-shadow, .card {
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.06),
-    0 2px 4px rgba(0,0,0,.3),
-    0 14px 28px rgba(0,0,0,.35),
-    0 48px 90px rgba(0,0,0,.45);
+    0 2px 4px rgba(var(--shadow), calc(.3 * var(--shadow-k))),
+    0 14px 28px rgba(var(--shadow), calc(.35 * var(--shadow-k))),
+    0 48px 90px rgba(var(--shadow), calc(.45 * var(--shadow-k)));
 }
 
 /* ---------- controls ---------- */
@@ -91,24 +149,23 @@ h1, h2, h3, p { margin: 0; }
 .circle.muted { color: var(--text-2); }
 .pill:hover, .circle:hover { transform: translateY(-2px); }
 .glass.pill:hover, .glass.circle:hover, .glass:is(button):hover {
-  background: linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.07) 45%, rgba(255,255,255,.11));
+  background: var(--glass-bg-hover);
   color: var(--text);
 }
-.ghost:hover { background: rgba(255,255,255,.08); }
+.ghost:hover { background: rgba(var(--ink), .08); }
 .prominent:hover {
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.55), inset 0 -2px 6px rgba(120,40,0,.35), 0 1px 2px rgba(0,0,0,.35), 0 14px 32px rgba(0,0,0,.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.4), inset 0 -2px 6px rgba(0,0,0,.25), 0 1px 2px rgba(var(--shadow), calc(.35 * var(--shadow-k))), 0 14px 32px rgba(var(--shadow), calc(.4 * var(--shadow-k)));
 }
 .pill:active, .circle:active { transform: translateY(0) scale(.97); }
 :is(button, a, input, [tabindex]):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .linkish { background: none; border: 0; padding: 4px 6px; cursor: pointer; color: var(--text-2); font-size: 14px; font-weight: 500; border-radius: 8px; }
 .linkish:hover { color: var(--text); }
-.linkish.accent { color: var(--accent); font-weight: 600; }
-.linkish.accent:hover { color: #FFA05A; }
+.linkish.accent { color: var(--accent-text); font-weight: 600; }
+.linkish.accent:hover { color: var(--accent-hover); }
 .linkish.dim { color: var(--text-3); font-size: 13px; }
 .field {
-  height: 40px; padding: 0 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12);
-  background: rgba(0,0,0,.25); color: var(--text); font: inherit; font-size: 14px; min-width: 0;
+  height: 40px; padding: 0 14px; border-radius: 12px; border: 1px solid rgba(var(--ink), .14);
+  background: var(--well); color: var(--text); font: inherit; font-size: 14px; min-width: 0;
 }
 .field:focus { outline: none; border-color: var(--accent); }
 .field.short { width: 84px; }
-

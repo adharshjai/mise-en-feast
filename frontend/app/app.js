@@ -2083,10 +2083,21 @@ profileMenu.addEventListener('click', e => {
   closeProfileMenu();
   if (b.dataset.profile === 'preferences') return openProfile();
   if (b.dataset.profile === 'clear') return clearPantry();
+  if (b.dataset.profile === 'theme') return toggleTheme();
   if (b.dataset.profile === 'auth') return b.dataset.action === 'signin'
     ? location.assign('../login/')
     : doSignOut(b);
 });
+// Light / dark: html[data-theme] drives the tokens; the choice is per browser (the head script
+// applies it before first paint on every page). The menu item names the mode you'd switch to.
+const themeBtn = $('#menu-theme');
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
+  try { localStorage.setItem('pantry-theme', t); } catch (_) {}
+}
+function toggleTheme() { applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); }
+themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? 'Light mode' : 'Dark mode';
 // Account row in the profile menu: sign out (signed in), sign in (demo), hidden (no auth configured).
 function wireAccountButton(session) {
   const b = profileMenu.querySelector('[data-profile="auth"]');

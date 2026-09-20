@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>/* theme before first paint: the saved choice, else light */(function(){var t;try{t=localStorage.getItem('pantry-theme')}catch(e){}document.documentElement.dataset.theme=t==='dark'?'dark':'light'})()</script>
 <title>Pantry</title>
 <link rel="icon" type="image/svg+xml" href="shared/mark.svg">
 <script src="shared/config.js"></script>
@@ -28,7 +29,7 @@
 
 <header class="topbar wrap">
   <a class="wordmark" href="./" aria-label="Pantry home">
-    <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" fill="#FF7A1A"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" fill="#1A0E05"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" fill="#1A0E05"/><path d="M17.2 3.6l-3.6 7.2" stroke="#1A0E05" stroke-width="2.6" stroke-linecap="round"/></svg>
+    <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" style="fill:var(--on-accent)"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" style="fill:var(--on-accent)"/><path d="M17.2 3.6l-3.6 7.2" style="stroke:var(--on-accent)" stroke-width="2.6" stroke-linecap="round"/></svg>
     <span>Pantry</span>
   </a>
   <nav class="glass pillbar" aria-label="Primary">
@@ -194,7 +195,7 @@
 <footer class="foot wrap">
   <div class="foot-row">
     <a class="wordmark" href="./" aria-label="Pantry home">
-      <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" fill="#FF7A1A"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" fill="#1A0E05"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" fill="#1A0E05"/><path d="M17.2 3.6l-3.6 7.2" stroke="#1A0E05" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" style="fill:var(--on-accent)"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" style="fill:var(--on-accent)"/><path d="M17.2 3.6l-3.6 7.2" style="stroke:var(--on-accent)" stroke-width="2.6" stroke-linecap="round"/></svg>
       <span>Pantry</span>
     </a>
     <nav class="foot-links" aria-label="Footer">
