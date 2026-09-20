@@ -220,6 +220,35 @@ let pending = null;      // latest state reference handed to saveState
 let timer = null;
 let inflight = Promise.resolve();
 
+/* A project that has not run every migration is missing some columns (0006 and 0007 add
+   several). A write that names one is rejected whole by PostgREST, which used to cost the
+   entire pantry save. Instead the missing column is dropped, the write retried, and the
+   column remembered for the session, so the data the project can hold is always saved. */
+const missingColumns = new Map();   // table -> Set of column names the project does not have
+const undefinedColumn = error => {
+  if (!error) return null;
+  const m = /column (?:[a-z_]+\.)?"?([a-z_]+)"? does not exist/i.exec(String(error.message || ''));
+  if (m) return m[1];
+  return String(error.code) === '42703' ? '' : null;
+};
+const stripColumns = (rows, cols) => (cols && cols.size ? rows.map(r => { const o = { ...r }; for (const c of cols) delete o[c]; return o; }) : rows);
+/** Upsert that survives a column the project has not migrated yet. Throws any other error. */
+export async function upsertTolerant(client, table, rows, opts) {
+  const list = Array.isArray(rows) ? rows : [rows];
+  let batch = stripColumns(list, missingColumns.get(table));
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const { error } = await client.from(table).upsert(Array.isArray(rows) ? batch : batch[0], opts);
+    if (!error) return;
+    const col = undefinedColumn(error);
+    if (!col) throw error;
+    if (!missingColumns.has(table)) missingColumns.set(table, new Set());
+    missingColumns.get(table).add(col);
+    console.warn(`[pantry] ${table} has no "${col}" column yet (run supabase/migrations); saving without it`);
+    batch = stripColumns(batch, new Set([col]));
+  }
+  throw new Error(`${table}: too many missing columns`);
+}
+
 async function persist(state) {
   const user = await signedInUser();
   if (!user) { writeLocal(state); return; }
@@ -228,10 +257,7 @@ async function persist(state) {
   const rows = state.pantry.map(it => toRow(it, user.id));
   const currentIds = new Set(rows.map(r => r.id));
 
-  if (rows.length) {
-    const { error } = await client.from('pantry_items').upsert(rows, { onConflict: 'id' });
-    if (error) throw error;
-  }
+  if (rows.length) await upsertTolerant(client, 'pantry_items', rows, { onConflict: 'id' });
   const gone = [...knownIds].filter(id => !currentIds.has(id));
   if (gone.length) {
     const { error } = await client.from('pantry_items').delete().eq('user_id', user.id).in('id', gone);
@@ -239,14 +265,13 @@ async function persist(state) {
   }
   knownIds = currentIds;
 
-  const { error } = await client.from('app_state').upsert({
+  await upsertTolerant(client, 'app_state', {
     user_id: user.id,
     skipped: state.skipped,
     cooked: state.cooked,
     chosen: state.chosen,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'user_id' });
-  if (error) throw error;
 }
 
 function flush() {
@@ -351,7 +376,7 @@ export const titleKey = t => str(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').tr
 export function cleanTitles(v) {
   const out = [], seen = new Set();
   for (const raw of (typeof v === 'string' ? [v] : list(v))) {
-    const t = str(raw).replace(/[ -]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE_LEN).trim();
+    const t = str(raw).replace(/[-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE_LEN).trim();
     const k = titleKey(t);
     if (!t || !k || seen.has(k)) continue;
     seen.add(k);
@@ -964,13 +989,12 @@ export function saveDeck(dishes, signature) {
         const user = await signedInUser();
         if (!user) return;
         const client = await getClient();
-        const { error } = await client.from('app_state').upsert({
+        await upsertTolerant(client, 'app_state', {
           user_id: user.id,
           deck: list,
           deck_at: new Date(at).toISOString(),
           deck_signature: str(signature),
         }, { onConflict: 'user_id' });
-        if (error) throw error;
       });
     }
   } catch (err) {
@@ -1154,12 +1178,11 @@ export function savePlan(plan) {
         const user = await signedInUser();
         if (!user) return;
         const client = await getClient();
-        const { error } = await client.from('app_state').upsert({
+        await upsertTolerant(client, 'app_state', {
           user_id: user.id,
           plan: snapshot,
           plan_at: snapshot ? new Date(snapshot.at || Date.now()).toISOString() : null,
         }, { onConflict: 'user_id' });
-        if (error) throw error;
       });
     }
   } catch (err) {
@@ -1230,8 +1253,7 @@ function blobStore(label, localKey, column, normalize, empty) {
     const user = await signedInUser();
     if (!user) return;
     const client = await getClient();
-    const { error } = await client.from('app_state').upsert({ user_id: user.id, [column]: v }, { onConflict: 'user_id' });
-    if (error) throw error;
+    await upsertTolerant(client, 'app_state', { user_id: user.id, [column]: v }, { onConflict: 'user_id' });
   }
   function flushBlob() {
     if (blobTimer) { clearTimeout(blobTimer); blobTimer = null; }
