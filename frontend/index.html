@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pantry</title>
 <link rel="icon" type="image/svg+xml" href="shared/mark.svg">
+<script src="shared/config.js"></script>
+<script>
+/* Supabase sends OAuth and magic-link returns to the project's Site URL (this page)
+   whenever the requested redirect isn't on its allow-list. The session tokens arrive
+   in the URL; hand them to the app, which knows how to read them. */
+(function () {
+  var h = location.hash || '', q = location.search || '';
+  if (/(^|[#&])(access_token|refresh_token|error|error_description)=/.test(h) || /[?&]code=/.test(q)) {
+    location.replace('app/' + q + h);
+  }
+})();
+</script>
 <meta name="description" content="Pantry fills itself from your grocery receipts and tells you what to cook, ordered by what is expiring first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,7 +32,7 @@
     <span>Pantry</span>
   </a>
   <nav class="glass pillbar" aria-label="Primary">
-    <a class="pill ghost" href="login/">Sign in</a>
+    <a class="pill ghost" id="nav-signin" href="login/">Sign in</a>
     <a class="pill prominent go" href="app/">
       <span>Open the app</span>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
@@ -149,9 +161,9 @@
     </div>
   </section>
 
-  <!-- What it does differently -->
+  <!-- What we offer -->
   <section class="section rule wrap" aria-labelledby="diff-title">
-    <h2 class="title" id="diff-title">What it does differently</h2>
+    <h2 class="title" id="diff-title">What we offer</h2>
     <ul class="grid3">
       <li>
         <h3>Nothing to log</h3>
@@ -186,12 +198,50 @@
     </a>
     <nav class="foot-links" aria-label="Footer">
       <a href="app/">Open the app</a>
-      <a href="login/">Sign in</a>
+      <a href="login/" id="foot-signin">Sign in</a>
     </nav>
   </div>
   <div class="foot-row small">
     <p>Built for the [HACKATHON NAME] hackathon</p>
   </div>
 </footer>
+
+<script type="module">
+  /* Signed in already? Show the person, not a "Sign in" button. */
+  import { configured, getUser } from './shared/supabase.js';
+  if (configured) {
+    getUser().then(user => {
+      if (!user) return;
+      const meta = user.user_metadata || {};
+      const name = meta.full_name || meta.name || (user.email || '').split('@')[0] || 'You';
+      const photo = /^https:/.test(meta.avatar_url || meta.picture || '') ? (meta.avatar_url || meta.picture) : '';
+      const initial = name.trim().charAt(0).toUpperCase() || 'P';
+      const nav = document.querySelector('#nav-signin');
+      if (nav) {
+        const a = document.createElement('a');
+        a.className = 'circle glass avatar';
+        a.href = 'app/';
+        a.setAttribute('aria-label', `Open your pantry, ${name}`);
+        a.title = name;
+        if (photo) {
+          const img = document.createElement('img');
+          img.src = photo; img.alt = ''; img.referrerPolicy = 'no-referrer';
+          img.onerror = () => { img.remove(); a.textContent = initial; };
+          a.appendChild(img);
+        } else {
+          a.textContent = initial;
+        }
+        nav.replaceWith(a);
+      }
+      document.querySelectorAll('a.go[href="login/"]').forEach(el => {
+        el.href = 'app/';
+        const label = el.querySelector('span') || el;
+        if (/get started/i.test(label.textContent)) label.textContent = 'Open your pantry';
+      });
+      const foot = document.querySelector('#foot-signin');
+      if (foot) foot.remove();
+    }).catch(() => { /* stay anonymous-looking */ });
+  }
+</script>
 </body>
 </html>

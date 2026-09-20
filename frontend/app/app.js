@@ -5,8 +5,12 @@
    Runs as an ES module so it can share the auth and storage layers.
    ========================================================================= */
 
-import { requireAuth, signOut, configured } from '../shared/supabase.js';
-import { loadState, saveState, logCook, logReceipt, clearLocal } from '../shared/store.js';
+import { requireAuth, signOut, configured, onAuthChange } from '../shared/supabase.js';
+import {
+  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs,
+  loadPrefs, savePrefs, prefsToRequest, normalizePrefs, servingsTarget, householdScale, ingredientHits,
+  DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
+} from '../shared/store.js';
 import { scanReceipt, fetchRecipes, apiConfigured } from '../shared/api.js';
 
 const DAY = 86400000;
@@ -35,6 +39,10 @@ const ICON = {
   upload: svg('<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>', 30, 2),
   chevron: svg('<path d="M9 6l6 6-6 6"/>', 16),
   trash: svg('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>', 16, 2),
+  person: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/>', 20),
+  personBig: svg('<circle cx="12" cy="8" r="4"/><path d="M4 20.5c0-3.6 3.6-6 8-6s8 2.4 8 6"/>', 24, 2),
+  minus: svg('<path d="M5 12h14"/>', 16, 2.4),
+  plus: svg('<path d="M12 5v14M5 12h14"/>', 16, 2.4),
 };
 
 /* ---------- reference data: shelf life and household burn rate ---------- */
@@ -135,11 +143,6 @@ function dishStats(dish) {
 }
 const money = v => `$${v.toFixed(2)}`;
 
-/* ---------- household profile (servings default + staples on hand) ---------- */
-const PROFILE_KEY = 'pantry.profile.v1';
-function loadProfile() { try { return JSON.parse(localStorage.getItem(PROFILE_KEY)) || {}; } catch { return {}; } }
-function saveProfile(p) { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); } catch { /* private mode */ } }
-let profile = loadProfile();
 // Pantry staples we don't nag people to buy once they say they keep them stocked.
 const STAPLE_KEYS = new Set(['olive oil', 'oil', 'salt', 'pepper', 'black pepper', 'chili flakes', 'cumin', 'paprika', 'oregano', 'sugar', 'flour', 'butter', 'soy sauce']);
 // Scale the leading number in a display amount ("5 oz" -> "10 oz"); leave "a pinch" alone.
@@ -152,9 +155,15 @@ const scaleAmt = (amt, f) => {
 };
 
 const ing = (name, key, need, amt) => ({ name, key, need, amt });
+// tags: what the dish is, for the preference filter. `contains` lists allergen keys
+// (see ALLERGENS in store.js); generated dishes have no tags and are checked by ingredient name.
+const tags = (diet, cuisine, contains = [], extra = {}) => ({
+  vegetarian: diet === 'vegetarian' || diet === 'vegan', vegan: diet === 'vegan', pescatarian: diet !== 'meat', cuisine, contains, ...extra,
+});
 const DISHES = [
   {
     id: 'pasta', name: 'Spinach & garlic pasta', img: '../img/pasta.jpg', time: '20 min', servings: 2, difficulty: 'Easy',
+    tags: tags('vegetarian', 'italian', ['gluten', 'dairy']),
     ingredients: [ing('Spinach', 'spinach', 2, '5 oz'), ing('Garlic', 'garlic', 2, '2 cloves'), ing('Spaghetti', 'spaghetti', 2, '8 oz'), ing('Parmesan', 'parmesan', 1, '1 oz'), ing('Olive oil', 'olive oil', 1, '3 tbsp'), ing('Chili flakes', 'chili flakes', 1, 'a pinch')],
     steps: [
       'Bring a big pot of salted water to the boil and cook the spaghetti until just short of done.',
@@ -166,6 +175,7 @@ const DISHES = [
   },
   {
     id: 'friedrice', name: 'Chicken fried rice', img: '../img/friedrice.jpg', time: '25 min', servings: 3, difficulty: 'Easy',
+    tags: tags('meat', 'chinese', ['eggs', 'gluten', 'soy']),
     ingredients: [ing('Chicken thighs', 'chicken thighs', 3, '1 lb'), ing('Jasmine rice', 'jasmine rice', 3, '3 cups, cooked'), ing('Eggs', 'eggs', 2, '2'), ing('Garlic', 'garlic', 2, '2 cloves'), ing('Soy sauce', 'soy sauce', 1, '2 tbsp'), ing('Scallions', 'scallions', 1, '2')],
     steps: [
       'Cut the chicken into small pieces and season with salt.',
@@ -177,6 +187,7 @@ const DISHES = [
   },
   {
     id: 'shakshuka', name: 'Shakshuka', img: '../img/shakshuka.jpg', time: '30 min', servings: 2, difficulty: 'Easy',
+    tags: tags('vegetarian', 'middle-eastern', ['eggs', 'dairy']),
     ingredients: [ing('Eggs', 'eggs', 4, '4'), ing('Tomatoes', 'tomatoes', 4, '4 roma'), ing('Onion', 'onion', 1, '1'), ing('Garlic', 'garlic', 2, '2 cloves'), ing('Cumin', 'cumin', 1, '1 tsp'), ing('Paprika', 'paprika', 1, '1 tsp'), ing('Olive oil', 'olive oil', 1, '2 tbsp'), ing('Feta', 'feta', 1, '2 oz')],
     steps: [
       'Warm the olive oil in a wide pan over medium heat. Soften the onion, about 6 minutes.',
@@ -189,6 +200,7 @@ const DISHES = [
   },
   {
     id: 'soup', name: 'Tomato basil soup', img: '../img/soup.jpg', time: '35 min', servings: 4, difficulty: 'Easy',
+    tags: tags('vegetarian', 'italian', ['dairy']),
     ingredients: [ing('Tomatoes', 'tomatoes', 6, '6 roma'), ing('Basil', 'basil', 2, '1 bunch'), ing('Onion', 'onion', 1, '1'), ing('Garlic', 'garlic', 2, '2 cloves'), ing('Olive oil', 'olive oil', 1, '2 tbsp'), ing('Cream', 'cream', 2, '½ cup')],
     steps: [
       'Soften the onion and garlic in olive oil over medium heat, about 8 minutes.',
@@ -199,6 +211,7 @@ const DISHES = [
   },
   {
     id: 'salad', name: 'Greek salad', img: '../img/salad.jpg', time: '15 min', servings: 2, difficulty: 'No cook',
+    tags: tags('vegetarian', 'mediterranean', ['dairy']),
     ingredients: [ing('Cucumber', 'cucumber', 1, '1'), ing('Tomatoes', 'tomatoes', 3, '3 roma'), ing('Red onion', 'red onion', 1, '½'), ing('Olives', 'olives', 1, 'a handful'), ing('Feta', 'feta', 2, '4 oz'), ing('Olive oil', 'olive oil', 1, '3 tbsp')],
     steps: [
       'Chop the cucumber and tomatoes into chunks and slice the red onion thin.',
@@ -208,6 +221,7 @@ const DISHES = [
   },
   {
     id: 'risotto', name: 'Mushroom risotto', img: '../img/risotto.jpg', time: '45 min', servings: 3, difficulty: 'Medium',
+    tags: tags('vegetarian', 'italian', ['dairy'], { alcohol: true }),   // the wine: not for a halal table
     ingredients: [ing('Arborio rice', 'arborio rice', 3, '1½ cups'), ing('Mushrooms', 'mushrooms', 3, '8 oz'), ing('Parmesan', 'parmesan', 2, '2 oz'), ing('Onion', 'onion', 1, '1'), ing('Stock', 'stock', 4, '1 qt'), ing('White wine', 'white wine', 1, '½ cup')],
     steps: [
       'Warm the stock in a small pan and keep it hot.',
@@ -338,6 +352,8 @@ function dishFromApi(recipe, index) {
         need: Math.max(0.5, Number(ing.servings_used) || 1),
         amt: ing.amount || '',
       })),
+    // every ingredient name, staples included, for the allergy and dislike checks
+    names: (recipe.ingredients || []).map(ing => String(ing.name || '')).filter(Boolean),
     steps: Array.isArray(recipe.steps) ? recipe.steps : [],
   };
 }
@@ -377,14 +393,17 @@ async function refreshRecipes() {
     return [];
   }
   const token = ++recipeRefreshToken;
+  // The structured prefs are the contract (allergies and diet are hard rules server-side);
+  // the plain-English line is the fallback the model reads — '' when all default.
+  const prefs = state.prefs;
+  const request = prefsToRequest(prefs);
   try {
-    const request = (profile.cuisines && profile.cuisines.length) ? `Prefer ${profile.cuisines.join(', ')} cuisine` : null;
-    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2, request });
+    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2, request, prefs });
     if (token !== recipeRefreshToken) return liveDishes || [];
     let list = (data.recipes || []).map(dishFromApi);
     // Soften the filter once if nothing made the cut
     if (!list.length) {
-      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4, request });
+      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4, request, prefs });
       if (token !== recipeRefreshToken) return liveDishes || [];
       list = (data.recipes || []).map(dishFromApi);
     }
@@ -461,7 +480,10 @@ function addLot(name, key, qty, raw = '', extras = null) {
 // Hand-add still uses this name; always stacks as a new lot.
 const upsert = (name, key, qty, raw = '', extras = null) => addLot(name, key, qty, raw, extras);
 
-const current = it => Math.max(0, it.initial - it.burn * ((Date.now() - it.purchase) / DAY) - it.deducted);
+// Burn rates were estimated for a two-person household; the stored rate stays as is and
+// the household multiplier is applied here, at read time.
+const burnRate = it => it.burn * householdScale(state.prefs);
+const current = it => Math.max(0, it.initial - burnRate(it) * ((Date.now() - it.purchase) / DAY) - it.deducted);
 const daysLeft = it => (it.expiry - Date.now()) / DAY;
 const needsCheckin = it => current(it) <= OUT;
 const lotsFor = key => state.pantry.filter(it => it.key === key).sort((a, b) => a.expiry - b.expiry);
@@ -504,9 +526,9 @@ const levelForDays = dl => (dl <= 2 ? 'red' : dl <= 5 ? 'yellow' : 'green');
 // Show whichever is more urgent and say which one it is.
 function freshness(it) {
   const cur = current(it);
-  const pct = clamp(cur / it.initial, 0, 1);
+  const pct = it.initial > 0 ? clamp(cur / it.initial, 0, 1) : 0;
   const dl = daysLeft(it);
-  const shelfDays = (it.expiry - it.purchase) / DAY;
+  const shelfDays = Math.max(1, (it.expiry - it.purchase) / DAY);   // never divide by zero on a same-day expiry
   const tLevel = levelForDays(dl);
   const aLevel = pct <= 0.12 ? 'red' : pct <= 0.3 ? 'yellow' : 'green';
   const rank = { red: 0, yellow: 1, green: 2 };
@@ -516,19 +538,55 @@ function freshness(it) {
   return { level: tLevel, pct: clamp(dl / shelfDays, 0, 1), mode: 'time', label: timeLabel(dl), urgency: dl / 30 };
 }
 
+/* ---------- dishes against the preferences ---------- */
+// Hard rules only: an allergy the dish contains, or a diet it breaks. Tagged (hardcoded)
+// dishes are judged by their tags; every dish is also checked by ingredient name as a
+// safety net, since a generated recipe arrives without tags.
+function passesPrefs(dish) {
+  const p = state.prefs;
+  const t = dish.tags;
+  if (t) {
+    if ((t.contains || []).some(k => p.allergies.includes(k))) return false;
+    if (p.diet.includes('vegan') && !t.vegan) return false;
+    if (p.diet.includes('vegetarian') && !(t.vegetarian || t.vegan)) return false;
+    if (p.diet.includes('pescatarian') && !(t.vegetarian || t.vegan || t.pescatarian)) return false;
+    if (p.diet.includes('halal') && t.alcohol) return false;
+  }
+  if (p.allergies.length && ingredientHits(dishNames(dish), p.allergies).length) return false;
+  return true;
+}
+// Generated dishes keep every ingredient name (staples included) for these checks; hardcoded ones list them all anyway.
+const dishNames = dish => dish.names || dish.ingredients.map(i => i.name);
+// Dislikes are soft: the dish stays, with a warning chip naming what it has.
+function avoidHits(dish) {
+  const terms = String(state.prefs.avoid || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) return [];
+  const names = dishNames(dish).map(n => String(n).toLowerCase());
+  return terms.filter(t => { const stem = t.length > 3 ? t.replace(/(es|s)$/, '') : t; return names.some(n => n.includes(stem)); });
+}
+// Soft preferences break ties in the deck order: a cuisine they picked, a time they can spare.
+const dishMinutes = d => parseInt(d.time, 10) || 0;
+function prefFit(dish) {
+  const p = state.prefs;
+  let fit = 0;
+  if (dish.tags && p.cuisines.includes(dish.tags.cuisine)) fit += 1;
+  if (p.maxMinutes > 0 && dishMinutes(dish) <= p.maxMinutes) fit += 1;
+  return fit;
+}
+
 /* ---------- dishes against the pantry ---------- */
 function analyze(dish) {
   const ings = dish.ingredients.map(i => {
     const item = findItem(i.key);
     const avail = available(i.key);
-    const have = avail > 0;
-    const staple = !have && !!profile.staples && STAPLE_KEYS.has(i.key);   // assumed on hand, not a "buy"
-    return { ...i, item, avail, have, staple };
+    // a staple (salt, oil) counts as "have" whether or not the pantry tracks it
+    return { ...i, item, avail, have: avail > 0 || Boolean(i.staple), staple: Boolean(i.staple) };
   });
   const have = ings.filter(i => i.have);
-  const missing = ings.filter(i => !i.have && !i.staple);
+  const missing = ings.filter(i => !i.have);
   let urgent = null;
   for (const i of have) {
+    if (!i.item) continue;   // an assumed staple has no lot to expire
     const dl = daysLeft(i.item);
     if (!urgent || dl < urgent.dl) urgent = { item: i.item, dl };
   }
@@ -536,7 +594,7 @@ function analyze(dish) {
   const badge = urgent && urgent.dl <= 5
     ? { text: `Uses your ${urgent.item.name.toLowerCase()} · ${shortDays(urgent.dl)}`, level: levelForDays(urgent.dl) }
     : null;
-  return { dish, ings, have, missing, urgentDays, badge, stats: dishStats(dish) };
+  return { dish, ings, have, missing, urgentDays, badge, stats: dishStats(dish), warn: avoidHits(dish), fit: prefFit(dish), stretch: stretchOf(dish) };
 }
 const eligible = a => a.missing.length <= 2;
 
@@ -558,6 +616,8 @@ const state = {
   cooked: new Set(),
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
   expanded: new Set(),      // pantry stack keys that are open
+  prefs: normalizePrefs(DEFAULT_PREFS),   // cooking preferences; replaced by loadPrefs() at boot
+  prefsHid: false,          // the deck is empty only because of the preferences (nothing to reshuffle)
   sheet: null,
   sortMode: 'urgent',       // deck ordering, see SORTS
   detailDishId: null,       // recipe open in the detail sheet
@@ -570,11 +630,13 @@ const state = {
 };
 
 function buildDeck() {
-  const all = activeDishes().map(analyze).filter(eligible);
+  const makeable = activeDishes().map(analyze).filter(eligible);
+  const all = makeable.filter(a => passesPrefs(a.dish));   // allergies/diet are hard rules
+  state.prefsHid = all.length === 0 && makeable.length > 0;
   const cmp = (SORTS[state.sortMode] || SORTS.urgent).cmp;
   state.deck = all
     .filter(a => !state.skipped.has(a.dish.id) && !state.cooked.has(a.dish.id) && !state.chosen.has(a.dish.id))
-    .sort(cmp);
+    .sort((a, b) => cmp(a, b) || (a.stretch - b.stretch) || (b.fit - a.fit));
   return all;
 }
 const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
@@ -584,7 +646,8 @@ const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
    ========================================================================= */
 const el = {
   deck: $('#deck'), caption: $('#deck-caption'), status: $('#deck-status'), deckScreen: $('#deck-screen'), endScreen: $('#end-screen'), emptyScreen: $('#empty-screen'),
-  count: $('#btn-pantry'), tonight: $('#btn-tonight'),
+  endTitle: $('#end-title'), endCopy: $('#end-copy'), reshuffle: $('#btn-reshuffle'), endPrefs: $('#btn-end-prefs'),
+  count: $('#btn-pantry'), tonight: $('#btn-tonight'), profile: $('#btn-profile'),
   veil: $('#veil'), sheet: $('#sheet'), panel: $('#panel'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
   toast: $('#toast'), file: $('#file-input'),
 };
@@ -603,6 +666,16 @@ function renderAll(opts = {}) {
   saveState({ pantry: state.pantry, skipped: [...state.skipped], cooked: [...state.cooked], chosen: [...state.chosen] });
 }
 
+// Difficulty as a 1–3 level, and how far a dish sits above the cook's own skill
+const DIFF_LEVEL = { 'no cook': 1, easy: 1, medium: 2, hard: 3 };
+const SKILL_LEVEL = { beginner: 1, comfortable: 2, confident: 3 };
+const difficultyLevel = d => DIFF_LEVEL[String(d.difficulty || 'easy').toLowerCase()] || 1;
+const stretchOf = d => Math.max(0, difficultyLevel(d) - (SKILL_LEVEL[state.prefs.skill] || 2));
+function difficultyHTML(d) {
+  const lvl = difficultyLevel(d), stretch = stretchOf(d) > 0;
+  return `<span class="diff l${lvl}${stretch ? ' stretch' : ''}" title="${stretch ? 'Above your usual skill level' : 'Difficulty'}"><span class="bars"><i></i><i></i><i></i></span><span>${esc(d.difficulty)}</span></span>`;
+}
+
 function cardHTML(a) {
   const d = a.dish;
   return `
@@ -612,24 +685,35 @@ function cardHTML(a) {
     </div>
     <div class="card-body">
       <h2>${esc(d.name)}</h2>
-      <div class="meta"><span>${d.time}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i><span>${d.difficulty}</span></div>
+      <div class="meta"><span>${d.time}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i>${difficultyHTML(d)}</div>
       <div class="stats"><span>${a.stats.kcal} cal</span><i></i><span>${a.stats.protein}g protein</span><i></i><span>${money(a.stats.cost)}/serving</span></div>
       <div class="chips">${a.ings.map(i => i.have
         ? `<span class="chip have">${ICON.checkSm}<span>${esc(i.name)}</span></span>`
         : i.staple
         ? `<span class="chip staple">${esc(i.name)}</span>`
-        : `<span class="chip missing">${esc(i.name)}</span>`).join('')}</div>
+        : `<span class="chip missing">${esc(i.name)}</span>`).join('')}${warnChips(a)}</div>
       ${a.missing.length ? `<div class="missing-line">missing ${a.missing.length}: ${esc(a.missing.map(m => m.name.toLowerCase()).join(', '))}</div>` : ''}
     </div>
     <div class="overlay cook"><div class="glass ring">${ICON.checkBig}</div></div>
     <div class="overlay skip"><div class="glass ring">${ICON.xBig}</div></div>`;
 }
 
+// A dish that has something they'd rather not eat keeps its place, with a note
+const warnChips = a => (a.warn || []).map(w => `<span class="chip warn"><span class="dot"></span><span>Has ${esc(w)}</span></span>`).join('')
+  + (a.stretch > 0 ? `<span class="chip warn"><span class="dot"></span><span>A stretch for you</span></span>` : '');
+
 function renderDeck(opts = {}) {
   const hasPantry = state.pantry.length > 0;
   el.emptyScreen.classList.toggle('hidden', hasPantry);
   el.deckScreen.classList.toggle('hidden', !hasPantry || state.deck.length === 0);
   el.endScreen.classList.toggle('hidden', !hasPantry || state.deck.length > 0);
+  // End of deck: either they went through everything, or the preferences left nothing to show
+  el.endTitle.textContent = state.prefsHid ? 'Nothing to cook yet' : 'That’s everything we can make right now';
+  el.endCopy.textContent = state.prefsHid
+    ? 'Nothing here fits your preferences yet. Scan a receipt or loosen them in your profile.'
+    : 'Scan another receipt for new dishes, or reshuffle to see the ones you skipped.';
+  el.reshuffle.hidden = state.prefsHid;
+  el.endPrefs.hidden = !state.prefsHid;
   el.deck.innerHTML = '';
   const show = state.deck.slice(0, 3);
   // back to front so the top card is last in the DOM
@@ -652,7 +736,7 @@ function renderDeck(opts = {}) {
   const left = n === 1 ? '1 dish left' : plural(n, 'dish', 'dishes');
   el.caption.textContent = `${(SORTS[state.sortMode] || SORTS.urgent).label} · ${left}`;
   // one short line for screen readers, and only when it actually changed
-  const msg = !hasPantry ? 'Pantry is empty' : n ? `Now showing ${state.deck[0].dish.name}, ${left}` : 'No dishes left';
+  const msg = !hasPantry ? 'Pantry is empty' : n ? `Now showing ${state.deck[0].dish.name}, ${left}` : state.prefsHid ? 'Nothing fits your preferences yet' : 'No dishes left';
   if (msg !== el.status.textContent) el.status.textContent = msg;
 }
 
@@ -798,6 +882,9 @@ function openSheet(kind, html, cls = '') {
 }
 function closeSheet() {
   if (!state.sheet) return;
+  // Dismissing the onboarding (Escape, veil, the close button) counts as "skip for now":
+  // whatever they had chosen so far is kept, and it will not open by itself again.
+  if (state.sheet === 'onboarding' && draft) return finishOnboarding();
   state.sheet = null;
   syncInert();
   el.sheet.classList.remove('in');
@@ -1032,7 +1119,7 @@ function estimateLabel(key, line) {
 function countNewDishes(lines, before) {
   const saved = state.pantry;
   state.pantry = saved.concat(lines.filter(l => !findItem(l.key)).map(l => mk(l.name, l.key, l.qty, 0)));
-  const after = activeDishes().map(analyze).filter(eligible).map(a => a.dish.id);
+  const after = activeDishes().filter(passesPrefs).map(analyze).filter(eligible).map(a => a.dish.id);
   state.pantry = saved;
   return after.filter(id => !before.has(id)).length;
 }
@@ -1072,7 +1159,8 @@ function detailBody(a, people) {
       ${closeBtn()}
       <div class="hero-text">
         <h2>${esc(d.name)}</h2>
-        <div class="meta"><span>${d.time}</span><i></i><span>${d.difficulty}</span>${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        <div class="meta"><span>${d.time}</span><i></i>${difficultyHTML(d)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        ${(a.warn.length || a.stretch) ? `<div class="chips">${warnChips(a)}</div>` : ''}
       </div>
     </div>
     <div class="detail-body scroll">
@@ -1112,7 +1200,7 @@ function openDetail(a) {
   if (state.sheet && state.sheet !== 'tonight') return;
   a = analyze(a.dish || a);
   state.detailDishId = a.dish.id;
-  state.detailServings = clamp(Math.round(profile.household || a.dish.servings || 1), 1, 20);
+  state.detailServings = servingsTarget(state.prefs);
   openSheet('detail', detailBody(a, state.detailServings), 'w-720');
 }
 // Re-render the open recipe sheet in place (used by the servings stepper).
@@ -1121,42 +1209,6 @@ function rerenderDetail() {
   if (d) el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
 }
 
-/* ---------- first-run onboarding: household size + staples + cuisines ---------- */
-const CUISINES = ['Italian', 'Mexican', 'Asian', 'Mediterranean', 'Indian', 'American'];
-let obDraft = { household: 2, staples: true, cuisines: [] };
-function onboardBody() {
-  return `
-    <div class="sheet-head"><h2>Welcome to Pantry</h2></div>
-    <form id="onboard-form" class="onboard">
-      <p class="ob-q">How many people are you usually cooking for?</p>
-      <div class="stepper big" role="group" aria-label="Household size">
-        <button class="circle glass" type="button" data-ob-serv="-1" aria-label="Fewer"${obDraft.household <= 1 ? ' disabled' : ''}>−</button>
-        <output>${plural(obDraft.household, 'person', 'people')}</output>
-        <button class="circle glass" type="button" data-ob-serv="1" aria-label="More"${obDraft.household >= 20 ? ' disabled' : ''}>+</button>
-      </div>
-      <p class="ob-q">Do you keep salt, oil &amp; pepper stocked?</p>
-      <div class="ob-toggle" role="group" aria-label="Staples on hand">
-        <button class="pill ${obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="1">Yes</button>
-        <button class="pill ${!obDraft.staples ? 'prominent' : 'glass'}" type="button" data-ob-staples="0">No</button>
-      </div>
-      <p class="ob-q">Any cuisines you lean toward?</p>
-      <div class="ob-cuisines">
-        ${CUISINES.map(c => `<button class="ob-chip${obDraft.cuisines.includes(c) ? ' on' : ''}" type="button" data-ob-cuisine="${c}" aria-pressed="${obDraft.cuisines.includes(c)}">${c}</button>`).join('')}
-      </div>
-      <p class="ob-note">Sets your default recipe servings and cuisine leanings, and we won’t nag you to buy staples you already have. Change it anytime.</p>
-      <div class="sheet-foot">
-        <button class="linkish" type="button" data-ob-skip>Skip</button>
-        <button class="pill prominent lg" type="submit">Get started</button>
-      </div>
-    </form>`;
-}
-function openOnboarding() {
-  obDraft = { household: clamp(Math.round(profile.household || 2), 1, 20), staples: profile.staples !== false, cuisines: Array.isArray(profile.cuisines) ? [...profile.cuisines] : [] };
-  openSheet('onboard', onboardBody(), 'w-520');
-}
-function renderOnboarding() {
-  if (state.sheet === 'onboard') el.sheet.innerHTML = onboardBody();
-}
 // Tonight: one dish opens straight into its recipe; more than one gets a short list first.
 function openTonight() {
   const dishes = chosenDishes().reverse();   // most recently chosen first
@@ -1176,7 +1228,9 @@ function openTonight() {
 }
 function openMadeIt(dishId) {
   const a = analyze(dishById(dishId));
-  const rows = a.have.map(i => {
+  const factor = state.detailServings / Math.max(1, a.dish.servings || 1);
+  const rows = a.have.filter(i => i.item).map(original => {
+    const i = { ...original, need: original.need * factor };
     const cur = i.avail;
     const after = cur - i.need;
     const last = after <= OUT;
@@ -1218,7 +1272,8 @@ function finishMadeIt(dishId) {
   const used = [];
   for (const i of dish.ingredients) {
     if (!checked.includes(i.key)) continue;
-    const batch = deductServings(i.key, i.need);
+    const factor = state.detailServings / Math.max(1, dish.servings || 1);
+    const batch = deductServings(i.key, i.need * factor);
     if (!batch.length) continue;
     used.push(...batch);
     if (available(i.key) <= OUT) ranOut.push(i.name.toLowerCase());
@@ -1322,7 +1377,7 @@ function groupLots(items) {
   return [...map.values()].map(lots => lots.sort((a, b) => a.expiry - b.expiry));
 }
 function checkinHTML(it) {
-  const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / it.burn) - (Date.now() - it.purchase) / DAY)) : 0;
+  const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / burnRate(it)) - (Date.now() - it.purchase) / DAY)) : 0;
   const when = it.deducted > 0 ? 'used up cooking' : ranOut === 0 ? 'we estimate it ran out today' : ranOut === -1 ? 'we estimate it ran out yesterday' : `we estimate it ran out ${-ranOut} days ago`;
   if (it.asking) {
     return `<div class="checkin" data-id="${it.id}">
@@ -1382,6 +1437,256 @@ function toast(main, sub = '', line2 = '') {
   toastTimer = setTimeout(() => { el.toast.classList.remove('in'); hideTimer = setTimeout(() => { el.toast.innerHTML = ''; }, 300); }, 4500);
 }
 
+/* ---------- profile: who is signed in, and how they like to cook ---------- */
+let user = null;          // the Supabase auth user; null in demo mode
+let draft = null;         // preferences being edited while the onboarding sheet is open
+let obStep = 0;           // which onboarding step is showing
+let avatarKey = null;     // what the avatar button currently shows, so auth events don't repaint it needlessly
+
+const labelOf = (opts, id) => { const o = opts.find(x => x.id === id); return o ? o.label : id; };
+const labelsOf = (opts, ids) => ids.map(id => labelOf(opts, id));
+const SKILL_HELP = {
+  beginner: 'Few steps, one pan, nothing fussy',
+  comfortable: 'A knife, a couple of pans, a bit of timing',
+  confident: 'Techniques and long simmers are welcome',
+};
+
+const meta = u => (u && u.user_metadata) || {};
+function displayName(u) {
+  const m = meta(u);
+  const email = (u && u.email) || m.email || '';
+  return String(m.full_name || m.name || email.split('@')[0] || '').trim() || 'You';
+}
+function photoUrl(u) {
+  const url = String(meta(u).avatar_url || meta(u).picture || '');
+  return /^https?:\/\//i.test(url) ? url : '';
+}
+// What goes inside an avatar circle: the Google photo, else the initial, else a person icon (demo mode).
+function avatarHTML(u, { photo = true, icon = ICON.person } = {}) {
+  const url = photo ? photoUrl(u) : '';
+  if (url) return `<img src="${esc(url)}" alt="" referrerpolicy="no-referrer" draggable="false">`;
+  const letter = u ? displayName(u).charAt(0).toUpperCase() : '';
+  return letter ? `<span aria-hidden="true">${esc(letter)}</span>` : icon;
+}
+function renderAvatar() {
+  wireAccountButton(user);   // keep the profile-menu account row (sign in / sign out) in sync
+  const key = user ? `${user.id}|${photoUrl(user)}|${displayName(user)}` : 'demo';
+  if (key === avatarKey) return;
+  avatarKey = key;
+  el.profile.innerHTML = avatarHTML(user);
+  const img = $('img', el.profile);
+  // a photo that won't load (blocked, expired) falls back to the initial
+  if (img) img.addEventListener('error', () => { el.profile.innerHTML = avatarHTML(user, { photo: false }); }, { once: true });
+}
+
+function openProfile() {
+  if (state.sheet) return;
+  const demo = !user;
+  const provider = user && user.app_metadata && user.app_metadata.provider;
+  const head = demo
+    ? `<div class="profile-head">
+        <span class="avatar glass lg" aria-hidden="true">${ICON.personBig}</span>
+        <div class="who"><h2>Demo mode</h2><small>Your pantry stays in this browser.</small></div>
+      </div>`
+    : `<div class="profile-head">
+        <span class="avatar glass lg" aria-hidden="true">${avatarHTML(user, { icon: ICON.personBig })}</span>
+        <div class="who"><h2>${esc(displayName(user))}</h2><small>${esc(user.email || meta(user).email || '')}</small></div>
+      </div>`;
+  // Account line in the footer: Sign out with an account, Sign in in demo mode
+  // (only when there is a Supabase project to sign in to).
+  const account = demo
+    ? (configured ? `<div class="sheet-note"><span>Sign in to keep your pantry on every device.</span><a class="pill prominent sm" href="../login/">Sign in</a></div>` : '')
+    : `<div class="sheet-note"><span>${provider === 'google' ? 'Signed in with Google' : 'Signed in with email'}</span><button class="linkish" type="button" data-signout>Sign out</button></div>`;
+  openSheet('profile', `
+    <div class="sheet-head">${head}${closeBtn()}</div>
+    <div class="sheet-body">
+      <div class="pref">
+        <div class="eyebrow">How you cook</div>
+        ${summaryHTML(state.prefs, { edit: 'data-ob-edit' })}
+      </div>
+    </div>
+    ${account ? `<div class="sheet-foot" style="flex-direction:column;align-items:stretch">${account}</div>` : ''}`, 'w-520');
+}
+// The preferences as six short rows; the profile sheet and the last onboarding step share them.
+function prefsSummary(p) {
+  const { adults, kids } = p.household;
+  const household = `${plural(adults, 'adult')}${kids ? `, ${plural(kids, 'kid')}` : ''} · dishes for ${servingsTarget(p)}`;
+  const cant = [...labelsOf(ALLERGENS, p.allergies), ...labelsOf(DIETS, p.diet)].join(', ') || 'Nothing';
+  const cuisines = labelsOf(CUISINES, p.cuisines).join(', ') || 'Anything';
+  const time = p.maxMinutes ? `under ${p.maxMinutes} min` : 'any cook time';
+  const kitchen = `${labelOf(SKILLS, p.skill)} cook · ${labelsOf(EQUIPMENT, p.equipment).join(', ').toLowerCase() || 'no equipment listed'} · shops ${labelOf(SHOPPING, p.shopping).toLowerCase()}`;
+  // Each row's `step` is the onboarding step where its values are actually edited.
+  return [
+    { key: 'household', label: 'Household', value: household, step: 0 },
+    { key: 'cant', label: 'Can’t eat', value: cant, step: 1 },
+    { key: 'avoid', label: 'Would rather not eat', value: p.avoid || 'Nothing', step: 1 },
+    { key: 'cuisines', label: 'Cuisines & time', value: `${cuisines} · ${time}`, step: 2 },
+    { key: 'kitchen', label: 'Kitchen', value: kitchen, step: 3 },
+  ];
+}
+// `edit` names the data attribute the Edit link carries (which handler picks it up), or '' for none.
+function summaryHTML(p, { edit = '' } = {}) {
+  return `<div class="srows">${prefsSummary(p).map(r => `
+    <div class="srow">
+      <div class="stext"><small>${esc(r.label)}</small><strong>${esc(r.value)}</strong></div>
+      ${edit ? `<button class="linkish" type="button" ${edit}="${r.step}" data-focus="edit-${r.key}" aria-label="Edit ${esc(r.label.toLowerCase())}">Edit</button>` : ''}
+    </div>`).join('')}</div>`;
+}
+
+/* ---------- onboarding: five short questions, asked once ----------
+   The draft is kept until Continue on the last step, Skip, or a dismiss (Escape, veil,
+   close), all of which save what was chosen so far and mark the onboarding done. */
+const OB_STEPS = [
+  { title: 'Who’s eating?', help: 'Dishes get sized for your table, and the pantry estimates run at your pace.' },
+  { title: 'Anything you can’t eat?', help: 'Allergies never make it onto a card. Diets are always respected.' },
+  { title: 'What do you like to cook?', help: 'Pick as many as you like. We lean toward them without hiding the rest.' },
+  { title: 'Your kitchen', help: 'So nothing we suggest needs gear you don’t have.' },
+  { title: 'You’re set', help: 'Here’s what we’ll cook around. Change any of it from your profile.' },
+];
+
+function householdLine(p) {
+  const n = servingsTarget(p);
+  const s = householdScale(p);
+  const pct = Math.round(Math.abs(s - 1) * 100);
+  const pace = pct === 0 ? 'at about the pace of a two-person household' : `about ${pct}% ${s > 1 ? 'faster' : 'slower'} than a two-person household`;
+  return `We’ll size dishes for ${n} and expect the pantry to move ${pace}.`;
+}
+const chip = (attrs, on, label, focus) => `<button class="choice${on ? ' on' : ''}" type="button" aria-pressed="${on}" data-focus="${focus}" ${attrs}>${ICON.checkSm}<span>${esc(label)}</span></button>`;
+const multiChips = (field, opts, p) => opts.map(o => chip(`data-ob-toggle="${field}" data-value="${o.id}"`, p[field].includes(o.id), o.label, `${field}-${o.id}`)).join('');
+const singleChips = (field, opts, p) => opts.map(o => chip(`data-ob-set="${field}" data-value="${o.id}"`, p[field] === o.id, o.label, `${field}-${o.id}`)).join('');
+const noneChip = (field, p, label) => chip(`data-ob-clear="${field}"`, p[field].length === 0, label, `${field}-none`);
+const skillChip = (o, p) => `<button class="choice desc${p.skill === o.id ? ' on' : ''}" type="button" aria-pressed="${p.skill === o.id}" data-focus="skill-${o.id}" data-ob-set="skill" data-value="${o.id}">
+  <span class="lbl">${ICON.checkSm}<strong>${esc(o.label)}</strong></span><small>${esc(SKILL_HELP[o.id] || '')}</small></button>`;
+function stepperHTML(field, value, lim, label, help = '') {
+  return `<div class="pref">
+    <span class="pref-label" id="ob-${field}-label">${label}${help ? ` <small>${help}</small>` : ''}</span>
+    <div class="stepper" role="group" aria-labelledby="ob-${field}-label">
+      <button class="circle sm glass" type="button" data-ob-step="${field}" data-dir="-1" data-focus="${field}-down" aria-label="Fewer ${label.toLowerCase()}" aria-disabled="${value <= lim.min}">${ICON.minus}</button>
+      <output class="num" aria-live="polite">${value}</output>
+      <button class="circle sm glass" type="button" data-ob-step="${field}" data-dir="1" data-focus="${field}-up" aria-label="More ${label.toLowerCase()}" aria-disabled="${value >= lim.max}">${ICON.plus}</button>
+    </div>
+  </div>`;
+}
+function obStepHTML(p, step) {
+  const group = (id, label, inner) => `<div class="pref"><span class="pref-label" id="${id}">${label}</span><div class="choices" role="group" aria-labelledby="${id}">${inner}</div></div>`;
+  switch (step) {
+    case 0: return `
+      <div class="ob-row">
+        ${stepperHTML('adults', p.household.adults, HOUSEHOLD_LIMITS.adults, 'Adults')}
+        ${stepperHTML('kids', p.household.kids, HOUSEHOLD_LIMITS.kids, 'Kids', 'count as half a serving')}
+      </div>
+      <p class="ob-line" role="status" aria-live="polite">${householdLine(p)}</p>`;
+    case 1: return `
+      ${group('ob-allergies', 'Allergies', noneChip('allergies', p, 'None') + multiChips('allergies', ALLERGENS, p))}
+      ${group('ob-diet', 'Diet', noneChip('diet', p, 'No restrictions') + multiChips('diet', DIETS, p))}
+      <div class="pref">
+        <label class="pref-label" for="ob-avoid">Would rather not eat</label>
+        <input class="field" id="ob-avoid" data-focus="avoid" value="${esc(p.avoid)}" placeholder="cilantro, olives, blue cheese…" autocomplete="off" spellcheck="false">
+        <small class="pref-help">Dislikes, not allergies: the dish stays, with a note. Separate with commas.</small>
+      </div>`;
+    case 2: return `
+      ${group('ob-cuisines', 'Cuisines you enjoy', multiChips('cuisines', CUISINES, p))}
+      ${group('ob-time', 'Most nights I have', TIME_LIMITS.map(m => chip(`data-ob-set="maxMinutes" data-value="${m}"`, p.maxMinutes === m, m === 0 ? 'Any amount of time' : `${m} min`, `time-${m}`)).join(''))}`;
+    case 3: return `
+      ${group('ob-skill', 'In the kitchen I’m', SKILLS.map(o => skillChip(o, p)).join(''))}
+      ${group('ob-equipment', 'What you cook with', multiChips('equipment', EQUIPMENT, p))}
+      ${group('ob-shopping', 'You shop', singleChips('shopping', SHOPPING, p))}`;
+    default: return summaryHTML(p, { edit: 'data-ob-go' });
+  }
+}
+function onboardingHTML(p, step) {
+  const s = OB_STEPS[step];
+  const last = step === OB_STEPS.length - 1;
+  const editing = state.prefs.onboarded;   // reopened from the profile: "skip" really means "save and close"
+  const dots = OB_STEPS.map((_, i) => `<i class="${i < step ? 'done' : i === step ? 'on' : ''}"></i>`).join('');
+  return `
+    <div class="ob-head">
+      <div class="dots" aria-hidden="true">${dots}</div>
+      <span class="sr-only">Step ${step + 1} of ${OB_STEPS.length}</span>
+      ${closeBtn()}
+    </div>
+    <div class="sheet-body ob-body">
+      <div class="ob-titles">
+        <h2 class="ob-title" id="ob-title" tabindex="-1">${s.title}</h2>
+        <p class="ob-help">${s.help}</p>
+      </div>
+      ${obStepHTML(p, step)}
+    </div>
+    <div class="sheet-foot ob-foot">
+      <button class="linkish" type="button" data-ob-back data-focus="back" ${step === 0 ? 'hidden' : ''}>Back</button>
+      ${last
+        ? `<button class="pill prominent" type="button" data-ob-scan data-focus="next">${ICON.camera}<span>Scan a receipt</span></button>
+           <button class="pill glass" type="button" data-ob-done data-focus="done">See tonight’s dishes</button>`
+        : `<button class="pill prominent" type="button" data-ob-next data-focus="next"><span>Continue</span>${ICON.chevron}</button>
+           <span class="grow"></span>
+           <button class="linkish dim" type="button" data-ob-skip data-focus="skip">${editing ? 'Save and close' : 'Skip for now'}</button>`}
+    </div>`;
+}
+function openOnboarding(step = 0) {
+  if (state.sheet && state.sheet !== 'profile') return;   // the profile's Edit links open it sheet-to-sheet
+  draft = normalizePrefs(state.prefs);
+  obStep = clamp(Math.round(Number(step) || 0), 0, OB_STEPS.length - 1);
+  openSheet('onboarding', `<div class="ob" id="onboard">${onboardingHTML(draft, obStep)}</div>`, 'w-720 ob-sheet');
+}
+// Rebuild the sheet from the draft. Every control carries a data-focus key so a keyboard
+// user lands back on the same control after the rebuild; a new step starts at its title.
+function renderOnboarding({ moved = false } = {}) {
+  const box = $('#onboard');
+  if (!box || !draft) return;
+  const active = document.activeElement;
+  const mem = box.contains(active) ? { key: active.dataset.focus, keyboard: active.matches(':focus-visible') } : null;
+  const body = $('.sheet-body', box);
+  const scrollTop = body ? body.scrollTop : 0;
+  box.innerHTML = onboardingHTML(draft, obStep);
+  if (moved) { $('#ob-title', box).focus({ preventScroll: true }); return; }
+  const nb = $('.sheet-body', box);
+  if (nb) nb.scrollTop = scrollTop;
+  if (!mem) return;
+  const target = mem.keyboard && mem.key ? $(`[data-focus="${mem.key}"]`, box) : null;
+  (target || el.sheet).focus({ preventScroll: true });
+}
+// A chip, stepper or clear button inside the onboarding; returns false when the click was something else.
+function obChange(t) {
+  const d = t.dataset;
+  if (d.obToggle) { const f = d.obToggle; draft[f] = draft[f].includes(d.value) ? draft[f].filter(x => x !== d.value) : [...draft[f], d.value]; }
+  else if (d.obClear) draft[d.obClear] = [];
+  else if (d.obSet) draft[d.obSet] = d.obSet === 'maxMinutes' ? Number(d.value) : d.value;
+  else if (d.obStep) { const lim = HOUSEHOLD_LIMITS[d.obStep]; draft.household[d.obStep] = clamp(draft.household[d.obStep] + Number(d.dir), lim.min, lim.max); }
+  else return false;
+  renderOnboarding();
+  return true;
+}
+function obGo(step) {
+  obStep = clamp(step, 0, OB_STEPS.length - 1);
+  renderOnboarding({ moved: true });
+}
+// `next`: 'scan' opens the scan sheet in place of the onboarding, 'deck' just closes; null is a skip or dismiss.
+function finishOnboarding({ next = null } = {}) {
+  if (!draft) return;
+  const first = !state.prefs.onboarded;
+  const before = JSON.stringify(state.prefs);
+  state.prefs = normalizePrefs({ ...draft, onboarded: true });
+  draft = null;
+  savePrefs(state.prefs);
+  const changed = JSON.stringify(state.prefs) !== before;
+  if (next === 'scan') openScanUpload();   // sheet-to-sheet, the way Tonight opens a recipe
+  else closeSheet();
+  const finding = apiConfigured() && state.pantry.length ? 'Finding recipes…' : '';
+  if (first && next) toast('You’re set', finding || 'Dishes sorted for you');
+  else if (!first && changed) toast('Preferences saved', finding);
+  // With the API up the regenerated recipes take a moment; filter the current deck by the new rules meanwhile.
+  // Without it refreshRecipes() renders straight away, so a second render here would only replay the entrance.
+  if (changed && finding) renderAll();
+  refreshRecipes();
+}
+async function doSignOut(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Signing out…';
+  clearLocalPrefs();   // the next account on this browser starts from its own answers
+  await signOut();
+  location.replace('../login/');
+}
+
 /* =========================================================================
    Wiring
    ========================================================================= */
@@ -1396,6 +1701,7 @@ $('#btn-skip').addEventListener('click', () => commit('skip'));
 $('#btn-cook').addEventListener('click', () => commit('cook'));
 $('#btn-details').addEventListener('click', () => openDetail(state.deck[0]));
 $('#btn-reshuffle').addEventListener('click', () => { state.skipped.clear(); state.chosen.clear(); renderAll({ enter: true }); });
+$('#btn-end-prefs').addEventListener('click', openProfile);   // shown instead of Reshuffle when the preferences hid every dish
 function clearPantry() {
   if (!state.pantry.length) return;
   state.pantry = [];
@@ -1418,21 +1724,21 @@ $('#home').addEventListener('click', e => {
 
 /* ---------- profile menu (account: preferences, clear, sign out) ---------- */
 const profileEl = $('#profile'), profileBtn = $('#btn-profile'), profileMenu = $('#profile-menu');
-const closeProfile = () => { profileMenu.hidden = true; profileEl.classList.remove('open'); profileBtn.setAttribute('aria-expanded', 'false'); };
+const closeProfileMenu = () => { profileMenu.hidden = true; profileEl.classList.remove('open'); profileBtn.setAttribute('aria-expanded', 'false'); };
 profileBtn.addEventListener('click', () => {
   if (profileMenu.hidden) { profileMenu.hidden = false; profileEl.classList.add('open'); profileBtn.setAttribute('aria-expanded', 'true'); }
-  else closeProfile();
+  else closeProfileMenu();
 });
-document.addEventListener('click', e => { if (!profileEl.contains(e.target)) closeProfile(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && !profileMenu.hidden) closeProfile(); });
+document.addEventListener('click', e => { if (!profileEl.contains(e.target)) closeProfileMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !profileMenu.hidden) closeProfileMenu(); });
 profileMenu.addEventListener('click', e => {
   const b = e.target.closest('[data-profile]'); if (!b) return;
-  closeProfile();
-  if (b.dataset.profile === 'preferences') return openOnboarding();
+  closeProfileMenu();
+  if (b.dataset.profile === 'preferences') return openProfile();
   if (b.dataset.profile === 'clear') return clearPantry();
   if (b.dataset.profile === 'auth') return b.dataset.action === 'signin'
     ? location.assign('../login/')
-    : signOut().then(() => location.replace('../login/'));
+    : doSignOut(b);
 });
 // Account row in the profile menu: sign out (signed in), sign in (demo), hidden (no auth configured).
 function wireAccountButton(session) {
@@ -1442,6 +1748,7 @@ function wireAccountButton(session) {
   b.textContent = session ? 'Sign out' : 'Sign in';
   b.dataset.action = session ? 'signout' : 'signin';
 }
+
 // Hover preview of the swipe overlays: mouse only, a touch tap would leave it stuck
 ['cook', 'skip'].forEach(k => {
   const b = $(`#btn-${k}`);
@@ -1475,24 +1782,29 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.editrow) { review.forEach(x => { x.editing = x.id === t.dataset.editrow; }); return renderReview(); }
   if (t.dataset.canceledit) { const l = review.find(x => x.id === t.dataset.canceledit); if (l) l.editing = false; return renderReview(); }
   if (t.dataset.serv) { state.detailServings = clamp(state.detailServings + Number(t.dataset.serv), 1, 20); return rerenderDetail(); }
-  if (t.dataset.obServ) { obDraft.household = clamp(obDraft.household + Number(t.dataset.obServ), 1, 20); return renderOnboarding(); }
-  if (t.dataset.obStaples) { obDraft.staples = t.dataset.obStaples === '1'; return renderOnboarding(); }
-  if (t.dataset.obCuisine) { const c = t.dataset.obCuisine, i = obDraft.cuisines.indexOf(c); if (i >= 0) obDraft.cuisines.splice(i, 1); else obDraft.cuisines.push(c); return renderOnboarding(); }
-  if (t.hasAttribute('data-ob-skip')) { profile = { ...profile, onboarded: true }; saveProfile(profile); return closeSheet(); }
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
+  // onboarding
+  if (state.sheet === 'onboarding' && draft) {
+    if (obChange(t)) return;
+    if (t.hasAttribute('data-ob-back')) return obGo(obStep - 1);
+    if (t.hasAttribute('data-ob-next')) return obGo(obStep + 1);
+    if (t.dataset.obGo !== undefined) return obGo(Number(t.dataset.obGo));
+    if (t.hasAttribute('data-ob-skip')) return finishOnboarding();
+    if (t.hasAttribute('data-ob-done')) return finishOnboarding({ next: 'deck' });
+    if (t.hasAttribute('data-ob-scan')) return finishOnboarding({ next: 'scan' });
+  }
+  // profile sheet: each row's Edit reopens the matching onboarding step
+  if (t.dataset.obEdit !== undefined) return openOnboarding(Number(t.dataset.obEdit));
+  if (t.hasAttribute('data-signout')) return doSignOut(t);
+});
+// Typing in "Would rather not eat" updates the draft without a rebuild, so the caret stays put; Enter moves on
+el.sheet.addEventListener('input', e => { if (draft && e.target.id === 'ob-avoid') draft.avoid = e.target.value; });
+el.sheet.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.isComposing && draft && e.target.id === 'ob-avoid') { e.preventDefault(); obGo(obStep + 1); }
 });
 el.sheet.addEventListener('submit', e => {
-  if (e.target.id === 'onboard-form') {
-    e.preventDefault();
-    profile = { household: obDraft.household, staples: obDraft.staples, cuisines: obDraft.cuisines, onboarded: true };
-    saveProfile(profile);
-    closeSheet();
-    renderAll();
-    refreshRecipes();   // cuisine preference feeds the recipe request
-    return;
-  }
   const form = e.target.closest('form[data-edit]');
   if (!form) return;
   e.preventDefault();
@@ -1765,8 +2077,17 @@ fit();
 /* ---------- go ---------- */
 syncInert();
 const session = await requireAuth('../login/');   // bounces to the login page when configured and signed out, unless ?demo
-wireAccountButton(session);
-const saved = await loadState();
+// A sign-in that returned through the landing page arrives with the tokens still in
+// the URL; the client has read them by now, so take them out of the address bar.
+if (/(^|[#&])(access_token|refresh_token)=/.test(location.hash) || /[?&]code=/.test(location.search)) {
+  history.replaceState(null, '', location.pathname);
+}
+user = session && session.user ? session.user : null;
+renderAvatar();
+// Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
+onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
+const [saved, prefs] = await Promise.all([loadState(), loadPrefs()]);
+state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
 if (saved) {
   state.pantry = saved.pantry;
   state.skipped = new Set(saved.skipped);
@@ -1778,5 +2099,6 @@ if (saved) {
 populateFoodOptions();
 renderAll({ enter: true });
 refreshRecipes();
-if (!profile.onboarded) openOnboarding();   // first run: ask household size + staples
-window.pantry = { state, drag, session };   // module scope hides these; handy in the console
+// First visit (a fresh sign-in, or once per browser in demo mode): ask the five questions before anything else.
+if (!state.prefs.onboarded) openOnboarding();
+window.pantry = { state, drag, session, openOnboarding, openProfile, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console

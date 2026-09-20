@@ -130,7 +130,17 @@ export async function requireAuth(loginPath = '../login/') {
     return null;
   }
   if (!session && !isDemo()) {
-    location.replace(loginPath + '?next=' + encodeURIComponent(location.pathname));
+    // A failed OAuth or email-link return lands here with #error=…&error_description=…
+    // and no session. Carry those keys over so the login page can say what went wrong
+    // instead of silently showing an empty form.
+    let carried = '';
+    try {
+      const fromHash = new URLSearchParams(location.hash.replace(/^#/, ''));
+      const errs = new URLSearchParams();
+      for (const k of ['error', 'error_code', 'error_description']) if (fromHash.get(k)) errs.set(k, fromHash.get(k));
+      carried = errs.toString();
+    } catch { /* an odd hash; go without the message */ }
+    location.replace(loginPath + '?next=' + encodeURIComponent(location.pathname) + (carried ? '#' + carried : ''));
   }
   return session;
 }
