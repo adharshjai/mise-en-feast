@@ -255,6 +255,8 @@ function pickPhoto(recipe, index) {
 /** Live Gemini recipes when the API is up; null falls back to hardcoded DISHES. */
 let liveDishes = null;
 let recipeRefreshToken = 0;
+let recipeNotice = '';
+const chatDishes = new Map();
 
 // Dishes from a photo live outside the deck: in Saved, or (picked for tonight and then
 // removed from Saved) in state.photoDishes, so the Tonight pill can still open them.
@@ -262,6 +264,7 @@ const isPhotoId = id => String(id).startsWith('photo-');
 const dishById = id => (liveDishes || DISHES).find(d => d.id === id)
   || state.saved.find(d => d.id === id)
   || state.photoDishes.get(id)
+  || chatDishes.get(id)
   || null;
 const activeDishes = () => liveDishes || DISHES;
 
@@ -396,12 +399,15 @@ function pantryForApi() {
 }
 
 async function refreshRecipes() {
+  const token = ++recipeRefreshToken;
   if (!apiConfigured() || !state.pantry.length) {
     liveDishes = null;
+    recipeNotice = state.pantry.length ? 'Built-in recipes · AI is not connected.' : '';
     renderAll({ enter: true });
     return [];
   }
-  const token = ++recipeRefreshToken;
+  recipeNotice = 'Finding AI recipes for your preferences…';
+  renderRecipeNotice();
   // The structured prefs are the contract (allergies and diet are hard rules server-side);
   // the plain-English line is the fallback the model reads — '' when all default.
   const prefs = state.prefs;
@@ -417,6 +423,7 @@ async function refreshRecipes() {
       list = (data.recipes || []).map(dishFromApi);
     }
     liveDishes = list.length ? list : null;
+    recipeNotice = list.length ? 'AI-generated recipes' : 'No AI recipes returned · showing built-in recipes.';
     populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
@@ -428,6 +435,7 @@ async function refreshRecipes() {
     console.warn('[pantry] recipe refresh failed', err);
     if (token === recipeRefreshToken) {
       liveDishes = null;
+      recipeNotice = 'AI is unavailable · showing built-in recipes.';
       renderAll({ enter: true });
     }
     return [];
@@ -562,6 +570,22 @@ function passesPrefs(dish) {
     if (p.diet.includes('halal') && t.alcohol) return false;
   }
   if (p.allergies.length && ingredientHits(dishNames(dish), p.allergies).length) return false;
+  // Generated recipes have no diet tags. Check named ingredients too, including
+  // staples omitted from the pantry shopping list. These are ingredient checks,
+  // not certification of halal/kosher sourcing or preparation.
+  const names = dishNames(dish);
+  const text = names.join(' ').toLowerCase();
+  const meat = /\b(chicken|beef|pork|bacon|ham|lard|lamb|turkey|duck|veal|venison|sausage|gelatin)\b/.test(text);
+  const seafood = ingredientHits(names, ['fish', 'shellfish']).length > 0;
+  const dairy = ingredientHits(names, ['dairy']).length > 0;
+  const eggs = ingredientHits(names, ['eggs']).length > 0;
+  const pork = /\b(pork|bacon|ham|lard)\b/.test(text);
+  const alcohol = /\b(wine|beer|vodka|rum|brandy|sake|sherry|bourbon)\b/.test(text);
+  if (p.diet.includes('vegan') && (meat || seafood || dairy || eggs || /\bhoney\b/.test(text))) return false;
+  if (p.diet.includes('vegetarian') && (meat || seafood)) return false;
+  if (p.diet.includes('pescatarian') && meat) return false;
+  if (p.diet.includes('halal') && (pork || alcohol)) return false;
+  if (p.diet.includes('kosher') && (pork || ingredientHits(names, ['shellfish']).length || (meat && dairy))) return false;
   return true;
 }
 // Generated dishes keep every ingredient name (staples included) for these checks; hardcoded ones list them all anyway.
@@ -665,7 +689,13 @@ const el = {
 };
 
 // The choke point after every mutation: everything derived is rebuilt here, then saved.
+function renderRecipeNotice() {
+  const notice = $('#recipe-notice');
+  notice.textContent = recipeNotice;
+  notice.hidden = !recipeNotice;
+}
 function renderAll(opts = {}) {
+  renderRecipeNotice();
   buildDeck();
   const n = state.pantry.length;
   el.count.textContent = plural(n, 'item');
@@ -2268,7 +2298,7 @@ function findDishForQuery(text) {
   if (!q) return null;
   const words = q.split(' ').filter(w => w.length > 2);
   let best = null, bestScore = 0;
-  for (const d of activeDishes()) {
+  for (const d of activeDishes().filter(passesPrefs)) {
     const name = normQ(d.name);
     let score = 0;
     if (name === q) score = 100;
@@ -2294,32 +2324,50 @@ function shoppingAnswer(d) {
 async function handleChat(text) {
   addChat('user', esc(text));
   const thinking = addChat('bot', '<span class="dots"><i></i><i></i><i></i></span>');
+  const prefs = normalizePrefs(state.prefs);
   let reply = '';
+  let source = 'AI is not connected. Using available recipes.';
+  let timeout;
   try {
-    // Prefer the recipe service (it takes a free-text request) when it's reachable.
     if (apiConfigured()) {
       const data = await Promise.race([
-        fetchRecipes(pantryForApi(), { request: text, count: 3, maxMissing: 12 }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 12000)),
+        fetchRecipes(pantryForApi(), { request: text, prefs, count: 3, maxMissing: 12 }),
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 12000); }),
       ]);
-      const recs = (data.recipes || []).map(dishFromApi);
-      if (recs.length) reply = shoppingAnswer(recs[0]);
+      // A preference edit during generation invalidates that answer's instructions.
+      if (JSON.stringify(prefs) !== JSON.stringify(state.prefs)) {
+        source = 'Your preferences changed. Using available recipes with your latest settings.';
+      } else {
+        const recs = (data.recipes || []).map(dishFromApi).filter(passesPrefs);
+        if (recs.length) {
+          const dish = { ...recs[0], id: `chat-${uid()}` };
+          chatDishes.set(dish.id, dish);
+          reply = shoppingAnswer(dish);
+          source = 'AI-generated recipe';
+        } else {
+          source = 'AI returned no matching recipes. Using available recipes.';
+        }
+      }
     }
-  } catch { /* offline or slow — fall back to what we know locally */ }
+  } catch {
+    source = 'AI is unavailable. Using available recipes.';
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!reply) {
     const d = findDishForQuery(text);
     if (d) {
       reply = shoppingAnswer(d);
     } else {
-      const opts = activeDishes().map(analyze).filter(eligible)
+      const opts = activeDishes().filter(passesPrefs).map(analyze).filter(eligible)
         .sort((a, b) => a.missing.length - b.missing.length).slice(0, 3).map(a => a.dish.name);
       reply = opts.length
-        ? `I don’t have a recipe for “${esc(text)}” handy. Right now you can make: <b>${esc(opts.join(', '))}</b>. Ask me about one of those, or a dish like “shakshuka”.`
-        : 'Add a few pantry items first, then tell me what you’d like to make and I’ll list what to buy.';
+        ? `I don’t have a matching recipe for “${esc(text)}”. With your preferences, you can make: <b>${esc(opts.join(', '))}</b>.`
+        : 'No available recipes match your pantry and preferences. Try adding ingredients or reviewing your preferences.';
     }
   }
   thinking.remove();
-  addChat('bot', reply);
+  addChat('bot', `<small class="chat-source">${esc(source)}</small>${reply}`);
 }
 
 chatEl.fab.addEventListener('click', () => (chatEl.panel.hidden ? chatOpen() : chatClose()));
@@ -2335,6 +2383,7 @@ chatEl.log.addEventListener('click', e => {
   const b = e.target.closest('[data-chat-open]');
   if (!b) return;
   const d = dishById(b.dataset.chatOpen);
+  if (d && !passesPrefs(d)) { toast('This recipe no longer matches your preferences'); return; }
   if (d) { chatClose(); openDetail(d); }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });

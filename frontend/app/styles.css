@@ -30,7 +30,7 @@ body { overflow: hidden; }
 .pill.tonight svg { color: var(--accent); flex-shrink: 0; }
 
 /* ---------- stage ---------- */
-.stage { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; min-height: 0; min-width: 0; }
+.stage { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; min-width: 0; }
 .screen { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding-bottom: 8px; transform: scale(var(--fit, 1)); transform-origin: center center; }
 .caption { font-size: 13px; color: var(--text-3); }
 .foot { display: flex; align-items: center; justify-content: flex-end; padding: 0 40px; position: relative; z-index: 1; }
@@ -609,3 +609,6 @@ select.field option { background: #1C1917; color: var(--text); }
 .choose .option strong { font-size: 16px; font-weight: 600; }
 .choose .option small { font-size: 13px; color: var(--text-2); line-height: 1.4; }
 .choose .option .go { color: var(--text-3); flex-shrink: 0; }
+
+.recipe-notice { font-size: 13px; color: var(--text-2); text-align: center; margin: 0 0 12px; }
+.chat-source { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }

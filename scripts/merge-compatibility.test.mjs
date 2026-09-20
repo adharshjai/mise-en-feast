@@ -4,9 +4,9 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import * as preferences from '../frontend/shared/store.js';
 
-function app() {
-  const source = readFileSync(new URL('../frontend/app/app.js', import.meta.url), 'utf8')
-    .replace(/\r\n/g, '\n')
+function app({ chat = false } = {}) {
+  const full = readFileSync(new URL('../frontend/app/app.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const source = full
     .split('/* =========================================================================\n   Wiring')[0]
     .replace(/^import [\s\S]*?from ['"][^'"]+['"];\r?\n/gm, '');
   const node = { addEventListener() {} };
@@ -16,6 +16,7 @@ function app() {
     document: { querySelector: () => node },
   });
   vm.runInContext(source, context);
+  if (chat) vm.runInContext(full.slice(full.indexOf('const chatEl ='), full.indexOf('chatEl.fab.addEventListener')), context);
   return code => vm.runInContext(code, context);
 }
 
@@ -50,4 +51,69 @@ test('cooking confirmation and actual deductions both follow selected servings',
     closeSheet = renderAll = toast = logCook = refreshRecipes = () => {};
     finishMadeIt('test');`);
   assert.equal(run('deducted'), 4);
+});
+
+test('chat sends preferences, rejects allergenic staples, and keeps generated links resolvable', async () => {
+  const run = app({chat: true});
+  run(`state.prefs = normalizePrefs({allergies: ['dairy']});
+    globalThis.messages = [];
+    addChat = (who, html) => { messages.push(html); return {remove(){}}; };
+    globalThis.apiConfigured = () => true;
+    globalThis.fetchRecipes = async (items, opts) => {
+      globalThis.sent = opts;
+      return {recipes: [
+        {title: 'Butter rice', ingredients: [{name: 'Butter', staple: true}], steps: []},
+        {title: 'Tomato rice', ingredients: [{name: 'Tomato'}], steps: []}
+      ]};
+    };`);
+  await run(`handleChat('rice')`);
+  assert.equal(run(`sent.prefs.allergies[0]`), 'dairy');
+  assert.equal(run(`messages.at(-1).includes('Tomato rice')`), true);
+  assert.equal(run(`messages.at(-1).includes('Butter rice')`), false);
+  assert.equal(run(`dishById([...chatDishes.keys()][0]).name`), 'Tomato rice');
+});
+
+test('offline chat filters exact matches and suggestions by allergies and diet', async () => {
+  const run = app({chat: true});
+  run(`state.prefs = normalizePrefs({diet: ['vegan'], allergies: ['peanuts']});
+    globalThis.messages = [];
+    addChat = (who, html) => { messages.push(html); return {remove(){}}; };
+    globalThis.apiConfigured = () => true;
+    globalThis.fetchRecipes = async () => { throw new Error('offline'); };
+    liveDishes = [
+      {id: 'chicken', name: 'Chicken soup', ingredients: [{name: 'Chicken', key: 'chicken', need: 1}], servings: 2},
+      {id: 'nuts', name: 'Peanut rice', ingredients: [{name: 'Peanut', key: 'peanut', need: 1}], servings: 2},
+      {id: 'rice', name: 'Tomato rice', ingredients: [{name: 'Tomato', key: 'tomato', need: 1}], servings: 2}
+    ];`);
+  assert.equal(run(`findDishForQuery('Chicken soup')`), null);
+  await run(`handleChat('Chicken soup')`);
+  assert.equal(run(`messages.at(-1).includes('AI is unavailable')`), true);
+  assert.equal(run(`messages.at(-1).includes('<b>Tomato rice</b>')`), true);
+  assert.equal(run(`messages.at(-1).includes('Peanut rice')`), false);
+});
+
+test('a preference edit while chat is loading discards stale AI instructions', async () => {
+  const run = app({chat: true});
+  run(`globalThis.messages = [];
+    addChat = (who, html) => { messages.push(html); return {remove(){}}; };
+    globalThis.apiConfigured = () => true;
+    globalThis.fetchRecipes = () => new Promise(resolve => { globalThis.respond = resolve; });`);
+  const pending = run(`handleChat('dinner')`);
+  run(`state.prefs = normalizePrefs({diet: ['vegan']});
+    respond({recipes: [{title: 'Old answer', ingredients: [], steps: []}]});`);
+  await pending;
+  assert.equal(run(`messages.at(-1).includes('Your preferences changed')`), true);
+  assert.equal(run(`messages.at(-1).includes('Old answer')`), false);
+});
+
+test('recipe refresh failure visibly selects built-in recipes', async () => {
+  const run = app();
+  run(`state.pantry = [{id: 'one'}];
+    globalThis.apiConfigured = () => true;
+    globalThis.fetchRecipes = async () => { throw new Error('offline'); };
+    pantryForApi = () => [];
+    renderAll = renderRecipeNotice = () => {};`);
+  await run('refreshRecipes()');
+  assert.equal(run(`recipeNotice`), 'AI is unavailable · showing built-in recipes.');
+  assert.equal(run('liveDishes'), null);
 });
