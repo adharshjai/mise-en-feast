@@ -14,21 +14,33 @@
 
 <div class="app">
 <header class="topbar">
-  <a class="wordmark" href="../" id="home" aria-label="Pantry home">
+  <a class="wordmark" href="./" id="home" aria-label="Pantry home">
     <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" fill="#FF7A1A"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" fill="#1A0E05"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" fill="#1A0E05"/><path d="M17.2 3.6l-3.6 7.2" stroke="#1A0E05" stroke-width="2.6" stroke-linecap="round"/></svg>
     <span>Pantry</span>
   </a>
-  <nav class="glass pillbar" aria-label="Primary">
-    <button class="pill glass tonight" id="btn-tonight" type="button" hidden>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
-      <span>Tonight</span>
-    </button>
-    <button class="pill ghost" id="btn-pantry" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="panel">0 items</button>
-    <button class="pill prominent" id="btn-scan" type="button">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-      <span>Scan</span>
-    </button>
-  </nav>
+  <div class="topright">
+    <nav class="glass pillbar" aria-label="Primary">
+      <button class="pill glass tonight" id="btn-tonight" type="button" hidden>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+        <span>Tonight</span>
+      </button>
+      <button class="pill ghost" id="btn-pantry" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="panel">0 items</button>
+      <button class="pill prominent" id="btn-scan" type="button">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+        <span>Scan</span>
+      </button>
+    </nav>
+    <div class="profile" id="profile">
+      <button class="circle glass avatar" id="btn-profile" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Account">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0"/></svg>
+      </button>
+      <div class="menu glass" id="profile-menu" role="menu" hidden>
+        <button class="menu-item" type="button" role="menuitem" data-profile="preferences">Preferences</button>
+        <button class="menu-item" type="button" role="menuitem" data-profile="clear">Clear pantry</button>
+        <button class="menu-item danger" type="button" role="menuitem" data-profile="auth" hidden>Sign out</button>
+      </div>
+    </div>
+  </div>
 </header>
 
 <main class="stage">
@@ -108,11 +120,6 @@
     <button class="linkish" id="empty-sample" type="button">Or try a sample receipt</button>
   </section>
 </main>
-
-<footer class="foot">
-  <button class="linkish dim" id="btn-signout" type="button" hidden>Sign out</button>
-  <button class="linkish dim" id="btn-reset" type="button">Start over</button>
-</footer>
 </div>
 
 <!-- Screen-reader only: which dish is on top. Lives outside the screens so it is never display:none. -->
@@ -156,6 +163,9 @@
   </form>
   <datalist id="food-options"></datalist>
   <div class="panel-body scroll" id="panel-body"></div>
+  <div class="panel-foot">
+    <button class="linkish dim" id="btn-clear" type="button">Clear pantry</button>
+  </div>
 </aside>
 
 <!-- Kitchen helper: chat assistant docked bottom-right -->

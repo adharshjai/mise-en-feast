@@ -5,7 +5,7 @@
 body { overflow: hidden; }
 /* The layout grid is on .app, not <body>: browser extensions inject elements into <body>,
    and as grid items they would claim the first row and push the whole app down. */
-.app { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 88px minmax(0, 1fr) 44px; }
+.app { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 88px minmax(0, 1fr); }
 
 /* ---------- top bar ---------- */
 .topbar {
@@ -430,3 +430,33 @@ select.field option { background: #1C1917; color: var(--text); }
 .amt-slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: var(--accent); border: 2px solid var(--on-accent); cursor: pointer; }
 .amt-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .amt-out { min-width: 66px; text-align: right; font-size: 13px; font-weight: 600; color: var(--accent); }
+
+/* topbar right cluster + account/profile menu */
+.topright { display: flex; align-items: center; gap: 10px; }
+.profile { position: relative; }
+.avatar { color: var(--text); }
+.profile .menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 45; min-width: 190px; padding: 6px; border-radius: 14px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.menu-item { text-align: left; padding: 10px 12px; border-radius: 10px; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+.menu-item:hover { background: rgba(255,255,255,.08); }
+.menu-item.danger { color: var(--red); }
+
+/* pantry sort tabs */
+.ptabs { display: flex; gap: 4px; padding: 3px; margin: 2px 0 14px; background: rgba(255,255,255,.05); border-radius: 12px; }
+.ptab { flex: 1 1 auto; padding: 8px 8px; border: 0; border-radius: 9px; background: transparent; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s ease, color .15s ease; }
+.ptab.on { background: rgba(255,255,255,.10); color: var(--text); }
+.ptab:hover:not(.on) { color: var(--text); }
+
+/* pantry row: colour + percentage by how much is left, expiry as a date */
+.prow .fresh { min-width: 88px; }
+.fmeta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.fmeta .pct { font-size: 12px; font-weight: 700; }
+.fmeta .exp { font-size: 11px; color: var(--text-3); }
+.fresh.amt-green .bar i { background: var(--green); }
+.fresh.amt-yellow .bar i { background: var(--yellow); }
+.fresh.amt-red .bar i { background: var(--red); }
+.fresh.amt-green .pct, .fresh.amt-green .exp { color: var(--green); }
+.fresh.amt-yellow .pct, .fresh.amt-yellow .exp { color: var(--yellow); }
+.fresh.amt-red .pct, .fresh.amt-red .exp { color: var(--red); }
+
+/* clear-pantry lives in the panel footer now */
+.panel-foot { padding: 10px 28px 16px; border-top: 1px solid rgba(255,255,255,.07); }

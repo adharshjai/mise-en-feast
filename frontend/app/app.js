@@ -72,6 +72,19 @@ const CATALOG = {
 const DEFAULT_CAT = { shelf: 7, burn: 0.3, servings: 4 };
 const catalog = key => CATALOG[key] || DEFAULT_CAT;
 
+/* ---------- food categories (for the Category tab) ---------- */
+const CATEGORY = {
+  'milk': 'Dairy & eggs', 'eggs': 'Dairy & eggs', 'parmesan': 'Dairy & eggs', 'feta': 'Dairy & eggs', 'cream': 'Dairy & eggs', 'butter': 'Dairy & eggs',
+  'chicken thighs': 'Meat & fish',
+  'spinach': 'Produce', 'spring mix': 'Produce', 'tomatoes': 'Produce', 'basil': 'Produce', 'cucumber': 'Produce', 'onion': 'Produce', 'red onion': 'Produce', 'mushrooms': 'Produce', 'garlic': 'Produce', 'scallions': 'Produce', 'olives': 'Produce',
+  'spaghetti': 'Grains & pasta', 'jasmine rice': 'Grains & pasta', 'arborio rice': 'Grains & pasta',
+  'olive oil': 'Pantry & spices', 'chili flakes': 'Pantry & spices', 'soy sauce': 'Pantry & spices', 'stock': 'Pantry & spices', 'cumin': 'Pantry & spices', 'paprika': 'Pantry & spices', 'white wine': 'Pantry & spices',
+};
+const CATEGORY_ORDER = ['Produce', 'Meat & fish', 'Dairy & eggs', 'Grains & pasta', 'Pantry & spices', 'Other'];
+const categoryOf = key => CATEGORY[key] || 'Other';
+// Colour a row by how much is left, not by urgency.
+const amountLevel = pct => (pct <= 0.2 ? 'red' : pct <= 0.5 ? 'yellow' : 'green');
+
 /* ---------- per-serving nutrition + cost (approximate, for sorting/labels) ---------- */
 // kcal, protein/fat/carbs in grams, cost in USD — one "serving" as recipes count them.
 const NUTRI_DEFAULT = { kcal: 60, protein: 2, fat: 1, carbs: 10, cost: 0.6 };
@@ -549,6 +562,7 @@ const state = {
   sortMode: 'urgent',       // deck ordering, see SORTS
   detailDishId: null,       // recipe open in the detail sheet
   detailServings: 2,        // people the open recipe is scaled to
+  panelTab: 'expiring',     // pantry panel sort tab: expiring | amount | category
   panelOpen: false,
   leaving: false,
   sheetReturn: null,        // where keyboard focus goes back to when the sheet closes
@@ -570,7 +584,7 @@ const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
    ========================================================================= */
 const el = {
   deck: $('#deck'), caption: $('#deck-caption'), status: $('#deck-status'), deckScreen: $('#deck-screen'), endScreen: $('#end-screen'), emptyScreen: $('#empty-screen'),
-  count: $('#btn-pantry'), tonight: $('#btn-tonight'), reset: $('#btn-reset'),
+  count: $('#btn-pantry'), tonight: $('#btn-tonight'),
   veil: $('#veil'), sheet: $('#sheet'), panel: $('#panel'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
   toast: $('#toast'), file: $('#file-input'),
 };
@@ -582,7 +596,7 @@ function renderAll(opts = {}) {
   el.count.textContent = plural(n, 'item');
   el.count.setAttribute('aria-label', `Pantry, ${plural(n, 'item')}`);
   el.panelCount.textContent = plural(n, 'item');
-  el.reset.textContent = n ? 'Clear pantry' : 'Load demo pantry';
+  const clearBtn = $('#btn-clear'); if (clearBtn) clearBtn.hidden = n === 0;
   renderTonight();
   renderDeck(opts);
   if (state.panelOpen) renderPanel();
@@ -1264,14 +1278,16 @@ function stackDisplayName(lots) {
   return names.sort((a, b) => a.length - b.length)[0];
 }
 function prowHTML(it, { lot = false } = {}) {
-  const f = freshness(it);
   const cur = current(it);
   const pctLeft = it.initial > 0 ? clamp(cur / it.initial, 0, 1) : 0;
-  const amt = `${Math.round(pctLeft * 100)}% left · ~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
-  const sub = lot ? `${esc(lotLabel(it))} · ${amt}` : `${esc(it.qty)}${it.qty ? ' · ' : ''}${amt}`;
+  const lvl = amountLevel(pctLeft);
+  const sub = lot ? esc(lotLabel(it)) : `${esc(it.qty)}${it.qty ? ' · ' : ''}~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
   return `<div class="prow${lot ? ' lot' : ''}" data-id="${it.id}">
     <div class="name"><strong>${esc(lot && it.variant ? it.variant : it.name)}</strong><small>${sub}</small></div>
-    <div class="fresh"><div class="bar ${f.level}" title="${Math.round(pctLeft * 100)}% remaining"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div><small>exp ${esc(shortDate(it.expiry))}</small></div>
+    <div class="fresh amt-${lvl}">
+      <div class="bar"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div>
+      <div class="fmeta"><span class="pct">${Math.round(pctLeft * 100)}% left</span><span class="exp">exp ${esc(shortDate(it.expiry))}</span></div>
+    </div>
     <button class="circle sm glass del" type="button" data-remove="${it.id}" aria-label="Remove ${esc(it.name)}">${ICON.xSm}</button>
   </div>`;
 }
@@ -1280,16 +1296,19 @@ function stackHTML(lots) {
   const key = lots[0].key;
   const open = state.expanded.has(key);
   const primary = lots.slice().sort((a, b) => a.expiry - b.expiry)[0];
-  const f = freshness(primary);
   const total = lots.reduce((s, it) => s + current(it), 0);
   const totalInitial = lots.reduce((s, it) => s + it.initial, 0);
   const pctLeft = totalInitial > 0 ? clamp(total / totalInitial, 0, 1) : 0;
+  const lvl = amountLevel(pctLeft);
   const name = stackDisplayName(lots);
   return `<div class="prow stack${open ? ' open' : ''}" data-key="${esc(key)}">
     <button class="stack-main" type="button" data-toggle-stack="${esc(key)}" aria-expanded="${open}">
       <span class="chev">${ICON.chevron}</span>
       <div class="name"><strong>${esc(name)}</strong><small>${plural(lots.length, 'pack')} · ~${plural(Math.max(1, Math.round(total)), 'serving')} left</small></div>
-      <div class="fresh"><div class="bar ${f.level}" title="${Math.round(pctLeft * 100)}% remaining"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div><small>exp ${esc(shortDate(primary.expiry))}</small></div>
+      <div class="fresh amt-${lvl}">
+        <div class="bar"><i style="width:${Math.max(4, Math.round(pctLeft * 100))}%"></i></div>
+        <div class="fmeta"><span class="pct">${Math.round(pctLeft * 100)}% left</span><span class="exp">exp ${esc(shortDate(primary.expiry))}</span></div>
+      </div>
     </button>
   </div>
   <div class="lots">${lots.map(it => prowHTML(it, { lot: true })).join('')}</div>`;
@@ -1302,49 +1321,54 @@ function groupLots(items) {
   }
   return [...map.values()].map(lots => lots.sort((a, b) => a.expiry - b.expiry));
 }
+function checkinHTML(it) {
+  const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / it.burn) - (Date.now() - it.purchase) / DAY)) : 0;
+  const when = it.deducted > 0 ? 'used up cooking' : ranOut === 0 ? 'we estimate it ran out today' : ranOut === -1 ? 'we estimate it ran out yesterday' : `we estimate it ran out ${-ranOut} days ago`;
+  if (it.asking) {
+    return `<div class="checkin" data-id="${it.id}">
+      <div class="eyebrow">How much ${esc(it.name.toLowerCase())} is left?</div>
+      <div class="slider-row">
+        <input type="range" class="amt-slider" min="0" max="100" step="5" value="50" data-slider="${it.id}" aria-label="Percent of ${esc(it.name)} remaining">
+        <output class="amt-out" data-out="${it.id}">50% left</output>
+      </div>
+      <div class="opts">
+        <button class="pill prominent sm" type="button" data-setamt="${it.id}">Save</button>
+        <button class="linkish" type="button" data-unask="${it.id}">Back</button>
+      </div></div>`;
+  }
+  return `<div class="checkin" data-id="${it.id}">
+    <div class="eyebrow">Still have this?</div>
+    <div class="item"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}${when}</small></div>
+    <div class="opts">
+      <button class="pill glass sm" type="button" data-gone="${it.id}">All gone</button>
+      <button class="pill prominent sm" type="button" data-ask="${it.id}">Still have some</button>
+    </div></div>`;
+}
+const stackAmountPct = lots => { const t = lots.reduce((s, it) => s + current(it), 0), ti = lots.reduce((s, it) => s + it.initial, 0); return ti > 0 ? t / ti : 0; };
 function renderPanel() {
   const mem = focusIndexIn(el.panelBody, '.checkin, .prow');
-  const buckets = { checkin: [], soon: [], fresh: [], low: [] };
-  // Place each food stack in the section of its most urgent lot
-  for (const lots of groupLots(state.pantry.filter(it => !needsCheckin(it)))) {
-    const primary = lots[0];
-    const f = freshness(primary);
-    if (f.mode === 'time' && f.level !== 'green') buckets.soon.push(lots);
-    else if (f.mode === 'amount' && f.level !== 'green') buckets.low.push(lots);
-    else buckets.fresh.push(lots);
+  const tab = state.panelTab || 'expiring';
+  const checkins = state.pantry.filter(needsCheckin).map(checkinHTML).join('');
+  const stacks = groupLots(state.pantry.filter(it => !needsCheckin(it)));
+  let body = '';
+  if (!stacks.length) {
+    body = checkins ? '' : '<p class="empty-note">Nothing here yet. Scan a receipt or add something by hand.</p>';
+  } else if (tab === 'category') {
+    const groups = new Map();
+    for (const lots of stacks) { const c = categoryOf(lots[0].key); if (!groups.has(c)) groups.set(c, []); groups.get(c).push(lots); }
+    body = CATEGORY_ORDER.filter(c => groups.has(c)).map(c => {
+      const g = groups.get(c).sort((a, b) => a[0].name.localeCompare(b[0].name));
+      return `<section class="psection"><div class="phead"><span class="eyebrow">${esc(c)}</span><small>${g.length}</small></div>${g.map(stackHTML).join('')}</section>`;
+    }).join('');
+  } else {
+    const sorted = tab === 'amount'
+      ? stacks.slice().sort((a, b) => stackAmountPct(a) - stackAmountPct(b))   // least left first
+      : stacks.slice().sort((a, b) => a[0].expiry - b[0].expiry);             // soonest expiry first
+    body = `<section class="psection">${sorted.map(stackHTML).join('')}</section>`;
   }
-  buckets.checkin = state.pantry.filter(needsCheckin);
-  const byStackUrgency = (a, b) => freshness(a[0]).urgency - freshness(b[0]).urgency;
-  buckets.soon.sort(byStackUrgency); buckets.low.sort(byStackUrgency);
-  buckets.fresh.sort((a, b) => daysLeft(a[0]) - daysLeft(b[0]));
-  const section = (title, stacks) => stacks.length
-    ? `<section class="psection"><div class="phead"><span class="eyebrow">${title}</span><small>${stacks.length}</small></div>${stacks.map(stackHTML).join('')}</section>`
-    : '';
-  const checkin = buckets.checkin.map(it => {
-    const ranOut = it.burn > 0 ? Math.min(0, Math.round(((it.initial - it.deducted - OUT) / it.burn) - (Date.now() - it.purchase) / DAY)) : 0;
-    const when = it.deducted > 0 ? 'used up cooking' : ranOut === 0 ? 'we estimate it ran out today' : ranOut === -1 ? 'we estimate it ran out yesterday' : `we estimate it ran out ${-ranOut} days ago`;
-    if (it.asking) {
-      return `<div class="checkin" data-id="${it.id}">
-        <div class="eyebrow">How much ${esc(it.name.toLowerCase())} is left?</div>
-        <div class="slider-row">
-          <input type="range" class="amt-slider" min="0" max="100" step="5" value="50" data-slider="${it.id}" aria-label="Percent of ${esc(it.name)} remaining">
-          <output class="amt-out" data-out="${it.id}">50% left</output>
-        </div>
-        <div class="opts">
-          <button class="pill prominent sm" type="button" data-setamt="${it.id}">Save</button>
-          <button class="linkish" type="button" data-unask="${it.id}">Back</button>
-        </div></div>`;
-    }
-    return `<div class="checkin" data-id="${it.id}">
-      <div class="eyebrow">Still have this?</div>
-      <div class="item"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}${when}</small></div>
-      <div class="opts">
-        <button class="pill glass sm" type="button" data-gone="${it.id}">All gone</button>
-        <button class="pill prominent sm" type="button" data-ask="${it.id}">Still have some</button>
-      </div></div>`;
-  }).join('');
-  el.panelBody.innerHTML = checkin + section('Use soon', buckets.soon) + section('Running low', buckets.low) + section('Fresh', buckets.fresh)
-    || '<p class="empty-note">Nothing here yet. Scan a receipt or add something by hand.</p>';
+  const tab_ = (id, label) => `<button class="ptab${tab === id ? ' on' : ''}" type="button" role="tab" aria-selected="${tab === id}" data-ptab="${id}">${label}</button>`;
+  const tabs = stacks.length ? `<div class="ptabs" role="tablist">${tab_('expiring', 'Expiring')}${tab_('amount', 'Amount left')}${tab_('category', 'Category')}</div>` : '';
+  el.panelBody.innerHTML = checkins + tabs + body;
   restoreFocusIn(el.panelBody, '.checkin, .prow', mem, el.panel);
 }
 
@@ -1372,30 +1396,51 @@ $('#btn-skip').addEventListener('click', () => commit('skip'));
 $('#btn-cook').addEventListener('click', () => commit('cook'));
 $('#btn-details').addEventListener('click', () => openDetail(state.deck[0]));
 $('#btn-reshuffle').addEventListener('click', () => { state.skipped.clear(); state.chosen.clear(); renderAll({ enter: true }); });
-// One button, two jobs, so it is labelled from state (see renderAll) and says what it did
-$('#btn-reset').addEventListener('click', () => {
-  const fresh = state.pantry.length === 0;
-  state.pantry = fresh ? seedPantry() : [];
+function clearPantry() {
+  if (!state.pantry.length) return;
+  state.pantry = [];
   state.skipped.clear(); state.cooked.clear(); state.chosen.clear();
   clearLocal();
   closeSheet(); closePanel();
   renderAll({ enter: true });
-  toast(fresh ? 'Demo pantry loaded' : 'Pantry cleared', fresh ? plural(state.pantry.length, 'item') : '');
+  toast('Pantry cleared');
   refreshRecipes();
+}
+$('#btn-clear').addEventListener('click', clearPantry);
+
+// Logo goes "home" within the app (deck) instead of navigating away — which used to
+// drop the demo session and feel like a sign-out.
+$('#home').addEventListener('click', e => {
+  e.preventDefault();
+  closeSheet(); closePanel();
+  renderAll({ enter: true });
 });
-// Footer account button: "Sign out" with an account, "Sign in" in demo mode, hidden when
-// Supabase isn't configured at all. Wired once the session is known (see bottom of file).
+
+/* ---------- profile menu (account: preferences, clear, sign out) ---------- */
+const profileEl = $('#profile'), profileBtn = $('#btn-profile'), profileMenu = $('#profile-menu');
+const closeProfile = () => { profileMenu.hidden = true; profileEl.classList.remove('open'); profileBtn.setAttribute('aria-expanded', 'false'); };
+profileBtn.addEventListener('click', () => {
+  if (profileMenu.hidden) { profileMenu.hidden = false; profileEl.classList.add('open'); profileBtn.setAttribute('aria-expanded', 'true'); }
+  else closeProfile();
+});
+document.addEventListener('click', e => { if (!profileEl.contains(e.target)) closeProfile(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !profileMenu.hidden) closeProfile(); });
+profileMenu.addEventListener('click', e => {
+  const b = e.target.closest('[data-profile]'); if (!b) return;
+  closeProfile();
+  if (b.dataset.profile === 'preferences') return openOnboarding();
+  if (b.dataset.profile === 'clear') return clearPantry();
+  if (b.dataset.profile === 'auth') return b.dataset.action === 'signin'
+    ? location.assign('../login/')
+    : signOut().then(() => location.replace('../login/'));
+});
+// Account row in the profile menu: sign out (signed in), sign in (demo), hidden (no auth configured).
 function wireAccountButton(session) {
-  const b = $('#btn-signout');
+  const b = profileMenu.querySelector('[data-profile="auth"]');
   b.hidden = !configured;
   if (!configured) return;
-  if (session) {
-    b.textContent = 'Sign out';
-    b.addEventListener('click', () => signOut().then(() => location.replace('../login/')));
-  } else {
-    b.textContent = 'Sign in';
-    b.addEventListener('click', () => location.assign('../login/'));
-  }
+  b.textContent = session ? 'Sign out' : 'Sign in';
+  b.dataset.action = session ? 'signout' : 'signin';
 }
 // Hover preview of the swipe overlays: mouse only, a touch tap would leave it stuck
 ['cook', 'skip'].forEach(k => {
@@ -1467,6 +1512,7 @@ el.panel.addEventListener('click', e => {
   const t = e.target.closest('button');
   if (!t) return;
   const item = id => state.pantry.find(x => x.id === id);
+  if (t.dataset.ptab) { state.panelTab = t.dataset.ptab; return renderPanel(); }
   if (t.dataset.toggleStack) {
     const key = t.dataset.toggleStack;
     if (state.expanded.has(key)) state.expanded.delete(key);
