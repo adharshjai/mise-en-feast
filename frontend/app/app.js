@@ -309,16 +309,38 @@ let lastReceipt = {
   total: SAMPLE_RECEIPT.total,
 };
 
+// The pantry key: a catalog food when the name really is that food, judged by the same
+// head-noun and form rules the recipe matcher uses ("Roma tomatoes" is tomatoes, "coconut
+// milk" is not milk, "chicken breast" is not chicken thighs), else the name itself. Two
+// lots stack only when they share a key, so different products must get different keys.
+const CATALOG_INDEX = buildPantryIndex([], Object.keys(CATALOG));
 function keyForName(name) {
   const n = String(name || '').toLowerCase().trim();
   if (!n) return 'item';
   if (CATALOG[n]) return n;
   const base = n.split(',')[0].trim();
   if (CATALOG[base]) return base;
-  for (const k of Object.keys(CATALOG)) {
-    if (n.includes(k) || k.includes(base)) return k;
-  }
+  const m = matchIngredient({ name: base }, CATALOG_INDEX);
+  if (m && m.key && !m.approx) return m.key;
   return base.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() || 'item';
+}
+// A scan's group_key can be as coarse as a brand ("lean cuisine"); it decides the key only
+// when it names a catalog food. Otherwise the item's own name does.
+function keyForScan(item) {
+  const fromGroup = item.group_key ? keyForName(item.group_key) : '';
+  return fromGroup && CATALOG[fromGroup] ? fromGroup : keyForName(item.name);
+}
+// Lots keyed by such a group stacked different foods under one header. Re-key them by
+// their own name once; catalog-keyed lots are left alone.
+function rekeyLots(items) {
+  let n = 0;
+  for (const it of items) {
+    if (CATALOG[it.key]) continue;
+    const k = keyForName(it.name);
+    if (k !== it.key) { it.key = k; n++; }
+  }
+  if (n) console.info(`[pantry] ${n} lots re-keyed by their own name`);
+  return n;
 }
 
 function qtyLabel(item) {
@@ -341,7 +363,7 @@ const lineServings = l => servingsFor(l.key, l.qty) ?? l.estimated ?? catalog(l.
 
 /** Map a /scan item into a review-row + pantry seed fields. */
 function lineFromScanItem(item) {
-  const key = keyForName(item.group_key || item.name);
+  const key = keyForScan(item);
   const purchaseMs = item.purchase_date ? Date.parse(item.purchase_date) : Date.now();
   const expiryMs = item.expiration_date ? Date.parse(item.expiration_date) : purchaseMs + catalog(key).shelf * DAY;
   const qty = formatQuantity(qtyLabel(item));   // "1.4 lb" -> "635 g": one spelling on the review row and the pantry row
@@ -3391,6 +3413,7 @@ if (saved) {
   state.skipped = new Set(saved.skipped);
   state.cooked = new Set(saved.cooked);
   state.chosen = new Set(saved.chosen);
+  rekeyLots(state.pantry);                  // lots stacked by a coarse scan group split back into their own foods, once
   recomputeDefaultServings(state.pantry);   // lots saved with the package default get their servings from their quantity, once
 } else {
   state.pantry = seedPantry();

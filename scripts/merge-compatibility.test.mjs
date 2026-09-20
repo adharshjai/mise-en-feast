@@ -532,3 +532,27 @@ test('every ingredient carries a "+" that puts it on the shopping list', () => {
   // rendered again, the chip shows the listed state instead of a plus
   assert.equal(run('chipHTML(analyze(liveDishes[0]).ings[1], liveDishes[0]).includes(\'class="chip missing listed"\')'), true);
 });
+
+test('pantry keys stack only the same food: brand groups split, look-alikes stay apart', () => {
+  const run = app();
+  // two frozen dinners that a scan grouped under one brand key
+  run(`state.pantry = [${lot('Lean Cuisine Beef', 'lean cuisine', 1)}, ${lot('Lean Cuisine Thai Peanut Chicken', 'lean cuisine', 3)}];
+    globalThis.n = rekeyLots(state.pantry);`);
+  assert.equal(run('n'), 2);
+  assert.notEqual(run('state.pantry[0].key'), run('state.pantry[1].key'));
+  assert.equal(run('keyForName("Lean Cuisine Beef")'), 'lean cuisine beef');
+  // catalog foods still stack under their food, variants included
+  assert.equal(run('keyForName("Roma tomatoes")'), 'tomatoes');
+  assert.equal(run('keyForName("Tomatoes, roma")'), 'tomatoes');
+  assert.equal(run('keyForName("Garlic cloves")'), 'garlic');
+  // look-alikes are not the catalog food
+  assert.equal(run('keyForName("Coconut milk")'), 'coconut milk');
+  assert.equal(run('keyForName("Chicken breast")'), 'chicken breast');
+  assert.equal(run('keyForName("Onion powder")'), 'onion powder');
+  // a scan's group_key only wins when it is a real food
+  assert.equal(run('keyForScan({name: "Lean Cuisine Beef", group_key: "lean cuisine"})'), 'lean cuisine beef');
+  assert.equal(run('keyForScan({name: "ORG SPINACH 5OZ", group_key: "spinach"})'), 'spinach');
+  // a catalog-keyed lot is left alone by the boot pass
+  run(`state.pantry = [${lot('2% Milk', 'milk', 8)}]; globalThis.n2 = rekeyLots(state.pantry);`);
+  assert.equal(run('n2'), 0);
+});
