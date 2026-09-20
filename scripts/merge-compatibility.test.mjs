@@ -791,3 +791,18 @@ test('the sample receipt is gone: processing needs a real file and the review st
   assert.equal(run('typeof SAMPLE_RECEIPT'), 'undefined');
   assert.equal(run('lastReceipt.store + "|" + lastReceipt.total'), '|0');
 });
+
+test('nothing expires on the day it is added: every new lot lives until at least tomorrow', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const now = Date.now();
+    addLot('Milk', 'milk', '1 L', '', { expiry: now });                 // "expires today" from a receipt
+    addLot('Bread', 'bread', '1 pack', '', { expiry: now - 3 * DAY });  // already past its date
+    addLot('Rice', 'jasmine rice', '1 kg', '', { expiry: now + 5 * DAY });
+    addLot('Eggs', 'eggs', '12 pcs');                                   // catalog shelf life
+    globalThis.now = now;`);
+  assert.equal(run('state.pantry[0].expiry >= now + DAY'), true);
+  assert.equal(run('state.pantry[1].expiry >= now + DAY'), true);
+  assert.equal(run('state.pantry[2].expiry'), run('now + 5 * DAY'));    // a real date is left alone
+  assert.equal(run('state.pantry[3].expiry >= now + DAY'), true);
+});

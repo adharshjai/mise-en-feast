@@ -24,6 +24,7 @@ import { localSubstitutions } from '../shared/substitutions.js';
 import { summarize, lotEvent, expiredLots, expiringSoon } from '../shared/report.js';
 
 const DAY = 86400000;
+const MIN_LIFE = DAY;           // a lot added today lives until at least tomorrow (see addLot)
 const THRESHOLD = 120;          // px of drag that commits a swipe
 const OUT = 0.5;                // servings at or below this count as "out"
 const $ = (s, r = document) => r.querySelector(s);
@@ -709,7 +710,9 @@ function addLot(name, key, qty, raw = '', extras = null) {
   const initial = extras && extras.initial != null ? extras.initial : baseServings(key, qty);
   const burn = extras && extras.burn != null ? extras.burn : c.burn;
   const purchase = extras && extras.purchase != null ? extras.purchase : Date.now();
-  const expiry = extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY;
+  // Permanent rule: nothing expires on the day it is added. Whatever a receipt, the
+  // catalog or a typed date says, a lot always gets at least a full day from now.
+  const expiry = Math.max(extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY, Date.now() + MIN_LIFE);
   const it = {
     id: uid(),
     name,
@@ -4251,7 +4254,7 @@ cookEl.root.addEventListener('pointerup', e => {
 
 // Default use-by tracks the food's own shelf life (7 days only for unknown items).
 const shelfExpiryStr = name => isoDay(Date.now() + catalog(keyForName(name || '')).shelf * DAY);
-const resetAddDefaults = () => { $('#add-expiry').value = shelfExpiryStr($('#add-name').value); };
+const resetAddDefaults = () => { const f = $('#add-expiry'); f.min = isoDay(Date.now() + MIN_LIFE); f.value = shelfExpiryStr($('#add-name').value); };   // the picker will not offer today
 
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
