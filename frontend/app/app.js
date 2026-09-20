@@ -7,7 +7,7 @@
 
 import { requireAuth, signOut, configured, onAuthChange } from '../shared/supabase.js';
 import {
-  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs, clearLocalSaved, clearLocalDeck,
+  loadState, saveState, logCook, logReceipt, clearLocal, clearUnsaved, clearLocalPrefs, clearLocalSaved, clearLocalDeck,
   loadPrefs, savePrefs, prefsToRequest, normalizePrefs, servingsTarget, householdScale, ingredientHits,
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
   loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED, loadDeck, saveDeck,
@@ -17,13 +17,14 @@ import {
 } from '../shared/store.js';
 import { scanReceipt, fetchRecipes, fetchMealPlan, fetchSubstitutions, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
 import { matchIngredient, buildPantryIndex, normalizeName } from '../shared/ingredients.js';
-import { UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor, convertCanonical, convertQuantity } from '../shared/units.js';
+import { UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor, convertCanonical, convertQuantity, servingUnit, pieceGrams } from '../shared/units.js';
 import { dishSlug, needsGeneratedImage, applyDishImages, primeDishImages, clearDishImages, peekDishImage, warmDishImages } from '../shared/dish-images.js';
 import { findDurations, highlightDurations, createTimer, formatRemaining } from '../shared/timers.js';
 import { localSubstitutions } from '../shared/substitutions.js';
 import { summarize, lotEvent, expiredLots, expiringSoon } from '../shared/report.js';
 
 const DAY = 86400000;
+const MIN_LIFE = DAY;           // a lot added today lives until at least tomorrow (see addLot)
 const THRESHOLD = 120;          // px of drag that commits a swipe
 const OUT = 0.5;                // servings at or below this count as "out"
 const $ = (s, r = document) => r.querySelector(s);
@@ -358,7 +359,22 @@ function formatReceiptDate(iso) {
 // Servings a review row's lot starts with (F3.1): what its quantity says, by the same serving
 // sizes every other lot and every recipe's `need` are measured in; the scanner's own estimate
 // only stands in when the quantity cannot be sized ("1 bag"), and the package default last.
-const lineServings = l => servingsFor(l.key, l.qty) ?? l.estimated ?? catalog(l.key).servings;
+// What a quantity says about servings depends on what kind of quantity it is. A weight or
+// volume is sized like any quantity. A count is pieces for a food bought by the piece (eggs,
+// bananas, tomatoes) and packages for everything else: "1" of cereal is a box, never one
+// serving, so the parser's estimate of the package wins there, then the catalog's. A
+// receipt's "1" of a by-the-piece food is a carton or a bag too ("EGGS ×1"), so the parser's
+// estimate wins over a count of one whenever it has one.
+const isMeasured = qty => { const c = toCanonical(parseQuantity(qty)); return Boolean(c && (c.unit === 'g' || c.unit === 'ml')); };
+const countOf = qty => { const c = toCanonical(parseQuantity(qty)); return c && c.unit === 'pcs' ? c.amount : null; };
+const countsAsPieces = key => servingUnit(key) === 'pcs' || pieceGrams(key) != null;
+const sizedFromQuantity = (key, qty) => isMeasured(qty) || (countOf(qty) != null && countsAsPieces(key));
+const lineServings = l => {
+  const n = countOf(l.qty);
+  const packaged = n === 1 && Number(l.estimated) > 1;   // "×1" on a receipt is the package, whatever the food
+  if (sizedFromQuantity(l.key, l.qty) && !packaged) return servingsFor(l.key, l.qty) ?? l.estimated ?? catalog(l.key).servings;
+  return l.estimated ?? catalog(l.key).servings;
+};
 
 // A review row's quantity, said in the unit that food is already kept in, and the servings
 // that comes to. `pending` is the rows settled ahead of this one, so two lines of the same
@@ -388,7 +404,9 @@ function lineFromScanItem(item, pending = []) {
     dropped: false,
     estimated: Number(item.initial_servings || item.servings) || null,   // the parser's guess at the package, kept for unparseable quantities
     burn: Number(item.daily_burn_rate) || (item.burn_pattern === 'event' ? 0 : catalog(key).burn),
-    purchase: Number.isFinite(purchaseMs) ? purchaseMs : Date.now(),
+    // Everything is 100% when it is scanned: the burn clock starts now, whatever the receipt
+    // is dated. The receipt date still decides when the food goes off.
+    purchase: Date.now(),
     expiry: Number.isFinite(expiryMs) ? expiryMs : Date.now() + catalog(key).shelf * DAY,
   };
   return settleLine(line, pending);
@@ -575,12 +593,47 @@ function recomputeDefaultServings(items) {
   let n = 0;
   for (const it of items || []) {
     if (!it || it.deducted !== 0 || it.initial !== catalog(it.key).servings) continue;
+    if (!sizedFromQuantity(it.key, it.qty)) continue;   // a count of packages says nothing about servings
+    // Nor does a count of one, even for a food bought by the piece: "1 pcs" of eggs is the
+    // carton the receipt charged for, not a single egg, and `estimated` -- the parser's read
+    // on the package -- is a review-row field that never reaches a saved lot to argue
+    // otherwise. Sizing such a lot from its quantity is what shrank a scanned 12-egg carton
+    // back to one serving on the next load, with the package's burn rate still on it, so it
+    // read as empty within the day and asked "Still have this?" again.
+    const count = countOf(it.qty);
+    if (count != null && count <= 1) continue;
     const s = servingsFor(it.key, it.qty);
     if (s == null || s <= 0 || s === it.initial) continue;
     it.initial = s;
     n++;
   }
   if (n) console.info(`[pantry] servings recomputed from quantities for ${plural(n, 'lot')}`);
+  return n;
+}
+// Lots that an earlier build sized from a bare count ("1 cereal" = one serving) and then
+// ran down from the receipt date were asking "Still have this?" the day they were scanned.
+// Once per browser: give such untouched lots the package default back and restart their clock.
+const REPAIR_FLAG = 'pantry.repair.v2';
+function repairShrunkLots(items) {
+  let flag = null;
+  try { flag = localStorage.getItem(REPAIR_FLAG); } catch (_) { /* no storage: repair every boot, it is idempotent enough */ }
+  if (flag) return 0;
+  let n = 0;
+  const now = Date.now();
+  for (const it of items || []) {
+    if (!it || it.deducted !== 0) continue;
+    const young = now - it.purchase < 14 * DAY;
+    if (!young) continue;
+    // one "serving" from a count of one (or no usable quantity) was a package all along
+    const shrunk = it.initial <= 1.5 && !isMeasured(it.qty) && (countOf(it.qty) == null || countOf(it.qty) <= 1);
+    if (!shrunk && current(it) > OUT) continue;
+    if (shrunk) it.initial = Math.max(it.initial, catalog(it.key).servings);
+    it.purchase = now;   // and it is full again from now: the old clock ran on a wrong size
+    it.expiry = Math.max(it.expiry, now + MIN_LIFE);
+    n++;
+  }
+  try { localStorage.setItem(REPAIR_FLAG, String(now)); } catch (_) { /* fine */ }
+  if (n) console.info(`[pantry] ${plural(n, 'lot')} repaired: package servings restored, clock restarted`);
   return n;
 }
 /* ---------- the unit a food is kept in ----------
@@ -668,12 +721,13 @@ function stackAmountText(lots) {
 function rebaseLot(it, pct) {
   unitCache.size = -1;   // the ratio this lot is read by has moved
   const c = lotSize(it);
-  if (c) {
-    it.qty = formatQuantity({ ...c, amount: c.amount * (pct / 100) });
-    it.initial = Math.max(0.1, baseServings(it.key, it.qty));
-  } else {
-    it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (pct / 100));   // no readable quantity: the package default, scaled
-  }
+  // The slider says what fraction of THIS lot is left, so scale the lot's own size. Reading
+  // the new size back out of the rewritten quantity instead sent it through servingsFor,
+  // which counts a package's "1 pcs" as a single serving: a 12-egg carton answered as half
+  // full came back as 0.5 servings while keeping the carton's burn rate, so the card the
+  // user had just dismissed re-armed inside a day. Scaling keeps size and burn in step.
+  it.initial = Math.max(0.1, it.initial * (pct / 100));
+  if (c) it.qty = formatQuantity({ ...c, amount: c.amount * (pct / 100) });
   it.purchase = Date.now(); it.deducted = 0; it.asking = false;
   it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
 }
@@ -709,7 +763,9 @@ function addLot(name, key, qty, raw = '', extras = null) {
   const initial = extras && extras.initial != null ? extras.initial : baseServings(key, qty);
   const burn = extras && extras.burn != null ? extras.burn : c.burn;
   const purchase = extras && extras.purchase != null ? extras.purchase : Date.now();
-  const expiry = extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY;
+  // Permanent rule: nothing expires on the day it is added. Whatever a receipt, the
+  // catalog or a typed date says, a lot always gets at least a full day from now.
+  const expiry = Math.max(extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY, Date.now() + MIN_LIFE);
   const it = {
     id: uid(),
     name,
@@ -737,7 +793,10 @@ const upsert = (name, key, qty, raw = '', extras = null) => addLot(name, key, qt
 const burnRate = it => it.burn * householdScale(state.prefs);
 const current = it => Math.max(0, it.initial - burnRate(it) * ((Date.now() - it.purchase) / DAY) - it.deducted);
 const daysLeft = it => (it.expiry - Date.now()) / DAY;
-const needsCheckin = it => current(it) <= OUT;
+// The estimate alone never asks "Still have this?" in a lot's first days; only cooking can
+// empty something that new. After that, the running estimate is allowed to ask.
+const CHECKIN_GRACE = 2 * DAY;
+const needsCheckin = it => current(it) <= OUT && (it.deducted > 0 || Date.now() - it.purchase >= CHECKIN_GRACE);
 const lotsFor = key => state.pantry.filter(it => it.key === key).sort((a, b) => a.expiry - b.expiry);
 const available = key => lotsFor(key).filter(it => !needsCheckin(it)).reduce((s, it) => s + current(it), 0);
 /** Soonest-expiring lot that still has stock (FEFO). */
@@ -2271,7 +2330,7 @@ function rerenderSaved() {
 // setTab('curated'), and setTab folds the add form and any half-finished check-in on the way out.
 const shortDate = ms => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 function boughtLabel(it) {
-  return `bought ${shortDate(it.purchase)}`;
+  return `added ${shortDate(it.purchase)}`;
 }
 // "4.5 bananas of 8 bananas", or just "8 bananas" while none of it has gone.
 function amountOfLabel(it) {
@@ -3018,6 +3077,8 @@ function finishOnboarding({ next = null } = {}) {
 async function doSignOut(btn) {
   btn.disabled = true;
   btn.textContent = 'Signing out…';
+  clearLocal();        // the pantry too: it was the one store a sign-out left behind
+  clearUnsaved();      // including a save this account never got up to the project
   clearLocalPrefs();   // the next account on this browser starts from its own answers
   clearLocalSaved();   // and does not inherit this account's saved dishes (they stay in public.recipes)
   clearLocalDeck();    // nor its deck, which is cached on the account anyway
@@ -4251,7 +4312,7 @@ cookEl.root.addEventListener('pointerup', e => {
 
 // Default use-by tracks the food's own shelf life (7 days only for unknown items).
 const shelfExpiryStr = name => isoDay(Date.now() + catalog(keyForName(name || '')).shelf * DAY);
-const resetAddDefaults = () => { $('#add-expiry').value = shelfExpiryStr($('#add-name').value); };
+const resetAddDefaults = () => { const f = $('#add-expiry'); f.min = isoDay(Date.now() + MIN_LIFE); f.value = shelfExpiryStr($('#add-name').value); };   // the picker will not offer today
 
 $('#btn-add').addEventListener('click', () => {
   const f = $('#add-form');
@@ -4368,6 +4429,7 @@ if (saved) {
   state.chosen = new Set(saved.chosen);
   rekeyLots(state.pantry);                  // lots stacked by a coarse scan group split back into their own foods, once
   recomputeDefaultServings(state.pantry);   // lots saved with the package default get their servings from their quantity, once
+  repairShrunkLots(state.pantry);           // lots an earlier build shrank to a serving get the package back, once
   sweepExpired();                           // lots found past their date get their one `expired` event for the report
 } else {
   state.pantry = [];   // a new account starts empty: the first receipt or hand-added item fills it

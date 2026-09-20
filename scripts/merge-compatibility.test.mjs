@@ -791,3 +791,105 @@ test('the sample receipt is gone: processing needs a real file and the review st
   assert.equal(run('typeof SAMPLE_RECEIPT'), 'undefined');
   assert.equal(run('lastReceipt.store + "|" + lastReceipt.total'), '|0');
 });
+
+test('nothing expires on the day it is added: every new lot lives until at least tomorrow', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const now = Date.now();
+    addLot('Milk', 'milk', '1 L', '', { expiry: now });                 // "expires today" from a receipt
+    addLot('Bread', 'bread', '1 pack', '', { expiry: now - 3 * DAY });  // already past its date
+    addLot('Rice', 'jasmine rice', '1 kg', '', { expiry: now + 5 * DAY });
+    addLot('Eggs', 'eggs', '12 pcs');                                   // catalog shelf life
+    globalThis.now = now;`);
+  assert.equal(run('state.pantry[0].expiry >= now + DAY'), true);
+  assert.equal(run('state.pantry[1].expiry >= now + DAY'), true);
+  assert.equal(run('state.pantry[2].expiry'), run('now + 5 * DAY'));    // a real date is left alone
+  assert.equal(run('state.pantry[3].expiry >= now + DAY'), true);
+});
+
+test('a scanned package counted as "1" is a package, and everything is 100% at the scan', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const fiveDaysAgo = new Date(Date.now() - 5 * DAY).toISOString().slice(0, 10);
+    globalThis.cereal = lineFromScanItem({ name: 'Natures Path Cereal', quantity: 1, unit: 'count', servings: 10, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.eggs = lineFromScanItem({ name: 'Sparks Eggs', quantity: 1, unit: '', servings: 12, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.chicken = lineFromScanItem({ name: 'Chicken thighs', quantity: 1.4, unit: 'lb', servings: 3, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.mystery = lineFromScanItem({ name: 'Black Turtle Beans', quantity: 1, unit: 'count', purchase_date: fiveDaysAgo, is_food: true });`);
+  assert.equal(run('cereal.initial'), 10);                                  // the parser's package estimate, not one serving
+  assert.equal(run('eggs.initial'), 12);
+  assert.equal(run('Math.round(chicken.initial * 10) / 10'), 4.2);         // a weight is sized from the weight (635 g / 150 g)
+  assert.equal(run('mystery.initial'), run('catalog("black turtle beans").servings'));
+  assert.equal(run('Date.now() - cereal.purchase < 5000'), true);          // the clock starts at the scan
+  // added to the pantry, nothing is asking "Still have this?"
+  run(`for (const l of [cereal, eggs, chicken, mystery]) addLot(l.name, l.key, l.qty, l.raw, { initial: l.initial, burn: l.burn, purchase: l.purchase, expiry: l.expiry });`);
+  assert.equal(run('state.pantry.filter(needsCheckin).length'), 0);
+  // The card shows a rounded percentage (see pctLeft), and a scanned lot's clock starts at
+  // the scan, so the millisecond or two that elapses before this line burns a sliver of a
+  // serving. Assert what the user actually reads -- 100% -- not float equality, which made
+  // this fail whenever Date.now() ticked mid-test.
+  assert.equal(run('state.pantry.every(it => Math.round((current(it) / it.initial) * 100) === 100)'), true);
+});
+
+test('the estimate alone cannot ask "Still have this?" in a lot\'s first two days, and shrunk lots are repaired once', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const it = addLot('Tangerines', 'tangerines', '1 pcs', '', { initial: 1, burn: 1, purchase: Date.now() - DAY }).item;
+    globalThis.fresh = needsCheckin(it);
+    it.purchase = Date.now() - 3 * DAY; globalThis.later = needsCheckin(it);
+    it.purchase = Date.now() - DAY; it.deducted = 0.8; globalThis.cooked = needsCheckin(it);`);
+  assert.equal(run('fresh'), false);      // day-old lot, estimate says empty: not asked
+  assert.equal(run('later'), true);       // three days in, the estimate may ask
+  assert.equal(run('cooked'), true);      // cooking emptied it: asked whatever the age
+  run(`state.pantry = [{ id: 'a', name: 'Cereal', key: 'cereal', qty: '1 pcs', initial: 1, purchase: Date.now() - 4 * DAY, expiry: Date.now() + 30 * DAY, burn: 0.3, deducted: 0 }];
+    globalThis.repaired = repairShrunkLots(state.pantry);`);
+  assert.equal(run('repaired >= 1'), true);
+  assert.equal(run('state.pantry[0].initial'), run('catalog("cereal").servings'));
+  assert.equal(run('Date.now() - state.pantry[0].purchase < 5000'), true);
+  assert.equal(run('needsCheckin(state.pantry[0])'), false);
+});
+
+test('a scanned package survives the next load: a bare count of one never re-sizes a saved lot', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const today = new Date().toISOString().slice(0, 10);
+    const e = lineFromScanItem({ name: 'Sparks Eggs', quantity: 1, unit: '', servings: 12, purchase_date: today, is_food: true });
+    const c = lineFromScanItem({ name: 'Natures Path Cereal', quantity: 1, unit: 'count', servings: 10, days_to_use_up: 14, purchase_date: today, is_food: true });
+    for (const l of [e, c]) addLot(l.name, l.key, l.qty, l.raw, { initial: l.initial, burn: l.burn, purchase: l.purchase, expiry: l.expiry });
+    globalThis.atScan = state.pantry.map(it => it.initial).join(',');`);
+  assert.equal(run('atScan'), '12,10');
+  // `eggs` is bought by the piece AND its package happens to equal the catalog default, so
+  // the lot looked like a legacy row to recomputeDefaultServings and was shrunk to a single
+  // egg on every load -- with the carton's burn rate still on it.
+  run('recomputeDefaultServings(state.pantry); recomputeDefaultServings(state.pantry);');
+  assert.equal(run("state.pantry.map(it => it.initial).join(',')"), '12,10');
+  assert.equal(run('state.pantry.filter(needsCheckin).length'), 0);
+  assert.equal(run('state.pantry.every(it => Math.round((current(it) / it.initial) * 100) === 100)'), true);
+});
+
+test('a real quantity is still re-sized from it, so legacy lots are not stranded', () => {
+  const run = app();
+  // The pass exists for lots saved with the package default before servings were read off
+  // quantities. A quantity that actually says how much there is must still win.
+  run(`state.pantry = [];
+    globalThis.it = addLot('Chicken thighs', 'chicken thighs', '1.4 lb').item;
+    it.initial = catalog('chicken thighs').servings; it.deducted = 0;
+    globalThis.before = it.initial;
+    recomputeDefaultServings(state.pantry);`);
+  assert.equal(run('it.initial === before'), false);
+  assert.equal(run('Math.round(it.initial * 10) / 10'), 4.2);   // 635 g / 150 g per serving
+});
+
+test('answering "still have some" does not re-arm the card it dismissed', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const e = lineFromScanItem({ name: 'Sparks Eggs', quantity: 1, unit: '', servings: 12, purchase_date: new Date().toISOString().slice(0, 10), is_food: true });
+    globalThis.it = addLot(e.name, e.key, e.qty, e.raw, { initial: e.initial, burn: e.burn, purchase: e.purchase, expiry: e.expiry }).item;
+    rebaseLot(it, 50);`);
+  assert.equal(run('it.initial'), 6);               // half a 12-serving carton, not half a serving
+  assert.equal(run('needsCheckin(it)'), false);
+  assert.equal(run('it.deducted'), 0);
+  // and it lasts about as long as half a carton should, at the carton's own burn rate
+  assert.equal(run('(it.initial - OUT) / (it.burn * householdScale(state.prefs)) > 7'), true);
+  run('rebaseLot(it, 50);');
+  assert.equal(run('it.initial'), 3);               // scaling compounds off what is now there
+});
