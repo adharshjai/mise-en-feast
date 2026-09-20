@@ -67,6 +67,46 @@ export async function fetchRecipes(items, opts = {}) {
 }
 
 /**
+ * POST /chat — the in-app assistant (Claude via Bedrock, with controlled pantry tools).
+ * body: { messages, pantry, prefs, recent_meals }.
+ *   messages    [{ role: 'user'|'assistant', content }]  the turn history
+ *   pantry      the aggregated PantryItem array (same as fetchRecipes)
+ *   prefs       the v2 preferences object
+ *   recentMeals [{ title, cooked_at? }]  newest first (optional)
+ * Resolves to { reply, actions, recipes }. Each action is one the client applies:
+ *   { type: 'update_preference', field, value }
+ *   { type: 'mark_food_gone',    id, name, key }
+ *   { type: 'record_checkin',    id, name, key, percent }
+ * `recipes` are step-less suggestion cards; fetch steps with recipeDetail() when opened.
+ */
+export async function chat(messages, { pantry = [], prefs = null, recentMeals = [] } = {}) {
+  if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
+  const res = await fetch(`${baseUrl()}/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, pantry, prefs, recent_meals: recentMeals }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/**
+ * POST /recipe-detail — write the cooking steps for one dish on demand.
+ * The chatbot returns step-less recipe cards fast; call this when the user opens one.
+ * body: { title, servings, ingredients: string[], request? }.  Resolves to { steps: string[] }.
+ */
+export async function recipeDetail({ title, servings = 2, ingredients = [], request = null } = {}) {
+  if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
+  const res = await fetch(`${baseUrl()}/recipe-detail`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, servings, ingredients, request }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/**
  * POST /identify — FormData with a photo of a dish (jpeg/png/webp/heic).
  * Resolves to the backend's identified-dish shape:
  *   { title, confidence (0..1), description, cuisine, cook_minutes, servings,

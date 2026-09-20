@@ -24,11 +24,17 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+import bedrock
+import chat as cx
 import identify as ident
 import llm
 import recipes as rx
+import recipes_ai
 
-load_dotenv()  # must run before the client is built
+load_dotenv()  # backend/.env (local dev), if present
+# Also load the project-root .env so the AWS/Bedrock keys kept there are available when the
+# backend runs from this folder. Existing vars win (no override).
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
@@ -297,6 +303,38 @@ def get_recipes(req: rx.RecipeRequest):
     }
 
 
+@app.post("/chat")
+def chat(req: cx.ChatRequest):
+    """The in-app assistant: Claude (Bedrock) with controlled pantry tools.
+
+    Returns { reply, actions, recipes } where actions are validated writes the client
+    applies through Supabase (update a preference, mark a food gone, record an inventory
+    check-in) and recipes are step-less suggestion cards. All AWS credentials stay
+    server-side. See chat.py and recipes_ai.py."""
+    try:
+        return cx.run(req)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(502, f"Chat failed: {exc}") from exc
+
+
+@app.post("/recipe-detail")
+def recipe_detail(req: recipes_ai.StepsRequest):
+    """Write the cooking steps for one dish (Claude, fast model). Second half of the lazy
+    chatbot recipe flow: suggestion cards come back without steps, and the client calls this
+    only when the user opens a card. See recipes_ai.generate_steps."""
+    try:
+        steps = recipes_ai.generate_steps(req)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(502, f"Could not write recipe steps: {exc}") from exc
+    return {"steps": steps}
+
+
 class CookRequest(BaseModel):
     items: list[rx.PantryItem]
     deductions: dict[str, float]  # pantry item id or name -> servings used
@@ -353,8 +391,20 @@ async def identify_dish(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health():
-    """The model everything runs on, and whether the key is present (never the key itself)."""
-    return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY"))}
+    """The models in use, and whether keys are present (never the keys themselves).
+    Gemini runs /scan and /recipes; Claude (Bedrock) runs /chat and /recipe-detail."""
+    return {
+        "ok": True,
+        "model": MODEL,
+        "key_set": bool(os.getenv("GEMINI_API_KEY")),
+        "chat": {
+            "engine": "bedrock",
+            "model_smart": bedrock.model_smart(),
+            "model_fast": bedrock.model_fast(),
+            "region": bedrock.region(),
+            "key_set": bedrock.credentials_present(),
+        },
+    }
 
 
 @app.get("/")
@@ -364,5 +414,5 @@ def root():
         "service": "pantry-ai",
         "health": "/health",
         "docs": "/docs",
-        "endpoints": ["/scan", "/recipes", "/cook", "/identify"],
+        "endpoints": ["/scan", "/recipes", "/chat", "/recipe-detail", "/cook", "/identify"],
     }

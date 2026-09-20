@@ -497,6 +497,11 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 .msg.user { align-self: flex-end; background: rgba(var(--accent-rgb),.22); border-bottom-right-radius: 5px; }
 .msg b, .msg strong { font-weight: 600; }
 .chat-open { display: inline-block; margin-top: 8px; padding: 5px 12px; border-radius: 999px; border: 0; background: var(--accent); color: var(--on-accent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.chat-recipes { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.chat-recipe { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 9px 12px; border-radius: 12px; border: 0; background: rgba(255,255,255,.08); box-shadow: inset 0 0 0 1px rgba(255,122,26,.28); color: inherit; font: inherit; cursor: pointer; transition: background .12s ease; }
+.chat-recipe:hover, .chat-recipe:focus-visible { background: rgba(255,122,26,.16); outline: none; }
+.chat-recipe strong { font-size: 14px; font-weight: 600; }
+.chat-recipe small { color: var(--text-2); font-size: 12px; }
 .chat-form { display: flex; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid rgba(var(--ink),.08); }
 .chat-form .field { flex: 1 1 auto; }
 .dots { display: inline-flex; gap: 4px; align-items: center; height: 14px; }

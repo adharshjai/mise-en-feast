@@ -2,15 +2,18 @@
 Vercel entry point: serves the FastAPI backend from ../backend as a Python
 function, mounted under /api so the static frontend can call it same-origin.
 
-  /api/health   -> backend /health
-  /api/scan     -> backend /scan
-  /api/recipes  -> backend /recipes
-  /api/cook     -> backend /cook
-  /api/identify -> backend /identify
+  /api/health        -> backend /health
+  /api/scan          -> backend /scan          (Gemini: receipt OCR)
+  /api/recipes       -> backend /recipes        (Gemini: the recipe deck)
+  /api/chat          -> backend /chat           (Claude/Bedrock: in-app assistant + tools)
+  /api/recipe-detail -> backend /recipe-detail  (Claude/Bedrock: recipe steps on demand)
+  /api/cook          -> backend /cook
+  /api/identify      -> backend /identify
 
-Set GEMINI_API_KEY (and optionally GEMINI_MODEL) in the Vercel project's
-environment variables. Locally, run backend/ with uvicorn instead (see
-backend/README.md).
+Set GEMINI_API_KEY (and optionally GEMINI_MODEL) for the Gemini features, and the
+AWS Bedrock variables for the Claude chatbot (AWS_BEARER_TOKEN_BEDROCK, AWS_REGION,
+BEDROCK_MODEL_ID), in the Vercel project's environment variables. Locally, run
+backend/ with uvicorn instead (see backend/README.md).
 """
 
 import os

@@ -12,7 +12,7 @@ import {
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
   loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED, loadDeck, saveDeck,
 } from '../shared/store.js';
-import { scanReceipt, fetchRecipes, identifyDish, apiConfigured } from '../shared/api.js';
+import { scanReceipt, fetchRecipes, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
 
 const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
@@ -1292,7 +1292,11 @@ function detailBody(a, people) {
       </div>
       <div class="ings">
         <div class="eyebrow">Steps</div>
-        <ol class="stepslist">${d.steps.map((s, i) => `<li><span class="num glass">${i + 1}</span><span>${esc(s)}</span></li>`).join('')}</ol>
+        ${d.stepsLoading
+          ? '<p class="ing-note steps-loading"><span class="dots"><i></i><i></i><i></i></span> Writing the steps…</p>'
+          : (d.steps.length
+            ? `<ol class="stepslist">${d.steps.map((s, i) => `<li><span class="num glass">${i + 1}</span><span>${esc(s)}</span></li>`).join('')}</ol>`
+            : '<p class="ing-note">No steps for this one yet.</p>')}
       </div>
     </div>
     <div class="sheet-foot">
@@ -2312,6 +2316,7 @@ initDropdown($('#dd-sort'), v => {
 /* ---------- kitchen helper (chat: "what do I buy to make X?") ---------- */
 const chatEl = { fab: $('#btn-chat'), panel: $('#chat'), log: $('#chat-log'), form: $('#chat-form'), input: $('#chat-input'), close: $('#btn-chat-close') };
 let chatGreeted = false;
+const chatHistory = [];   // [{ role, content }] plain text, sent to /chat for multi-turn context
 const normQ = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 const listWords = arr => arr.length <= 1 ? (arr[0] || '') : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`;
 
@@ -2328,7 +2333,13 @@ function chatOpen() {
   requestAnimationFrame(() => chatEl.panel.classList.add('in'));
   chatEl.panel.setAttribute('aria-hidden', 'false');
   chatEl.fab.setAttribute('aria-expanded', 'true');
-  if (!chatGreeted) { chatGreeted = true; addChat('bot', 'Hey! Tell me a dish you want to make and I’ll tell you what to buy. Try “shakshuka” or “fried rice”.'); }
+  if (!chatGreeted) {
+    chatGreeted = true;
+    const hint = apiConfigured()
+      ? 'Hey! I can help with your pantry. Try “what can I make in 15 minutes?”, “I finished the milk”, “I have about half my eggs left”, or “I don’t like seafood”.'
+      : 'Hey! Tell me a dish you want to make and I’ll tell you what to buy. Try “shakshuka” or “fried rice”.';
+    addChat('bot', hint);
+  }
   chatEl.input.focus();
 }
 function chatClose() {
@@ -2366,54 +2377,126 @@ function shoppingAnswer(d) {
   const haveBit = have.length ? ` You already have ${esc(listWords(have))}.` : '';
   return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit} ${open}`;
 }
-async function handleChat(text) {
-  addChat('user', esc(text));
-  const thinking = addChat('bot', '<span class="dots"><i></i><i></i><i></i></span>');
-  const prefs = normalizePrefs(state.prefs);
-  let reply = '';
-  let source = 'AI is not connected. Using available recipes.';
-  let timeout;
-  try {
-    if (apiConfigured()) {
-      const data = await Promise.race([
-        fetchRecipes(pantryForApi(), { request: text, prefs, count: 3, maxMissing: 12 }),
-        // /recipes is two model calls now (ideas, then the recipes themselves).
-        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 30000); }),
-      ]);
-      // A preference edit during generation invalidates that answer's instructions.
-      if (JSON.stringify(prefs) !== JSON.stringify(state.prefs)) {
-        source = 'Your preferences changed. Using available recipes with your latest settings.';
-      } else {
-        const recs = (data.recipes || []).map(dishFromApi).filter(passesPrefs);
-        if (recs.length) {
-          const dish = { ...recs[0], id: `chat-${uid()}` };
-          chatDishes.set(dish.id, dish);
-          reply = shoppingAnswer(dish);
-          source = 'AI-generated recipe';
+// Claude replies in plain text. Escape it, then honour a little markdown (**bold**)
+// and line breaks so a multi-line answer reads cleanly in the bubble.
+function chatTextToHtml(text) {
+  return esc(String(text || ''))
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+}
+
+// Recent meals for the assistant's context: dishes marked cooked, newest first.
+function recentMealsForApi() {
+  return [...state.cooked].reverse().map(dishById).filter(Boolean).map(d => ({ title: d.name }));
+}
+
+// Turn the recipes the assistant returned into tappable cards. Each becomes a real dish
+// (same shape the deck uses) stored under a chat- id, so clicking it opens the normal
+// recipe detail popup via the existing [data-chat-open] handler.
+function renderChatRecipes(recipes) {
+  const cards = [];
+  (recipes || []).forEach((r, i) => {
+    const dish = { ...dishFromApi(r, i), id: `chat-${uid()}` };
+    if (!passesPrefs(dish)) return;   // safety net; recipes already honour prefs server-side
+    chatDishes.set(dish.id, dish);
+    const missing = r.missing_count ? `${plural(r.missing_count, 'thing')} to buy` : 'all in your pantry';
+    cards.push(
+      `<button class="chat-recipe" type="button" data-chat-open="${dish.id}">`
+      + `<strong>${esc(dish.name)}</strong>`
+      + `<small>${esc(dish.time)} · ${esc(dish.difficulty)} · ${esc(missing)}</small>`
+      + `</button>`,
+    );
+  });
+  return cards.length ? `<div class="chat-recipes">${cards.join('')}</div>` : '';
+}
+
+// Apply the validated write-actions the backend returned. All the quantity / expiry math
+// stays here in the deterministic client model — Claude only asked for the change.
+function applyChatActions(actions) {
+  let changed = false;
+  for (const a of actions || []) {
+    if (a.type === 'update_preference') {
+      state.prefs = normalizePrefs({ ...state.prefs, [a.field]: a.value });
+      savePrefs(state.prefs);
+      changed = true;
+    } else if (a.type === 'mark_food_gone') {
+      const lot = state.pantry.find(x => x.id === a.id);
+      const key = lot ? lot.key : null;
+      const before = state.pantry.length;
+      state.pantry = state.pantry.filter(x => (key ? x.key !== key : x.id !== a.id));
+      if (state.pantry.length !== before) changed = true;
+    } else if (a.type === 'record_checkin') {
+      const it = state.pantry.find(x => x.id === a.id);
+      if (it) {
+        const key = it.key;
+        state.pantry = state.pantry.filter(x => x.key !== key || x.id === it.id);
+        if (Number(a.percent) <= 0) {
+          state.pantry = state.pantry.filter(x => x.id !== it.id);
         } else {
-          source = 'AI returned no matching recipes. Using available recipes.';
+          it.initial = Math.max(0.1, catalog(it.key).servings * (Number(a.percent) / 100));
+          it.purchase = Date.now(); it.deducted = 0; it.asking = false;
+          it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
         }
+        changed = true;
       }
     }
-  } catch {
-    source = 'AI is unavailable. Using available recipes.';
-  } finally {
-    clearTimeout(timeout);
   }
-  if (!reply) {
-    const d = findDishForQuery(text);
-    if (d) {
-      reply = shoppingAnswer(d);
-    } else {
-      const opts = activeDishes().filter(passesPrefs).map(analyze).filter(eligible)
-        .sort((a, b) => a.missing.length - b.missing.length).slice(0, 3).map(a => a.dish.name);
-      reply = opts.length
-        ? `I don’t have a matching recipe for “${esc(text)}”. With your preferences, you can make: <b>${esc(opts.join(', '))}</b>.`
-        : 'No available recipes match your pantry and preferences. Try adding ingredients or reviewing your preferences.';
+  if (changed) { renderAll(); refreshRecipes(); }
+  return changed;
+}
+
+// Offline / no-API fallback: the old "what do I buy to make X" keyword helper.
+function offlineChatAnswer(text) {
+  let reply;
+  const d = findDishForQuery(text);
+  if (d) {
+    reply = shoppingAnswer(d);
+  } else {
+    const opts = activeDishes().filter(passesPrefs).map(analyze).filter(eligible)
+      .sort((a, b) => a.missing.length - b.missing.length).slice(0, 3).map(a => a.dish.name);
+    reply = opts.length
+      ? `With your preferences, you can make: <b>${esc(opts.join(', '))}</b>.`
+      : 'No available recipes match your pantry and preferences. Try adding ingredients or reviewing your preferences.';
+  }
+  const source = apiConfigured() ? 'Assistant unavailable — using available recipes.' : 'Assistant not connected — using available recipes.';
+  return `<small class="chat-source">${esc(source)}</small>${reply}`;
+}
+
+async function handleChat(text) {
+  addChat('user', esc(text));
+  chatHistory.push({ role: 'user', content: text });
+  const thinking = addChat('bot', '<span class="dots"><i></i><i></i><i></i></span>');
+
+  let done = false;
+  if (apiConfigured()) {
+    let timeout;
+    try {
+      const data = await Promise.race([
+        chatApi(chatHistory, {
+          pantry: pantryForApi(),
+          prefs: normalizePrefs(state.prefs),
+          recentMeals: recentMealsForApi(),
+        }),
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 25000); }),
+      ]);
+      const reply = String(data && data.reply || '').trim();
+      if (reply) {
+        applyChatActions(data.actions);
+        chatHistory.push({ role: 'assistant', content: reply });
+        thinking.remove();
+        addChat('bot', chatTextToHtml(reply) + renderChatRecipes(data.recipes));
+        done = true;
+      }
+    } catch { /* fall through to the offline helper */ } finally {
+      clearTimeout(timeout);
     }
   }
-  thinking.remove();
-  addChat('bot', `<small class="chat-source">${esc(source)}</small>${reply}`);
+
+  if (!done) {
+    thinking.remove();
+    chatHistory.push({ role: 'assistant', content: '(answered from built-in recipes while offline)' });
+    addChat('bot', offlineChatAnswer(text));
+  }
 }
 
 chatEl.fab.addEventListener('click', () => (chatEl.panel.hidden ? chatOpen() : chatClose()));
@@ -2425,12 +2508,31 @@ chatEl.form.addEventListener('submit', e => {
   chatEl.input.value = '';
   handleChat(t);
 });
+// Open a recipe from a chat card. Assistant suggestions arrive without steps (kept fast);
+// the first time one is opened we fetch its steps and fill them into the open popup.
+async function openChatDish(d) {
+  chatClose();
+  if ((d.steps && d.steps.length) || !apiConfigured()) { openDetail(d); return; }
+  d.stepsLoading = true;
+  openDetail(d);                       // shows ingredients now, "Writing the steps…" below
+  try {
+    const names = (d.names && d.names.length) ? d.names : d.ingredients.map(i => i.name);
+    const { steps } = await recipeDetail({ title: d.name, servings: d.servings, ingredients: names });
+    d.steps = Array.isArray(steps) ? steps : [];
+  } catch {
+    d.steps = [];
+  } finally {
+    d.stepsLoading = false;
+    if (state.detailDishId === d.id) rerenderDetail();
+  }
+}
+
 chatEl.log.addEventListener('click', e => {
   const b = e.target.closest('[data-chat-open]');
   if (!b) return;
   const d = dishById(b.dataset.chatOpen);
   if (d && !passesPrefs(d)) { toast('This recipe no longer matches your preferences'); return; }
-  if (d) { chatClose(); openDetail(d); }
+  if (d) openChatDish(d);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
 
