@@ -36,7 +36,9 @@ version 2 of the preferences contract, sent as-is:
       skill: 'beginner'|'comfortable'|'confident',
       equipment: ['oven','stovetop','microwave','air-fryer','blender','slow-cooker','grill'],
       avoid: 'free text',
-      shopping: 'weekly'|'twice-weekly'|'whenever' }
+      shopping: 'weekly'|'twice-weekly'|'whenever',
+      liked:    ['dish titles they rated up'],      # at most 30, 80 chars each
+      disliked: ['dish titles they rated down'] }   # same limits (see clean_titles)
 
 Every field is optional and falls back to the contract default; unknown fields
 and unknown list values are ignored rather than rejected, so an older or newer
@@ -54,7 +56,11 @@ How prefs shape the result:
   SOFT preferences (prompt only):
     cuisines (favour, don't restrict), maxMinutes, skill (beginner → few
     steps, common techniques), equipment (never require anything not listed),
-    avoid (disliked ingredients), and servings = ceil(adults + 0.5 * kids).
+    avoid (disliked ingredients), servings = ceil(adults + 0.5 * kids),
+    liked (dishes they rated up: make more like these) and disliked (dishes
+    they rated down: not these or close variants). rank() also drops any dish
+    whose normalised title equals a disliked title, so a repeat never reaches
+    the deck even when the model ignores the note.
   `shopping` is not used here; it drives the pantry's planning on the client.
 
 The model is asked to cook from what is in the pantry and to lean on whatever
@@ -198,6 +204,39 @@ def _clamp_int(value, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
 
+# Same class as chat._CONTROL: tab and newline are kept so split() turns them into a space.
+_TITLE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def clean_titles(values, limit: int = 30, max_len: int = 80) -> list[str]:
+    """Dish titles as the client keeps them (Prefs.liked / disliked): trimmed, inner
+    whitespace collapsed, no control characters, at most `max_len` chars each,
+    de-duplicated on the normalised form (case and punctuation ignored, the first
+    spelling kept), at most `limit` kept. The client writes the newest ratings
+    first, so a long list loses its oldest entries. A bare string is one title;
+    anything that is not a list of strings means "none", never a 422."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        title = " ".join(_TITLE_CONTROL.sub("", v).split())[:max_len].strip()
+        key = _norm(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(title)
+        if len(out) >= limit:
+            break
+    return out
+
+
 class Household(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -244,6 +283,8 @@ class Prefs(BaseModel):
     equipment: list[str] = Field(default_factory=lambda: list(DEFAULT_EQUIPMENT))
     avoid: str = ""
     shopping: str = "weekly"
+    liked: list[str] = Field(default_factory=list)  # dish titles rated up, newest first
+    disliked: list[str] = Field(default_factory=list)  # dish titles rated down, newest first
 
     @model_validator(mode="before")
     @classmethod
@@ -312,6 +353,11 @@ class Prefs(BaseModel):
         parts = [p.strip() for p in str(v or "").replace("\n", ",").split(",")]
         return ", ".join(p for p in parts if p)[:200]
 
+    @field_validator("liked", "disliked", mode="before")
+    @classmethod
+    def _titles(cls, v):
+        return clean_titles(v)
+
 
 def servings_target(prefs: Prefs | None) -> int:
     """How many the dishes should serve: ceil(adults + 0.5 * kids), at least 1."""
@@ -341,7 +387,7 @@ class PantryItem(BaseModel):
 
 class RecipeRequest(BaseModel):
     items: list[PantryItem]
-    count: int = Field(default=6, ge=1, le=12)
+    count: int = Field(default=6, ge=1, le=18)
     max_missing: int = Field(default=2, ge=0, le=6)
     request: str | None = None  # free-text preference, e.g. "vegetarian, under 30 minutes"
     prefs: Prefs | None = None  # the household profile (preferences contract v2)
@@ -411,6 +457,14 @@ ANGLES = (
     "comfort food, unfashionable and good",
     "a sandwich, flatbread, or toast that counts as dinner",
     "something South Asian or Middle Eastern, spice-forward",
+    "a pasta or noodle dish that is not the obvious one",
+    "something French or bistro-style, unfussy",
+    "a curry or a dal, whatever the pantry's grain and legumes suggest",
+    "breakfast for dinner: pancakes, hash, or a big omelette",
+    "a Latin or Caribbean plate: rice, beans, a bright salsa",
+    "something baked or a casserole that feeds the week",
+    "a vegetable as the main event, roasted or charred",
+    "a skillet dinner in under twenty minutes",
 )
 
 BRAINSTORM_PROMPT = """You cook at home most nights and you are good at it.
@@ -544,6 +598,11 @@ def _preferences(prefs: Prefs) -> str:
         lines.append("- Equipment available: none listed. Keep to no-cook dishes or ones that need nothing beyond a knife, a board and a bowl.")
     if prefs.avoid:
         lines.append(f"- Ingredients they dislike: {prefs.avoid}. Leave these out.")
+    # Titles can contain commas, so they are joined with semicolons.
+    if prefs.liked:
+        lines.append(f"- Dishes they rated up (make more like these): {'; '.join(prefs.liked)}.")
+    if prefs.disliked:
+        lines.append(f"- Dishes they rated down (do not suggest these or close variants): {'; '.join(prefs.disliked)}.")
     return "\nPREFERENCES:\n" + "\n".join(lines) + "\n"
 
 
@@ -585,7 +644,7 @@ def generate(req: RecipeRequest, client, model: str | None = None) -> list[dict]
     if not food:
         return []
 
-    want = min(req.count + 2, 12)
+    want = min(req.count + 2, 18)
     angles = random.sample(ANGLES, min(want, len(ANGLES)))
     ideas = llm.generate_json(client, build_brainstorm_prompt(req, angles), IdeaBatch, model or MODEL).ideas
 
@@ -807,11 +866,13 @@ def rank(
     allergies, or break its diet, is dropped outright (staples included:
     "butter" or "sesame oil" marked as a staple is still the allergen), so a
     model slip never reaches the client. Dishes that use nothing from the
-    pantry, or need more than `max_missing`, are dropped too.
+    pantry, or need more than `max_missing`, are dropped too, and so is any
+    dish whose normalised title the household rated down (`prefs.disliked`).
     """
     pantry = {_norm(i.name): i for i in (items or []) if i.is_food}
     allergies = list(prefs.allergies) if prefs else []
     diets = list(prefs.diet) if prefs else []
+    disliked = {_norm(t) for t in prefs.disliked} if prefs else set()
     seen_titles: set[str] = set()
     ranked: list[dict] = []
 
@@ -820,6 +881,8 @@ def rank(
         if not title_key or title_key in seen_titles:
             continue
         seen_titles.add(title_key)
+        if title_key in disliked:
+            continue  # rated down: never back on the deck, whatever the model wrote
 
         if _annotate(r, pantry, allergies, diets) is None:
             continue

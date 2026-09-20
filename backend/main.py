@@ -1,8 +1,8 @@
 """
 mise en feast backend — receipt OCR, recipe generation, a photo of a dish → its
 recipe, dish pictures and a week's meal plan, all via Gemini (see recipes.py,
-identify.py, images.py and meal_plan.py); the in-app assistant is Claude on
-Bedrock (chat.py).
+identify.py, images.py and meal_plan.py); the in-app assistant (chat.py) and
+ingredient substitutions (substitutions.py) are Claude on Bedrock.
 
 Pairs with the static frontend in ../frontend (Supabase for auth/persistence).
 
@@ -34,6 +34,7 @@ import llm
 import meal_plan
 import recipes as rx
 import recipes_ai
+import substitutions
 
 load_dotenv()  # backend/.env (local dev), if present
 # Also load the project-root .env so the AWS/Bedrock keys kept there are available when the
@@ -340,6 +341,31 @@ def recipe_detail(req: recipes_ai.StepsRequest):
     return {"steps": steps}
 
 
+@app.post("/substitutions")
+def get_substitutions(req: substitutions.SubRequest):
+    """What to use instead of one ingredient, from the pantry first (contract in
+    substitutions.py). Claude (fast model) proposes up to four swaps for the dish;
+    Python then recomputes `from_pantry` against the real pantry rows and drops any
+    swap that trips an allergy or breaks a diet. Answers `{ substitutions: [...] }`,
+    an empty list when nothing sensible stands in. 422 no ingredient, 503 Bedrock is
+    not configured, 502 the model call failed or answered something else.
+    """
+    if not bedrock.credentials_present():
+        raise HTTPException(
+            503,
+            "Bedrock is not configured. Set AWS_BEARER_TOKEN_BEDROCK (or AWS credentials) "
+            "and AWS_REGION in backend/.env (local) or the Vercel project's environment variables.",
+        )
+    try:
+        subs = substitutions.suggest(req)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a malformed model answer, a pydantic slip
+        traceback.print_exc()
+        raise HTTPException(502, f"Could not find substitutions: {exc}") from exc
+    return {"substitutions": [sub.model_dump() for sub in subs]}
+
+
 class CookRequest(BaseModel):
     items: list[rx.PantryItem]
     deductions: dict[str, float]  # pantry item id or name -> servings used
@@ -452,11 +478,11 @@ def get_meal_plan(req: meal_plan.MealPlanRequest):
 @app.get("/health")
 def health():
     """The models in use, and whether keys are present (never the keys themselves).
-    Gemini runs /scan and /recipes; Claude (Bedrock) runs /chat and /recipe-detail."""
+    Gemini runs /scan and /recipes; Claude (Bedrock) runs /chat, /recipe-detail and /substitutions."""
     return {
         "ok": True,
         "model": MODEL,
-        "image_model": images.current_model(),  # None until the first /dish-image picks one
+        "image_model": images.current_model(), "image_sources": images.sources_status(),  # None until the first /dish-image picks one
         "key_set": bool(os.getenv("GEMINI_API_KEY")),
         "chat": {
             "engine": "bedrock",
@@ -475,5 +501,5 @@ def root():
         "service": "mise-en-feast",
         "health": "/health",
         "docs": "/docs",
-        "endpoints": ["/scan", "/recipes", "/chat", "/recipe-detail", "/cook", "/identify", "/dish-image", "/meal-plan"],
+        "endpoints": ["/scan", "/recipes", "/chat", "/recipe-detail", "/substitutions", "/cook", "/identify", "/dish-image", "/meal-plan"],
     }

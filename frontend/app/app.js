@@ -489,11 +489,29 @@ async function refreshRecipes({ quiet = false } = {}) {
   const prefs = state.prefs;
   const request = prefsToRequest(prefs);
   try {
-    // One batch serves both tabs: Curated takes the dishes they can make outright,
-    // Explore the ones up to three ingredients away.
-    const data = await fetchRecipes(pantryForApi(), { count: 10, maxMissing: 3, request, prefs });
+    // Two batches at once, merged: one aimed at what they can make outright (Curated),
+    // one told to reach for dishes a few store items away (Explore), so neither tab
+    // is starved by the other. A title that turns up in both is kept once.
+    const items = pantryForApi();
+    const reach = [request, 'Lean toward dishes that need one to three ingredients from the store, so there is real variety beyond what is already here: different cuisines, main ingredients and methods.'].filter(Boolean).join(' ');
+    const batches = await Promise.allSettled([
+      fetchRecipes(items, { count: 12, maxMissing: 1, request, prefs }),
+      fetchRecipes(items, { count: 16, maxMissing: 3, request: reach, prefs }),
+    ]);
     if (token !== recipeRefreshToken) return liveDishes || [];
-    const list = (data.recipes || []).map(dishFromApi);
+    if (batches.every(b => b.status === 'rejected')) throw batches[0].reason;
+    const titleKey = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const seen = new Set();
+    const recipes = [];
+    for (const b of batches) {
+      if (b.status !== 'fulfilled') continue;
+      for (const r of (b.value.recipes || [])) {
+        const k = titleKey(r.title);
+        if (!k || seen.has(k)) continue;
+        seen.add(k); recipes.push(r);
+      }
+    }
+    const list = recipes.map(dishFromApi);
     liveDishes = list.length ? list : null;
     saveDeck(list, signature);           // so the next visit paints without waiting on the model
     primeDishImages(list);               // pictures start generating before the cards are even dealt
