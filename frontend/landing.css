@@ -32,7 +32,7 @@ a.pill.ghost:hover { color: var(--text); }
   display: flex; flex-direction: column; align-items: center; gap: 24px;
 }
 h1 { font-size: 56px; line-height: 1.08; }
-h1 em { font-style: italic; }
+h1 em { font-style: italic; font-weight: 700; }
 .tagline { font-family: "Source Serif 4", Georgia, "Times New Roman", serif; font-size: 26px; line-height: 1.2; letter-spacing: -.01em; margin-top: -8px; text-wrap: balance; }
 .lede { font-size: 18px; line-height: 1.5; color: var(--text-2); max-width: 560px; }
 .hero .row-btns { margin-top: 8px; }
