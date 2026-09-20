@@ -806,3 +806,40 @@ test('nothing expires on the day it is added: every new lot lives until at least
   assert.equal(run('state.pantry[2].expiry'), run('now + 5 * DAY'));    // a real date is left alone
   assert.equal(run('state.pantry[3].expiry >= now + DAY'), true);
 });
+
+test('a scanned package counted as "1" is a package, and everything is 100% at the scan', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const fiveDaysAgo = new Date(Date.now() - 5 * DAY).toISOString().slice(0, 10);
+    globalThis.cereal = lineFromScanItem({ name: 'Natures Path Cereal', quantity: 1, unit: 'count', servings: 10, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.eggs = lineFromScanItem({ name: 'Sparks Eggs', quantity: 1, unit: '', servings: 12, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.chicken = lineFromScanItem({ name: 'Chicken thighs', quantity: 1.4, unit: 'lb', servings: 3, purchase_date: fiveDaysAgo, is_food: true });
+    globalThis.mystery = lineFromScanItem({ name: 'Black Turtle Beans', quantity: 1, unit: 'count', purchase_date: fiveDaysAgo, is_food: true });`);
+  assert.equal(run('cereal.initial'), 10);                                  // the parser's package estimate, not one serving
+  assert.equal(run('eggs.initial'), 12);
+  assert.equal(run('Math.round(chicken.initial * 10) / 10'), 4.2);         // a weight is sized from the weight (635 g / 150 g)
+  assert.equal(run('mystery.initial'), run('catalog("black turtle beans").servings'));
+  assert.equal(run('Date.now() - cereal.purchase < 5000'), true);          // the clock starts at the scan
+  // added to the pantry, nothing is asking "Still have this?"
+  run(`for (const l of [cereal, eggs, chicken, mystery]) addLot(l.name, l.key, l.qty, l.raw, { initial: l.initial, burn: l.burn, purchase: l.purchase, expiry: l.expiry });`);
+  assert.equal(run('state.pantry.filter(needsCheckin).length'), 0);
+  assert.equal(run('state.pantry.every(it => current(it) === it.initial)'), true);
+});
+
+test('the estimate alone cannot ask "Still have this?" in a lot\'s first two days, and shrunk lots are repaired once', () => {
+  const run = app();
+  run(`state.pantry = [];
+    const it = addLot('Tangerines', 'tangerines', '1 pcs', '', { initial: 1, burn: 1, purchase: Date.now() - DAY }).item;
+    globalThis.fresh = needsCheckin(it);
+    it.purchase = Date.now() - 3 * DAY; globalThis.later = needsCheckin(it);
+    it.purchase = Date.now() - DAY; it.deducted = 0.8; globalThis.cooked = needsCheckin(it);`);
+  assert.equal(run('fresh'), false);      // day-old lot, estimate says empty: not asked
+  assert.equal(run('later'), true);       // three days in, the estimate may ask
+  assert.equal(run('cooked'), true);      // cooking emptied it: asked whatever the age
+  run(`state.pantry = [{ id: 'a', name: 'Cereal', key: 'cereal', qty: '1 pcs', initial: 1, purchase: Date.now() - 4 * DAY, expiry: Date.now() + 30 * DAY, burn: 0.3, deducted: 0 }];
+    globalThis.repaired = repairShrunkLots(state.pantry);`);
+  assert.equal(run('repaired >= 1'), true);
+  assert.equal(run('state.pantry[0].initial'), run('catalog("cereal").servings'));
+  assert.equal(run('Date.now() - state.pantry[0].purchase < 5000'), true);
+  assert.equal(run('needsCheckin(state.pantry[0])'), false);
+});
