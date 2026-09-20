@@ -1,30 +1,22 @@
 """
-Pantry AI backend — receipt OCR + recipe generation via Gemini, and (skeleton,
-see identify.py) a photo of a dish → its recipe.
-
-Receipt scanning (/scan) can also run on an NVIDIA vision model through NVIDIA's
-OpenAI-compatible API: set LLM_PROVIDER=nvidia (see "Providers" in README.md).
+Pantry AI backend — receipt OCR, recipe generation, and a photo of a dish → its
+recipe, all via Gemini (see recipes.py and identify.py).
 
 Pairs with the static frontend in ../frontend (Supabase for auth/persistence).
 
 Run from this folder:
-    copy .env.example .env   # then paste GEMINI_API_KEY
     pip install -r requirements.txt
-    uvicorn main:app --reload --port 8000
+    uvicorn main:app --reload --port 8000   # with GEMINI_API_KEY in .env
 """
 
 from __future__ import annotations
 
-import base64
-import io
-import json
 import os
 import re
 import traceback
 from datetime import date, timedelta
 from typing import Literal
 
-import openai
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +25,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 import identify as ident
+import llm
 import recipes as rx
 
 load_dotenv()  # must run before the client is built
@@ -51,56 +44,6 @@ def gemini():
             raise HTTPException(503, "GEMINI_API_KEY is not set. Add it to backend/.env (local) or the Vercel project's environment variables.")
         _client = genai.Client(api_key=api_key)
     return _client
-
-
-# ---------------------------------------------------------------------------
-# Receipt provider: Gemini (default) or NVIDIA through its OpenAI-compatible API
-# ---------------------------------------------------------------------------
-# Only /scan looks at LLM_PROVIDER; /recipes and /identify always use Gemini.
-# Everything here is read at call time, like gemini(), so editing .env and
-# restarting (or prefixing the uvicorn line with the variables) is enough.
-
-NVIDIA_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_DEFAULT_VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl"
-# Above this size the photo is downscaled to 2048 px and re-encoded as JPEG
-# before it goes into the request as a data URL (see _image_data_url).
-NVIDIA_MAX_IMAGE_BYTES = 4 * 1024 * 1024
-# Models that answered 400 to response_format and then succeeded without it.
-# JSON mode is skipped for them from then on so every scan does not first pay
-# for a rejected image upload (NVIDIA lists structured output as unsupported
-# for the Nemotron VL model).
-_JSON_MODE_UNSUPPORTED: set[str] = set()
-
-
-def llm_provider() -> str:
-    """'nvidia' or 'gemini'. Unset and anything unrecognised mean Gemini."""
-    return "nvidia" if os.getenv("LLM_PROVIDER", "gemini").strip().lower() == "nvidia" else "gemini"
-
-
-def nvidia_base_url() -> str:
-    return os.getenv("NVIDIA_BASE_URL", "").strip() or NVIDIA_DEFAULT_BASE_URL
-
-
-def nvidia_vision_model() -> str:
-    return os.getenv("NVIDIA_VISION_MODEL", "").strip() or NVIDIA_DEFAULT_VISION_MODEL
-
-
-_nvidia_client = None
-
-
-def nvidia():
-    """The NVIDIA client (the OpenAI SDK pointed at NVIDIA's endpoint), built on first use like gemini()."""
-    global _nvidia_client
-    if _nvidia_client is None:
-        api_key = os.getenv("NVIDIA_API_KEY")
-        if not api_key:
-            raise HTTPException(
-                503,
-                "LLM_PROVIDER is 'nvidia' but NVIDIA_API_KEY is not set. Add it to backend/.env (local) "
-                "or the Vercel project's environment variables, or unset LLM_PROVIDER to scan with Gemini.",
-            )
-        _nvidia_client = openai.OpenAI(base_url=nvidia_base_url(), api_key=api_key)
-    return _nvidia_client
 
 
 app = FastAPI(title="Pantry AI")
@@ -155,8 +98,10 @@ class ReceiptItem(BaseModel):
     )
     days_to_use_up: int = Field(
         description=(
-            "Days until an average household finishes this, assuming normal use. "
-            "For most produce this is shorter than shelf life. For staples it is longer."
+            "Days until a TWO-PERSON household finishes this, assuming normal use. "
+            "Always answer for two people; the app scales this to the real household "
+            "size itself. For most produce this is shorter than shelf life. For "
+            "staples it is longer."
         )
     )
     burn_pattern: Literal["continuous", "event"] = Field(
@@ -194,8 +139,10 @@ Extract every line item. For each one:
 - Expand the store's shorthand into a readable name.
 - Mark non-food items (cleaning supplies, bags, batteries) as is_food: false, but
   still include them so nothing looks silently dropped.
-- Estimate servings, shelf life, and typical time to use up based on what an
-  average household does with that item and that package size.
+- Estimate servings, shelf life, and typical time to use up based on what a
+  two-person household does with that item and that package size. Always answer
+  for two people, whatever the package size suggests; the app scales the result
+  to the real household itself.
 - Set group_key to the brand-agnostic food identity so later purchases of the same
   food (different brand, size, or trip) can stack together. Examples: all bananas
   → "bananas"; "JOHNSONVILLE MILD ITAL" and "HEBREW NATIONAL" → both "sausages"
@@ -209,55 +156,6 @@ your best guess, and quantity 1.
 Prices are line totals, not unit prices. Do not invent items that are not on
 the receipt.
 """
-
-
-# Gemini gets the ParsedReceipt schema (with every Field description) through
-# response_schema. NVIDIA's chat API has nothing like that, so the same schema
-# is rendered into the prompt as a field list, straight from the pydantic model
-# so the two can never drift apart.
-
-
-def _schema_type(prop: dict) -> str:
-    """One JSON-schema property as a readable type: 'array of ReceiptItem objects', 'string, one of ...'."""
-    if "$ref" in prop:
-        return prop["$ref"].rsplit("/", 1)[-1] + " object"
-    if "enum" in prop:
-        return "string, one of " + ", ".join(json.dumps(v) for v in prop["enum"])
-    kind = prop.get("type")
-    if kind == "array":
-        return "array of " + _schema_type(prop.get("items", {})) + "s"
-    return kind or "value"
-
-
-def _schema_fields(schema: dict) -> list[str]:
-    lines = []
-    for name, prop in schema.get("properties", {}).items():
-        line = f'- "{name}" ({_schema_type(prop)})'
-        if prop.get("description"):
-            line += ": " + prop["description"]
-        lines.append(line)
-    return lines
-
-
-def receipt_json_instructions() -> str:
-    """Appended to PROMPT for providers without structured output: answer with one
-    JSON object, and here is its shape, $defs flattened into plain field lists."""
-    schema = ParsedReceipt.model_json_schema()
-    parts = [
-        "",
-        "Answer with a single JSON object and nothing else: no markdown, no code fence, "
-        "no commentary before or after it. Every field below is required. Numbers are JSON "
-        'numbers, not strings; an unknown string is "".',
-        "",
-        "The object has these fields:",
-        *_schema_fields(schema),
-    ]
-    for name, definition in schema.get("$defs", {}).items():
-        parts += ["", f"Each {name} object has these fields:", *_schema_fields(definition)]
-    return "\n".join(parts) + "\n"
-
-
-JSON_INSTRUCTIONS = receipt_json_instructions()
 
 
 # ---------------------------------------------------------------------------
@@ -345,112 +243,12 @@ def enrich(parsed: ParsedReceipt) -> dict:
 
 
 def call_gemini(image_bytes: bytes, mime_type: str) -> ParsedReceipt:
-    response = gemini().models.generate_content(
-        model=MODEL,
-        contents=[
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            PROMPT,
-        ],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ParsedReceipt,
-            # No temperature / top_p / top_k. Gemini 3.x is tuned for defaults
-            # and overriding them makes structured output worse, not better.
-        ),
+    return llm.generate_json(
+        gemini(),
+        [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), PROMPT],
+        ParsedReceipt,
+        MODEL,
     )
-
-    if response.parsed is not None:
-        return response.parsed
-
-    # Fallback if the SDK could not hydrate the model for some reason.
-    return ParsedReceipt(**json.loads(response.text))
-
-
-def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
-    """The upload as a base64 data URL for the chat message.
-
-    Photos over NVIDIA_MAX_IMAGE_BYTES are downscaled to 2048 px on the long side
-    (the model tiles at most 2048x1536 anyway) and re-encoded as JPEG q85 first.
-    """
-    if len(image_bytes) > NVIDIA_MAX_IMAGE_BYTES and mime_type.startswith("image/"):
-        try:
-            from PIL import Image, ImageOps
-
-            with Image.open(io.BytesIO(image_bytes)) as src:
-                img = ImageOps.exif_transpose(src)  # bake in phone orientation; the re-encode drops EXIF
-                img.thumbnail((2048, 2048))  # keeps aspect, never enlarges
-                if img.mode not in ("RGB", "L"):
-                    img = img.convert("RGB")
-                out = io.BytesIO()
-                img.save(out, format="JPEG", quality=85, optimize=True)
-            image_bytes, mime_type = out.getvalue(), "image/jpeg"
-        except Exception:  # noqa: BLE001 — Pillow can't decode it (HEIC etc); send as is and let the API answer
-            pass
-    return f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-
-
-def parse_receipt_json(text: str) -> ParsedReceipt:
-    """Model text -> ParsedReceipt, tolerating a code fence or chatter around the object."""
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("the model returned an empty response")
-    fenced = re.match(r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", text, re.DOTALL | re.IGNORECASE)
-    if fenced:
-        text = fenced.group(1)
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError(f"no JSON object in the model response: {text.strip()[:120]!r}")
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"the model returned malformed JSON ({exc.msg} at char {exc.pos}): {text.strip()[:120]!r}") from exc
-    return ParsedReceipt.model_validate(data)
-
-
-def call_nvidia_vision(image_bytes: bytes, mime_type: str) -> ParsedReceipt:
-    """call_gemini's job through NVIDIA's OpenAI-compatible chat API.
-
-    One non-streaming chat.completions call: Gemini's PROMPT plus the schema as
-    text (JSON_INSTRUCTIONS), and the image as a data URL. JSON mode is asked
-    for; a model that rejects it gets one retry without (and is remembered, so
-    later scans skip JSON mode), and the answer is parsed leniently either way.
-    Errors surface like Gemini's: 503 no key (nvidia()), anything else becomes
-    /scan's 502.
-    """
-    client = nvidia()  # 503 before any image work if the key is missing
-
-    if not mime_type.startswith("image/"):
-        raise HTTPException(400, "The NVIDIA provider reads images only (png, jpg, webp). PDFs need LLM_PROVIDER=gemini.")
-
-    model = nvidia_vision_model()
-    request = dict(
-        model=model,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": PROMPT + JSON_INSTRUCTIONS},
-                    {"type": "image_url", "image_url": {"url": _image_data_url(image_bytes, mime_type)}},
-                ],
-            }
-        ],
-        temperature=0.2,
-        max_tokens=4096,
-        stream=False,
-    )
-    if model in _JSON_MODE_UNSUPPORTED:
-        response = client.chat.completions.create(**request)
-    else:
-        try:
-            response = client.chat.completions.create(**request, response_format={"type": "json_object"})
-        except (openai.BadRequestError, openai.UnprocessableEntityError):
-            # Not every model behind the endpoint supports JSON mode (NVIDIA answers 400, some
-            # OpenAI-compatible servers 422 for an unknown parameter); the prompt already asks for JSON.
-            response = client.chat.completions.create(**request)
-            _JSON_MODE_UNSUPPORTED.add(model)  # the retry worked, so it really was response_format
-
-    if not getattr(response, "choices", None):
-        raise ValueError("the model returned no choices")
-    return parse_receipt_json(response.choices[0].message.content)
 
 
 @app.post("/scan")
@@ -463,12 +261,10 @@ async def scan_receipt(file: UploadFile = File(...)):
     if not (mime_type.startswith("image/") or mime_type == "application/pdf"):
         raise HTTPException(400, f"Unsupported type: {mime_type}")
 
-    parse = call_nvidia_vision if llm_provider() == "nvidia" else call_gemini
-
     last_error = None
     for _ in range(2):  # one retry, parsing occasionally comes back malformed
         try:
-            return enrich(parse(image_bytes, mime_type))
+            return enrich(call_gemini(image_bytes, mime_type))
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -528,13 +324,11 @@ def cook(req: CookRequest):
 
 @app.post("/identify")
 async def identify_dish(file: UploadFile = File(...)):
-    """Photo of a dish → its recipe (contract in identify.py). SKELETON:
+    """Photo of a dish → its recipe (contract in identify.py).
 
-    - IDENTIFY_STUB=1  → the canned shakshuka in identify.SAMPLE_IDENTIFIED, no key needed.
-    - otherwise        → 501 "identify is not implemented yet" until the owner pastes
-                         the Gemini call into identify.identify() (five commented lines).
-    Once wired up, errors map like /scan and /recipes: 400 bad upload, 503 no key,
-    502 the model call failed.
+    IDENTIFY_STUB=1 answers with the canned shakshuka in identify.SAMPLE_IDENTIFIED
+    and never calls Gemini, so the flow works without a key. Errors map like /scan
+    and /recipes: 400 bad upload, 503 no key, 502 the model call failed.
     """
     image_bytes = await file.read()
     if not image_bytes:
@@ -550,8 +344,6 @@ async def identify_dish(file: UploadFile = File(...)):
         dish = ident.identify(image_bytes, mime_type, client, MODEL)
     except HTTPException:
         raise
-    except NotImplementedError:
-        raise HTTPException(501, "identify is not implemented yet")
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()  # the terminal is where you'll actually read this
         raise HTTPException(502, f"Could not identify dish: {exc}") from exc
@@ -561,15 +353,8 @@ async def identify_dish(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health():
-    """Which provider /scan will use and whether its key is present (never the key itself).
-    `model` and `key_set` stay Gemini's: /recipes and /identify use it whatever the provider."""
-    provider = llm_provider()
-    out = {"ok": True, "provider": provider, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY"))}
-    if provider == "nvidia":
-        out["vision_model"] = nvidia_vision_model()
-        out["nvidia_base_url"] = nvidia_base_url()
-        out["nvidia_key_set"] = bool(os.getenv("NVIDIA_API_KEY"))
-    return out
+    """The model everything runs on, and whether the key is present (never the key itself)."""
+    return {"ok": True, "model": MODEL, "key_set": bool(os.getenv("GEMINI_API_KEY"))}
 
 
 @app.get("/")

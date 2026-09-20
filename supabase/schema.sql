@@ -105,11 +105,15 @@ create index if not exists cook_log_user_idx on public.cook_log (user_id, cooked
 -- app_state
 -- -----------------------------------------------------------------------------
 create table if not exists public.app_state (
-  user_id     uuid primary key default auth.uid() references auth.users (id) on delete cascade,
-  skipped     jsonb not null default '[]'::jsonb,
-  cooked      jsonb not null default '[]'::jsonb,
-  chosen      jsonb not null default '[]'::jsonb,
-  updated_at  timestamptz not null default now()
+  user_id        uuid primary key default auth.uid() references auth.users (id) on delete cascade,
+  skipped        jsonb not null default '[]'::jsonb,
+  cooked         jsonb not null default '[]'::jsonb,
+  chosen         jsonb not null default '[]'::jsonb,
+  -- The generated recipe deck, cached so it paints instantly on login (0005).
+  deck           jsonb not null default '[]'::jsonb,
+  deck_at        timestamptz,
+  deck_signature text,
+  updated_at     timestamptz not null default now()
 );
 
 -- =============================================================================

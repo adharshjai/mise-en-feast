@@ -1,3 +1,7 @@
+# Vercel installs this one for api/index.py, which imports backend/main.py.
+# Everything backend/main.py imports has to be here: a missing dependency
+# crashes the serverless function at import time, so every /api route answers
+# 500 rather than the endpoint's own error.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-dotenv>=1.0

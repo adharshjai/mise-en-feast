@@ -29,6 +29,7 @@ import { configured, getClient, getSession, getUser } from './supabase.js';
 export const LOCAL_KEY = 'pantry.state.v1';
 export const PREFS_KEY = 'pantry.prefs.v1';
 export const SAVED_KEY = 'pantry.saved.v1';
+export const DECK_KEY = 'pantry.deck.v1';
 const DEBOUNCE_MS = 400;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -831,6 +832,78 @@ export function removeDish(id) {
   } catch (err) {
     console.warn('[pantry] removeDish failed', err);
     return false;
+  }
+}
+
+/* ---------- the generated deck ----------
+   Saved dishes above are the ones you star, one row each in public.recipes.
+   This is the whole generated deck instead: one blob on the account, cached so
+   the deck paints the moment the app opens instead of waiting on two Gemini
+   calls. `signature` is the pantry-and-preferences fingerprint it came from, so
+   the app can tell a deck that still fits the kitchen from one that does not. */
+
+function readLocalDeck() {
+  try {
+    const raw = localStorage.getItem(DECK_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || !Array.isArray(parsed.dishes)) return null;
+    return { dishes: parsed.dishes, signature: str(parsed.signature), at: Number(parsed.at) || 0 };
+  } catch (err) {
+    console.warn('[pantry] could not read the cached deck', err);
+    return null;
+  }
+}
+
+/** Drop the browser's copy of the deck (on sign-out). */
+export function clearLocalDeck() {
+  try { localStorage.removeItem(DECK_KEY); } catch (err) { console.warn('[pantry] could not clear the cached deck', err); }
+}
+
+/** Resolve to the cached deck as { dishes, signature, at }, or null when there
+    is none. Signed in: the account's copy, falling back to this browser's if the
+    account has nothing (or the deck columns are not migrated yet). Never rejects. */
+export async function loadDeck() {
+  const local = readLocalDeck();
+  try {
+    const user = await signedInUser();
+    if (!user) return local;
+    const client = await getClient();
+    const { data, error } = await client.from('app_state').select('deck, deck_at, deck_signature').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    if (!data || !Array.isArray(data.deck) || !data.deck.length) return local;
+    return { dishes: data.deck, signature: str(data.deck_signature), at: Date.parse(data.deck_at) || 0 };
+  } catch (err) {
+    console.warn('[pantry] loadDeck failed, using the local copy', err);
+    return local;
+  }
+}
+
+/** Cache a freshly generated deck: this browser right away, the account in the
+    background. An empty deck is not written — there is nothing to paint from it,
+    and on a new account it would create the app_state row before the pantry
+    exists. Never throws. */
+export function saveDeck(dishes, signature) {
+  try {
+    const list = Array.isArray(dishes) ? dishes : [];
+    if (!list.length) return;
+    const at = Date.now();
+    try { localStorage.setItem(DECK_KEY, JSON.stringify({ dishes: list, signature: str(signature), at })); } catch (err) { console.warn('[pantry] could not cache the deck', err); }
+    if (configured) {
+      queueRemote('saveDeck', async () => {
+        const user = await signedInUser();
+        if (!user) return;
+        const client = await getClient();
+        const { error } = await client.from('app_state').upsert({
+          user_id: user.id,
+          deck: list,
+          deck_at: new Date(at).toISOString(),
+          deck_signature: str(signature),
+        }, { onConflict: 'user_id' });
+        if (error) throw error;
+      });
+    }
+  } catch (err) {
+    console.warn('[pantry] saveDeck failed', err);
   }
 }
 

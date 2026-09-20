@@ -7,10 +7,10 @@
 
 import { requireAuth, signOut, configured, onAuthChange } from '../shared/supabase.js';
 import {
-  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs, clearLocalSaved,
+  loadState, saveState, logCook, logReceipt, clearLocal, clearLocalPrefs, clearLocalSaved, clearLocalDeck,
   loadPrefs, savePrefs, prefsToRequest, normalizePrefs, servingsTarget, householdScale, ingredientHits,
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
-  loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED,
+  loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED, loadDeck, saveDeck,
 } from '../shared/store.js';
 import { scanReceipt, fetchRecipes, identifyDish, apiConfigured } from '../shared/api.js';
 
@@ -367,6 +367,7 @@ function dishFromApi(recipe, index) {
     // every ingredient name, staples included, for the allergy and dislike checks
     names: (recipe.ingredients || []).map(ing => String(ing.name || '')).filter(Boolean),
     steps: Array.isArray(recipe.steps) ? recipe.steps : [],
+    description: String(recipe.description || '').trim(),
   };
 }
 
@@ -398,7 +399,38 @@ function pantryForApi() {
   return [...byKey.values()];
 }
 
-async function refreshRecipes() {
+// A deck is only as good as the kitchen it came from. This fingerprints what
+// the model was told — the pantry rows it cooked from and the rules it had to
+// follow — so a cached deck can be told apart from a stale one. days_left is in
+// it deliberately: yesterday's deck should re-rank as things get closer to going off.
+function deckSignature() {
+  const pantry = pantryForApi()
+    .map(i => `${i.name}:${Math.round(i.quantity_servings * 10)}:${i.days_left}`)
+    .sort()
+    .join('|');
+  return `${pantry}#${JSON.stringify(state.prefs)}`;
+}
+
+const DECK_MAX_AGE = 12 * 60 * 60 * 1000;
+
+/** Take up a deck loaded from the cache so the caller's first render already has
+    recipes in it. Returns whether it still matches the kitchen, which is what
+    tells startup it can skip regenerating altogether. */
+function adoptCachedDeck(cached) {
+  try {
+    if (!cached || !cached.dishes.length) return false;
+    liveDishes = cached.dishes;
+    recipeNotice = 'AI-generated recipes';
+    return cached.signature === deckSignature() && Date.now() - cached.at < DECK_MAX_AGE;
+  } catch (err) {
+    console.warn('[pantry] could not use the cached deck', err);
+    return false;
+  }
+}
+
+// `quiet` keeps the deck on screen while a new one is generated behind it, so a
+// cached deck never flashes back to "Finding AI recipes…" on load.
+async function refreshRecipes({ quiet = false } = {}) {
   const token = ++recipeRefreshToken;
   if (!apiConfigured() || !state.pantry.length) {
     liveDishes = null;
@@ -406,8 +438,11 @@ async function refreshRecipes() {
     renderAll({ enter: true });
     return [];
   }
-  recipeNotice = 'Finding AI recipes for your preferences…';
-  renderRecipeNotice();
+  if (!quiet) {
+    recipeNotice = 'Finding AI recipes for your preferences…';
+    renderRecipeNotice();
+  }
+  const signature = deckSignature();
   // The structured prefs are the contract (allergies and diet are hard rules server-side);
   // the plain-English line is the fallback the model reads — '' when all default.
   const prefs = state.prefs;
@@ -424,6 +459,7 @@ async function refreshRecipes() {
     }
     liveDishes = list.length ? list : null;
     recipeNotice = list.length ? 'AI-generated recipes' : 'No AI recipes returned · showing built-in recipes.';
+    saveDeck(list, signature);           // so the next visit paints without waiting on the model
     populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
@@ -433,11 +469,13 @@ async function refreshRecipes() {
     return liveDishes || [];
   } catch (err) {
     console.warn('[pantry] recipe refresh failed', err);
-    if (token === recipeRefreshToken) {
-      liveDishes = null;
-      recipeNotice = 'AI is unavailable · showing built-in recipes.';
-      renderAll({ enter: true });
-    }
+    if (token !== recipeRefreshToken) return [];
+    // A quiet refresh that fails leaves the cached deck alone: a deck from the
+    // last visit beats dropping the user back to the built-ins.
+    if (quiet && liveDishes) return liveDishes;
+    liveDishes = null;
+    recipeNotice = 'AI is unavailable · showing built-in recipes.';
+    renderAll({ enter: true });
     return [];
   }
 }
@@ -1366,7 +1404,7 @@ function finishMadeIt(dishId) {
 /* ---------- photo of a dish → recipe ----------
    Upload (or the sample) → downscale → POST /identify → a dish object shaped like the
    deck's → the result sheet, from which it can be saved or put on tonight's list.
-   While the backend is a skeleton (501) or unreachable, SAMPLE_IDENTIFIED stands in. */
+   When the backend is unreachable or has no key, SAMPLE_IDENTIFIED stands in. */
 const SAMPLE_DISH_IMG = '../img/shakshuka.jpg';
 const DISH_SHEETS = new Set(['upload', 'saved', 'dish-upload', 'dish-processing', 'dish-result', 'scan-choose']);   // sheets the flow may open from
 const confidenceLabel = c => (c >= 0.8 ? 'pretty sure' : c >= 0.6 ? 'fairly sure' : 'best guess');
@@ -1413,8 +1451,8 @@ function dishFromIdentified(res, imgDataUrl) {
     savedAt: Date.now(),
   };
 }
-// The backend is still a skeleton (501), deployed without a key (503), or not there (offline, no base URL):
-// show the sample instead of an error.
+// The backend is deployed without a key (503), not there (offline, no base URL), or an older
+// build that still answers 501: show the sample instead of an error.
 function backendNotReady(err) {
   const code = err && err.code;
   if (code === 'not_implemented' || code === 'unreachable' || code === 'unconfigured') return true;
@@ -2029,6 +2067,7 @@ async function doSignOut(btn) {
   btn.textContent = 'Signing out…';
   clearLocalPrefs();   // the next account on this browser starts from its own answers
   clearLocalSaved();   // and does not inherit this account's saved dishes (they stay in public.recipes)
+  clearLocalDeck();    // nor its deck, which is cached on the account anyway
   await signOut();
   location.replace('../login/');
 }
@@ -2338,7 +2377,8 @@ async function handleChat(text) {
     if (apiConfigured()) {
       const data = await Promise.race([
         fetchRecipes(pantryForApi(), { request: text, prefs, count: 3, maxMissing: 12 }),
-        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 12000); }),
+        // /recipes is two model calls now (ideas, then the recipes themselves).
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 30000); }),
       ]);
       // A preference edit during generation invalidates that answer's instructions.
       if (JSON.stringify(prefs) !== JSON.stringify(state.prefs)) {
@@ -2468,7 +2508,7 @@ user = session && session.user ? session.user : null;
 renderAvatar();
 // Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
 onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
-const [saved, prefs, kept] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes()]);
+const [saved, prefs, kept, cachedDeck] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes(), loadDeck()]);
 state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
 state.saved = Array.isArray(kept) ? kept.filter(d => d && d.id && Array.isArray(d.ingredients)) : [];   // before renderAll, so a photo dish on tonight's list resolves
 if (saved) {
@@ -2479,9 +2519,13 @@ if (saved) {
 } else {
   state.pantry = seedPantry();
 }
+// Last visit's deck goes in before the first render, so the app opens with
+// recipes already on screen instead of waiting on two model calls. If it no
+// longer matches the kitchen, regenerate quietly behind it.
+const deckFresh = adoptCachedDeck(cachedDeck);
 populateFoodOptions();
 renderAll({ enter: true });
-refreshRecipes();
+if (!deckFresh) refreshRecipes({ quiet: Boolean(liveDishes) });
 // First visit (a fresh sign-in, or once per browser in demo mode): ask the five questions before anything else.
 if (!state.prefs.onboarded) openOnboarding();
 window.pantry = { state, drag, session, openOnboarding, openProfile, openDishUpload, openSaved, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console

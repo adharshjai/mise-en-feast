@@ -1,10 +1,22 @@
 """
 Recipe generation for Pantry: Gemini writes the dishes, we rank them.
 
+Two model calls, not one. The first asks only for dish ideas — a title, the one
+pantry item the dish is built around, and a line on why it is worth cooking
+tonight. The second turns those ideas into recipes. Asked for six recipes in a
+single call the model writes six variations of the same weeknight stir-fry, and
+since Gemini 3.x ignores temperature, anchoring each idea to a different
+tradition up front is the only reliable way to get variety.
+
+The model proposes dishes and names ingredients; Python decides `have` and
+`missing` by matching those names back to real pantry rows (see rank()). That
+way a card on screen can never claim you own garlic when you don't.
+
 Contract with the frontend (frontend/app/app.js → pantryForApi / dishFromApi):
 
     POST /recipes  { items: [PantryItem], count, max_missing, request, prefs? }
-    →  { count, recipes: [ { title, cook_minutes, servings, difficulty,
+    →  { count, recipes: [ { title, description, cook_minutes, servings,
+                             difficulty,
                              ingredients: [ { name, amount, matched_name,
                                               servings_used, staple, have } ],
                              steps, uses_expiring, missing_count, coverage,
@@ -37,7 +49,8 @@ How prefs shape the result:
                 for the user's allergies, so a model slip never reaches the deck.
     diet      — spelled out plainly (vegan = no animal products, vegetarian =
                 no meat or fish, pescatarian = fish ok no meat, halal / kosher
-                = the usual exclusions).
+                = the usual exclusions). rank() drops any dish whose ingredient
+                names break one, the same check the frontend does.
   SOFT preferences (prompt only):
     cuisines (favour, don't restrict), maxMinutes, skill (beginner → few
     steps, common techniques), equipment (never require anything not listed),
@@ -54,11 +67,13 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import re
 from typing import Iterable, Literal
 
-from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+import llm
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
@@ -331,6 +346,10 @@ class Ingredient(BaseModel):
 
 class Recipe(BaseModel):
     title: str
+    description: str = Field(
+        default="",
+        description="One sentence on how it tastes or why it works. Not a menu blurb.",
+    )
     cook_minutes: int = Field(description="Total time from start to plate.")
     servings: int
     difficulty: Literal["easy", "medium", "hard"]
@@ -346,39 +365,100 @@ class RecipeBatch(BaseModel):
     recipes: list[Recipe]
 
 
+class Idea(BaseModel):
+    """First pass: a dish worth cooking, before anyone writes the recipe."""
+
+    title: str = Field(description="The dish name as a cook would say it out loud, not a category.")
+    hero: str = Field(description="The one pantry item the dish is built around, copied exactly from the pantry list.")
+    angle: str = Field(description="One line on why it is worth cooking tonight.")
+
+
+class IdeaBatch(BaseModel):
+    ideas: list[Idea]
+
+
 # ---------------------------------------------------------------------------
-# Prompt
+# Prompts
 # ---------------------------------------------------------------------------
 
-PROMPT = """You plan dinners from what is already in someone's kitchen.
+# One tradition per idea. Sampled per request, so two refreshes of the same
+# pantry do not return the same six dishes.
+ANGLES = (
+    "something Italian, simple, few ingredients",
+    "something with heat and acid, Mexican or Thai",
+    "a one-pan roast or traybake",
+    "a soup, stew, or braise",
+    "eggs doing the heavy lifting, any time of day",
+    "a grain bowl or salad that eats like a meal",
+    "something East Asian, wok or steamer",
+    "comfort food, unfashionable and good",
+    "a sandwich, flatbread, or toast that counts as dinner",
+    "something South Asian or Middle Eastern, spice-forward",
+)
+
+BRAINSTORM_PROMPT = """You cook at home most nights and you are good at it.
+
+PANTRY (name · servings on hand · days until it spoils or runs out):
+{pantry}
+{preference}
+Come up with {want} dish ideas for tonight, one for each of these directions:
+
+{directions}
+
+Rules:
+- Each dish is built around ONE hero ingredient, copied exactly from the pantry
+  list above. Not a survey of the fridge.
+- Most heroes should be items with the fewest days left.
+- Do not repeat a hero ingredient across ideas.
+- Name dishes the way a person says them out loud. "Kale and sausage
+  orecchiette", not "Hearty Vegetable and Protein Pasta Dish". No adjective
+  stacking, no "delicious", no "medley", no "fusion". 2 to 5 words, no numbers,
+  no brand names.
+- A dish may need one or two things the pantry does not have. Say so in the angle.
+- If the cook asked for something specific above, that wins: give them what they
+  asked for, and use the directions only for the ideas it does not cover.
+{hard_rules}{preferences}"""
+
+DEVELOP_PROMPT = """Write these {want} recipes properly.
+
+{ideas}
 
 PANTRY (name · servings on hand · days until it spoils or runs out):
 {pantry}
 
-Write {want} distinct dishes a normal home cook can make tonight.
+Salt, pepper, water, oil, sugar and common dried spices are on hand. Nothing
+else is free.
 
 Rules:
-- Cook from the pantry. Every dish must use at least two pantry items, and the
-  first few dishes must use the items with the fewest days left.
-- Each dish may need at most {max_missing} ingredients that are NOT in the pantry
-  and are not staples. Staples (salt, pepper, oil, water, sugar, dried spices)
-  are assumed on hand: mark them staple = true and do not count them.
 - For every ingredient that comes from the pantry, set matched_name to the
-  pantry name EXACTLY as written above. Leave matched_name empty otherwise.
-- servings_used is how many pantry servings the dish consumes of that item
-  (a two-person pasta uses about 2 servings of pasta).
-- Keep titles plain and appetizing ("Spinach and garlic pasta"), 2 to 5 words.
-  No numbers in titles, no brand names.
-- cook_minutes is realistic.
+  pantry name EXACTLY as written above. Leave matched_name empty otherwise, and
+  mark the staples above staple = true so they are never counted as missing.
+- Each dish may need at most {max_missing} ingredients that are NOT in the
+  pantry and are not staples.
+- servings_used is how much of the pantry the dish eats, in the servings unit
+  shown above. Half a bunch of kale out of 4 servings is 2, not 0.5.
+- uses_expiring lists the pantry items the dish uses that have five days or
+  fewer left, named exactly as above.
+- cook_minutes is realistic, start to plate.
 - Rate difficulty on this rubric, honestly: "easy" = one pan or pot, up to about five
   steps, nothing has to happen at the same time; "medium" = two components cooked
   in parallel, or a technique that needs attention such as searing, emulsifying,
   or reducing a sauce; "hard" = several components with precise timing, or an
   advanced technique such as dough, tempering, deep-frying or pastry. Most
   weeknight food is easy; do not call a dish easy because the cook is confident.
-- Steps: 3 to 7 short imperative sentences, one action each.
-- Vary the dishes: different main ingredients and cooking methods, not six
-  versions of the same stir-fry.
+
+Write the steps the way you would tell a friend who can cook but has not made
+this before. That means:
+- Real heat levels and times. "Medium-high, 4 minutes a side", not "saute".
+- A sensory cue for anything that can go wrong: what it should look, smell or
+  sound like when it is ready.
+- Say when something can happen while something else cooks.
+- Never write "cook until done", "season to taste" or "add remaining
+  ingredients". Those are placeholders, not instructions.
+- 5 to 9 steps, one action each, and do not number them.
+
+description is one sentence on how the dish tastes or why it works. Not a menu
+blurb. No "burst of flavor", no "perfect for busy weeknights".
 {hard_rules}{preferences}{preference}"""
 
 
@@ -443,43 +523,62 @@ def _preferences(prefs: Prefs) -> str:
     return "\nPREFERENCES:\n" + "\n".join(lines) + "\n"
 
 
-def build_prompt(req: RecipeRequest) -> str:
-    """The full prompt for a request. Pure, so it can be inspected without calling the model."""
+def _blocks(req: RecipeRequest) -> dict:
+    """The pieces both prompts share: the pantry, the rules, and the free-text ask."""
     food = [i for i in req.items if i.is_food and i.quantity_servings > 0]
-    preference = f"\nThe cook asked for: {req.request.strip()}" if req.request and req.request.strip() else ""
-    hard_rules = _hard_rules(req.prefs) if req.prefs else ""
-    preferences = _preferences(req.prefs) if req.prefs else ""
-    return PROMPT.format(
-        pantry=_pantry_lines(food),
-        want=min(req.count + 2, 12),  # a couple of spares so ranking has something to drop
+    return {
+        "pantry": _pantry_lines(food),
+        "hard_rules": _hard_rules(req.prefs) if req.prefs else "",
+        "preferences": _preferences(req.prefs) if req.prefs else "",
+        "preference": f"\nThe cook asked for: {req.request.strip()}\n" if req.request and req.request.strip() else "",
+        # A couple of spares so ranking has something to drop.
+        "want": min(req.count + 2, 12),
+    }
+
+
+def build_brainstorm_prompt(req: RecipeRequest, angles: list[str]) -> str:
+    """First-pass prompt. Pure, so it can be inspected without calling the model."""
+    blocks = _blocks(req)
+    return BRAINSTORM_PROMPT.format(
+        directions="\n".join(f"{n}. {a}" for n, a in enumerate(angles, 1)),
+        **blocks,
+    )
+
+
+def build_develop_prompt(req: RecipeRequest, ideas: list[Idea]) -> str:
+    """Second-pass prompt. Pure, like build_brainstorm_prompt."""
+    blocks = {**_blocks(req), "want": len(ideas)}
+    return DEVELOP_PROMPT.format(
+        ideas="\n".join(f"{n}. {i.title} (hero: {i.hero}) — {i.angle}" for n, i in enumerate(ideas, 1)),
         max_missing=req.max_missing,
-        hard_rules=hard_rules,
-        preferences=preferences,
-        preference=preference,
+        **blocks,
     )
 
 
 def generate(req: RecipeRequest, client, model: str | None = None) -> list[dict]:
-    """Ask Gemini for dishes. Returns plain dicts; ranking is done by rank()."""
+    """Ask Gemini for dishes: ideas first, then the recipes. Ranking is done by rank()."""
     food = [i for i in req.items if i.is_food and i.quantity_servings > 0]
     if not food:
         return []
 
-    response = client.models.generate_content(
-        model=model or MODEL,
-        contents=build_prompt(req),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=RecipeBatch,
-        ),
-    )
+    want = min(req.count + 2, 12)
+    angles = random.sample(ANGLES, min(want, len(ANGLES)))
+    ideas = llm.generate_json(client, build_brainstorm_prompt(req, angles), IdeaBatch, model or MODEL).ideas
 
-    batch = response.parsed
-    if batch is None:  # the SDK could not hydrate the schema; parse the text ourselves
-        import json
+    # Drop repeated heroes before paying for a second call to develop them.
+    seen: set[frozenset[str]] = set()
+    unique: list[Idea] = []
+    for idea in ideas:
+        key = frozenset(_tokens(idea.hero)) or frozenset({_norm(idea.title)})
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(idea)
 
-        batch = RecipeBatch(**json.loads(response.text))
+    if not unique:
+        raise ValueError("the model returned no dish ideas")
 
+    batch = llm.generate_json(client, build_develop_prompt(req, unique[:want]), RecipeBatch, model or MODEL)
     return [r.model_dump() for r in batch.recipes]
 
 
@@ -489,14 +588,42 @@ def generate(req: RecipeRequest, client, model: str | None = None) -> list[dict]
 
 _WORD = re.compile(r"[a-z0-9]+")
 
+# Assumed to be in every kitchen. The model is asked to flag these itself; this
+# is the safety net, so a forgotten flag never shows salt as something to buy.
+STAPLES = (
+    "salt", "pepper", "black pepper", "salt and pepper", "water", "oil", "olive oil",
+    "vegetable oil", "cooking oil", "cooking spray", "sugar", "ice",
+)
+
 
 def _norm(s: str) -> str:
     return " ".join(_WORD.findall((s or "").lower()))
 
 
+def _singular(word: str) -> str:
+    """Enough plural stripping that "tomato" matches "tomatoes". Both sides of every
+    comparison come through here, so it only has to be consistent, not correct."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"  # berries -> berry
+    if len(word) > 4 and word.endswith(("oes", "ses", "xes", "ches", "shes")):
+        return word[:-2]  # tomatoes -> tomato, dishes -> dish
+    if word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]  # eggs -> egg, but glass stays glass
+    return word
+
+
 def _tokens(s: str) -> set[str]:
     stop = {"fresh", "large", "small", "chopped", "sliced", "diced", "of", "the", "a", "and", "or"}
-    return {t for t in _WORD.findall((s or "").lower()) if t not in stop and len(t) > 2}
+    return {_singular(t) for t in _WORD.findall((s or "").lower()) if t not in stop and len(t) > 2}
+
+
+_STAPLE_TOKENS = [_tokens(s) for s in STAPLES]
+
+
+def is_staple(name: str) -> bool:
+    """True for salt, oil and friends. Subset, not overlap: 'oil-packed tuna' is tuna."""
+    words = _tokens(name)
+    return bool(words) and any(words <= staple for staple in _STAPLE_TOKENS)
 
 
 def ingredient_hits(names: Iterable[str], allergies: Iterable[str]) -> list[str]:
@@ -522,8 +649,49 @@ def ingredient_hits(names: Iterable[str], allergies: Iterable[str]) -> list[str]
     return hits
 
 
+# Mirrors the diet half of passesPrefs() in frontend/app/app.js. These are
+# ingredient-name checks, not certification of halal or kosher sourcing.
+_MEAT = re.compile(r"\b(chicken|beef|pork|bacon|ham|lard|lamb|turkey|duck|veal|venison|sausage|gelatin)\b")
+_PORK = re.compile(r"\b(pork|bacon|ham|lard)\b")
+_ALCOHOL = re.compile(r"\b(wine|beer|vodka|rum|brandy|sake|sherry|bourbon)\b")
+
+
+def diet_conflicts(names: Iterable[str], diets: Iterable[str]) -> bool:
+    """True when these ingredient names break one of the household's diets."""
+    names = [n for n in names if n]
+    if not names:
+        return False
+    text = " ".join(_norm(n) for n in names)
+    meat = bool(_MEAT.search(text))
+    seafood = bool(ingredient_hits(names, ("fish", "shellfish")))
+    dairy = bool(ingredient_hits(names, ("dairy",)))
+    eggs = bool(ingredient_hits(names, ("eggs",)))
+    pork = bool(_PORK.search(text))
+    alcohol = bool(_ALCOHOL.search(text))
+
+    for diet in diets:
+        if diet == "vegan" and (meat or seafood or dairy or eggs or "honey" in text):
+            return True
+        if diet == "vegetarian" and (meat or seafood):
+            return True
+        if diet == "pescatarian" and meat:
+            return True
+        if diet == "halal" and (pork or alcohol):
+            return True
+        if diet == "kosher" and (pork or ingredient_hits(names, ("shellfish",)) or (meat and dairy)):
+            return True
+    return False
+
+
 def _match(ingredient: dict, pantry: dict[str, PantryItem]) -> PantryItem | None:
-    """Prefer the model's exact matched_name; fall back to token overlap on the ingredient name."""
+    """Prefer the model's exact matched_name; fall back to token overlap on the ingredient name.
+
+    Scored against the shorter of the two names, so "Roma tomatoes" still finds
+    "Tomatoes", but sharing one generic word is not enough: "Lime juice" must not
+    match "Hint of Lime Tortilla Chips", nor "Cheddar cheese" a fig goat cheese.
+    A wrong match here shows as "you have this" and quietly drops the item off
+    the shopping list, so the bar is a clear majority of the shorter name.
+    """
     exact = _norm(ingredient.get("matched_name", ""))
     if exact and exact in pantry:
         return pantry[exact]
@@ -532,12 +700,13 @@ def _match(ingredient: dict, pantry: dict[str, PantryItem]) -> PantryItem | None
         return None
     best, best_score = None, 0.0
     for key, item in pantry.items():
-        overlap = len(words & _tokens(key))
+        key_words = _tokens(key)
+        overlap = len(words & key_words)
         if overlap:
-            score = overlap / max(len(words), 1)
+            score = overlap / max(min(len(words), len(key_words)), 1)
             if score > best_score:
                 best, best_score = item, score
-    return best if best_score >= 0.5 else None
+    return best if best_score > 0.5 else None
 
 
 def rank(
@@ -548,12 +717,14 @@ def rank(
 ) -> list[dict]:
     """Score, filter and order recipes. Adds have/missing_count/coverage/urgency_days.
 
-    With `prefs`, any dish whose ingredients trip one of the user's allergies is
-    dropped outright (staples included: "butter" or "sesame oil" marked as a
-    staple is still the allergen), so a model slip never reaches the client.
+    With `prefs`, any dish whose ingredients trip one of the household's
+    allergies, or break its diet, is dropped outright (staples included:
+    "butter" or "sesame oil" marked as a staple is still the allergen), so a
+    model slip never reaches the client.
     """
     pantry = {_norm(i.name): i for i in (items or []) if i.is_food}
     allergies = list(prefs.allergies) if prefs else []
+    diets = list(prefs.diet) if prefs else []
     seen_titles: set[str] = set()
     ranked: list[dict] = []
 
@@ -567,7 +738,8 @@ def rank(
         urgency = 999
         expiring: list[str] = []
         for ing in r.get("ingredients", []):
-            if ing.get("staple"):
+            if ing.get("staple") or is_staple(ing.get("name", "")):
+                ing["staple"] = True
                 ing["have"] = True
                 continue
             item = _match(ing, pantry) if pantry else None
@@ -587,13 +759,16 @@ def rank(
         if have == 0 or missing > max_missing:
             continue
 
-        if allergies:
+        if allergies or diets:
             names = []
             for ing in r.get("ingredients", []):
                 names.append(ing.get("name", ""))
                 names.append(ing.get("matched_name", ""))
-            if ingredient_hits(names, allergies):
-                continue  # unsafe for this household, whatever the model said
+            # Unsafe or off-diet for this household, whatever the model said.
+            if allergies and ingredient_hits(names, allergies):
+                continue
+            if diets and diet_conflicts(names, diets):
+                continue
 
         r["missing_count"] = missing
         r["coverage"] = round(have / max(have + missing, 1), 3)

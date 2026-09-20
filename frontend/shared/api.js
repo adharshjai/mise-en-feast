@@ -75,7 +75,7 @@ export async function fetchRecipes(items, opts = {}) {
  * Rejects with an Error carrying a `code` so the app can decide what to show:
  *   'unconfigured'     apiBaseUrl is empty (demo build) — use the sample
  *   'unreachable'      the request never got an HTTP answer (offline, CORS, DNS) — use the sample
- *   'not_implemented'  the endpoint answered 501: it is still a skeleton — use the sample
+ *   'not_implemented'  the endpoint answered 501 (an older backend) — use the sample
  *   'http'             any other non-2xx (400 bad file, 502 model failure); `status` is set
  * Passing the original file is fine; the backend downscales what it sends to the model.
  */

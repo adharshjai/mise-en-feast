@@ -10,8 +10,12 @@ what expires first.
 | `POST /scan` | multipart `file` (image or PDF) → parsed, enriched items |
 | `POST /recipes` | `{ items, count, max_missing, request }` → ranked recipes |
 | `POST /cook` | subtract a cooked recipe's servings |
-| `POST /identify` | multipart `file` (photo of a dish) → its recipe. **Skeleton**: 501 until wired up, see below |
-| `GET /health` | `{ ok, provider, model, key_set }`, plus `vision_model`, `nvidia_base_url`, `nvidia_key_set` when the provider is `nvidia` |
+| `POST /identify` | multipart `file` (photo of a dish) → its recipe, see below |
+| `GET /health` | `{ ok, model, key_set }` |
+
+Everything runs on Gemini. `GEMINI_API_KEY` is the only key; `GEMINI_MODEL`
+(default `gemini-3.5-flash-lite`) picks the model, and `IDENTIFY_STUB=1` makes
+`/identify` answer without calling anything.
 
 ## Run locally
 
@@ -19,57 +23,19 @@ what expires first.
 cd backend
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # paste your GEMINI_API_KEY
+# put GEMINI_API_KEY in .env (gitignored)
 uvicorn main:app --reload --port 8000
+
+# in another terminal
+curl -s http://localhost:8000/health
+curl -s -F file=@/path/to/a/receipt.jpg http://localhost:8000/scan | python3 -m json.tool
 ```
 
 Serve the frontend from `frontend/` (`python3 -m http.server 4173`); on localhost
 it talks to `http://localhost:8000` automatically.
 
-## Providers
-
-`POST /scan` reads the receipt with Gemini by default, or with an NVIDIA vision
-model through NVIDIA's OpenAI-compatible API when `LLM_PROVIDER=nvidia`. Only
-`/scan` switches: `/recipes` and `/identify` always use Gemini, so keep
-`GEMINI_API_KEY` set for those.
-
-| Variable | Default | Notes |
-|---|---|---|
-| `LLM_PROVIDER` | `gemini` | `nvidia` switches `/scan`; anything else means Gemini |
-| `NVIDIA_API_KEY` | | required when `nvidia`; create one at build.nvidia.com |
-| `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | point it at a self-hosted NIM if you run one |
-| `NVIDIA_VISION_MODEL` | `nvidia/nemotron-nano-12b-v2-vl` | any vision-capable chat model on that endpoint |
-
-All four are read per request, so editing `.env` and restarting is enough. On the
-command line they beat `.env` (`load_dotenv` never overrides a variable that is
-already set):
-
-```sh
-cd backend
-LLM_PROVIDER=nvidia NVIDIA_API_KEY=... .venv/bin/uvicorn main:app --port 8000
-
-# in another terminal
-curl -s http://localhost:8000/health
-# {"ok":true,"provider":"nvidia","model":"gemini-3.5-flash-lite","key_set":true,
-#  "vision_model":"nvidia/nemotron-nano-12b-v2-vl","nvidia_base_url":"https://integrate.api.nvidia.com/v1","nvidia_key_set":true}
-curl -s -F file=@dev/receipt.png http://localhost:8000/scan | python3 -m json.tool
-```
-
-(`dev/receipt.png` is the synthetic receipt rendered by `dev/make_receipt.py`;
-any receipt photo works.)
-
-What the NVIDIA path does (`call_nvidia_vision` in `main.py`): one non-streaming
-`chat.completions` call carrying the same `PROMPT` Gemini gets plus a text
-rendering of the `ParsedReceipt` schema (the API has no `response_schema`), and
-the image as a base64 data URL (photos over 4 MB are downscaled to 2048 px JPEG
-first). JSON mode (`response_format: json_object`) is requested; if the model
-rejects it (NVIDIA lists structured output as unsupported for the Nemotron VL
-model, so expect this) the call is retried once without and JSON mode is skipped
-for that model from then on. The reply is parsed leniently either way (code
-fence stripped, outermost `{...}` taken) before `ParsedReceipt` validation and
-the usual `enrich()`. Errors map like Gemini's: 503 when
-`NVIDIA_API_KEY` is missing, 502 when the model call or the parse fails twice,
-400 for a PDF (the NVIDIA path takes images only).
+Any photo of a receipt works for `/scan`; `/docs` gives you a form to try the
+endpoints without curl.
 
 ## Deployed
 
@@ -78,13 +44,13 @@ function (`vercel.json` routes `/api/*` to it and bundles `backend/`). Add
 `GEMINI_API_KEY` in the Vercel project → Settings → Environment Variables and
 redeploy. The frontend's `apiBaseUrl` is `/api`, so no CORS is involved.
 
-## Photo of a dish → recipe (skeleton)
+## Photo of a dish → recipe
 
-`POST /identify` takes a photo of a plated dish and returns the recipe for it.
-The endpoint, the response model, the prompt and a canned sample are done; the
-one thing missing is the Gemini call itself, so today the route answers **501**
-(or the sample when stubbed, see below). The frontend treats "unreachable or
-501" as "backend not ready" and shows its own copy of the sample.
+`POST /identify` takes a photo of a plated dish and returns the recipe for it:
+one Gemini call with the image and `IDENTIFY_PROMPT`, answered as
+`IdentifiedDish`. `IDENTIFY_STUB=1` short-circuits it to a canned sample that
+needs no key (see below). The frontend treats an unreachable backend as "not
+ready" and shows its own copy of that sample.
 
 ### Contract
 
@@ -105,7 +71,6 @@ POST /identify   multipart/form-data, field "file" (image/jpeg | png | webp | he
         // contains uses the allergen keys: peanuts, tree-nuts, dairy, eggs,
         // gluten, shellfish, fish, soy, sesame
 }
-501 → { detail: "identify is not implemented yet" }   // while it is a skeleton
 400 → empty upload or a non-image content type
 503 → GEMINI_API_KEY not set (same as /scan)
 502 → the model call failed (same as /scan and /recipes)
@@ -126,28 +91,14 @@ Everything lives in `identify.py`:
 - `finish()` — pure post-processing: adds any allergen the listed ingredients
   trip (same keyword table as `/recipes`) and keeps the vegetarian/vegan flags
   consistent with `contains`.
-- `identify(image_bytes, mime_type, client)` — raises `NotImplementedError`
-  until the call is pasted in; returns the sample when `IDENTIFY_STUB=1`.
+- `identify(image_bytes, mime_type, client, model)` — the Gemini call, via
+  `llm.generate_json`; returns the sample instead when `IDENTIFY_STUB=1`.
 
-### Finishing it — three steps
+It needs `GEMINI_API_KEY`, the same one `/scan` uses, and nothing else. Leave
+`IDENTIFY_STUB` unset to get real answers: it only short-circuits when it is
+exactly `"1"`.
 
-1. **Paste the Gemini call.** In `identify.identify()` uncomment the
-   `client.models.generate_content(...)` block (it is modelled on `call_gemini()`
-   in `main.py`: image part + `IDENTIFY_PROMPT`, `response_mime_type="application/json"`,
-   `response_schema=IdentifiedDish`, then `finish(response.parsed)`) and delete
-   the `raise NotImplementedError(...)` under it. `main.py` already builds the
-   client with `gemini()` and maps errors, nothing to change there.
-2. **Drop the stub flag.** Stop setting `IDENTIFY_STUB=1` wherever you set it
-   (`.env`, shell, Vercel). The flag only ever short-circuits when it is exactly
-   `"1"`, so leaving it unset is enough.
-3. **Add the Vercel env.** `GEMINI_API_KEY` is already there for `/scan`; nothing
-   new is needed unless you want a different model, in which case set
-   `GEMINI_MODEL` too. Redeploy; the frontend already calls `/api/identify`.
-
-Run the stub test below once more after step 1 with a real key and
-`IDENTIFY_STUB` unset to see a real answer.
-
-### Testing the skeleton locally
+### Testing it locally
 
 Stubbed (no key needed; every photo comes back as the shakshuka sample):
 
@@ -159,14 +110,8 @@ IDENTIFY_STUB=1 .venv/bin/uvicorn main:app --reload --port 8000
 curl -s -F "file=@../frontend/img/shakshuka.jpg;type=image/jpeg" http://localhost:8000/identify | python3 -m json.tool
 ```
 
-Without the flag you get the not-implemented answer:
-
-```sh
-.venv/bin/uvicorn main:app --reload --port 8000
-curl -s -i -F "file=@../frontend/img/shakshuka.jpg;type=image/jpeg" http://localhost:8000/identify
-# HTTP/1.1 501 Not Implemented
-# {"detail":"identify is not implemented yet"}
-```
+Without the flag (and with a key in `.env`) the same call goes to Gemini and
+comes back with whatever the photo actually shows.
 
 Or without a server at all (FastAPI's `TestClient` needs `httpx`, which is in
 the venv):
@@ -185,6 +130,7 @@ Deployed, the same route is `https://<your-app>.vercel.app/api/identify`.
 ## Files
 
 - `main.py` — app, receipt parsing (`/scan`), `/cook`, `/health`, and the `/identify` route
-- `recipes.py` — recipe generation (`generate`) and ranking (`rank`)
-- `identify.py` — photo of a dish → recipe: models, prompt, sample, stub (skeleton, see above)
-- `.env.example` — the variables the app reads (`IDENTIFY_STUB=1` is the one extra for the skeleton)
+- `recipes.py` — recipe generation (ideas, then recipes) and ranking (`rank`)
+- `identify.py` — photo of a dish → recipe: models, prompt, sample, the call
+- `llm.py` — the shared "answer as this pydantic model" Gemini call
+- `.env.example` — the variables the app reads (`IDENTIFY_STUB=1` is the one extra, for keyless demos)

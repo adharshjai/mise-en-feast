@@ -36,10 +36,10 @@ frontend/            static web app — no framework, no build step
 backend/             FastAPI service (receipt OCR, recipes, dish photo → recipe)
   main.py            app, /scan, /cook, /identify, /health
   recipes.py         recipe generation and ranking
-  identify.py        photo of a dish → recipe (skeleton, see below)
-  dev/               receipt generator + NVIDIA scan harness
+  identify.py        photo of a dish → recipe
+  llm.py             the shared "answer as this pydantic model" Gemini call
 api/index.py         mounts backend/ as a Vercel Python function under /api
-supabase/            migrations 0001–0004 + schema.sql (the four concatenated)
+supabase/            migrations 0001–0005 + schema.sql
 scripts/             node --test suites, migration runner, DB smoke test
 vercel.json          routes /api/* to the function, everything else to frontend/
 ```
@@ -87,13 +87,11 @@ receipt and hardcoded dishes.
 | `POST /scan` | multipart `file` (image or PDF) → parsed, enriched pantry items |
 | `POST /recipes` | `{ items, count, max_missing, request }` → ranked recipes |
 | `POST /cook` | subtract a cooked recipe's servings |
-| `POST /identify` | photo of a dish → its recipe. **Skeleton**: returns 501 until the Gemini call is pasted into `identify.identify()`. Set `IDENTIFY_STUB=1` for a canned response that needs no key |
-| `GET /health` | `{ ok, provider, model, key_set }` |
+| `POST /identify` | photo of a dish → its recipe. Set `IDENTIFY_STUB=1` for a canned response that needs no key |
+| `GET /health` | `{ ok, model, key_set }` |
 
-`/scan` can read receipts with an NVIDIA vision model instead of Gemini by
-setting `LLM_PROVIDER=nvidia` and `NVIDIA_API_KEY`. `/recipes` and `/identify`
-are Gemini only, so keep `GEMINI_API_KEY` set either way. Full provider table in
-[backend/README.md](backend/README.md).
+All three model-backed routes run on Gemini, so `GEMINI_API_KEY` is the only key
+the backend needs. Details in [backend/README.md](backend/README.md).
 
 ## Supabase
 
@@ -140,5 +138,5 @@ backend and no longer applies.
 |---|---|
 | [frontend/README.md](frontend/README.md) | frontend structure and the pantry model |
 | [frontend/DESIGN.md](frontend/DESIGN.md) | palette, type, components, writing style |
-| [backend/README.md](backend/README.md) | endpoints, providers, prompt details |
+| [backend/README.md](backend/README.md) | endpoints and prompt details |
 | [DATABASE.md](DATABASE.md) | tables, RLS, foods catalog, consumption learning |

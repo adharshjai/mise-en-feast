@@ -1,5 +1,5 @@
 """
-Photo of a dish → recipe. SKELETON: nothing in here calls Gemini yet.
+Photo of a dish → recipe.
 
 Contract with the frontend (frontend/app/app.js builds a deck-style dish from it):
 
@@ -10,36 +10,29 @@ Contract with the frontend (frontend/app/app.js builds a deck-style dish from it
           ingredients: [ { name, amount, staple } ],
           steps: [str],
           tags: { vegetarian, vegan, contains: [allergen keys] } }
-    501 → { detail: "identify is not implemented yet" }   while this is a skeleton
     400 / 502 / 503 as the other endpoints (see main.py).
 
-What is here already:
+What is here:
   IdentifiedDish     pydantic models with Field descriptions written so the class can
                      be passed straight to Gemini as response_schema.
   IDENTIFY_PROMPT    the full prompt.
   SAMPLE_IDENTIFIED  a canned shakshuka answer, the same one the frontend ships as its
-                     "Use a sample photo" / backend-not-ready fallback.
-  identify()         raises NotImplementedError until the model call is pasted in
-                     (the finished call sits there, commented out, five lines), OR
-                     returns the sample when the env var IDENTIFY_STUB is "1".
-
-To finish it (also in README.md, "Photo of a dish → recipe"):
-  1. uncomment the generate_content block in identify() and delete the raise;
-  2. stop setting IDENTIFY_STUB (or leave the flag: it only ever short-circuits
-     when explicitly "1");
-  3. make sure GEMINI_API_KEY is set on Vercel (it already is for /scan).
+                     "Use a sample photo" / backend-not-ready fallback. identify()
+                     returns it, without touching Gemini, when IDENTIFY_STUB=1.
+  finish()           post-processing: allergens the ingredients trip are added to
+                     tags.contains even when the model forgot them.
 """
 
 from __future__ import annotations
 
-import json  # noqa: F401  (used by the commented-out Gemini call below)
 import os
 import re
 from typing import Literal
 
-from google.genai import types  # noqa: F401  (used by the commented-out Gemini call below)
+from google.genai import types
 from pydantic import BaseModel, Field, field_validator
 
+import llm
 from recipes import ALLERGENS, ingredient_hits
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
@@ -310,32 +303,14 @@ def identify(image_bytes: bytes, mime_type: str, client, model: str | None = Non
     """Look at a photo of a dish and return its recipe.
 
     `client` is the Gemini client from main.gemini() (None is fine while stubbed).
-    Raises NotImplementedError until the model call below is uncommented; main.py
-    maps that to a 501 so the frontend can fall back to its sample.
     """
     if stubbed():
         return finish(IdentifiedDish(**SAMPLE_IDENTIFIED))
 
-    # --- TODO(owner): the finished call. Modelled on call_gemini() in main.py. ---
-    # response = client.models.generate_content(
-    #     model=model or MODEL,
-    #     contents=[
-    #         types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-    #         IDENTIFY_PROMPT,
-    #     ],
-    #     config=types.GenerateContentConfig(
-    #         response_mime_type="application/json",
-    #         response_schema=IdentifiedDish,
-    #         # No temperature / top_p / top_k: Gemini 3.x is tuned for defaults and
-    #         # overriding them makes structured output worse (see main.py).
-    #     ),
-    # )
-    # dish = response.parsed
-    # if dish is None:  # the SDK could not hydrate the schema; parse the text ourselves
-    #     dish = IdentifiedDish(**json.loads(response.text))
-    # return finish(dish)
-    # ------------------------------------------------------------------------------
-
-    raise NotImplementedError(
-        "identify: wire up gemini().models.generate_content with IDENTIFY_PROMPT and response_schema=IdentifiedDish"
+    dish = llm.generate_json(
+        client,
+        [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), IDENTIFY_PROMPT],
+        IdentifiedDish,
+        model or MODEL,
     )
+    return finish(dish)
