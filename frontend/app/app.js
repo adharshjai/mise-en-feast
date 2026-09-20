@@ -1,5 +1,5 @@
 /* =========================================================================
-   Pantry — interactive prototype
+   mise en feast — interactive prototype
    Receipt in, pantry out, dinner on screen. Everything is derived at read
    time: current quantity = initial − burn rate × days − what cooking used.
    Runs as an ES module so it can share the auth and storage layers.
@@ -11,8 +11,12 @@ import {
   loadPrefs, savePrefs, prefsToRequest, normalizePrefs, servingsTarget, householdScale, ingredientHits,
   DEFAULT_PREFS, ALLERGENS, DIETS, CUISINES, EQUIPMENT, SKILLS, SHOPPING, TIME_LIMITS, HOUSEHOLD_LIMITS,
   loadSavedDishes, saveDish, removeDish, downscaleImage, SAMPLE_IDENTIFIED, loadDeck, saveDeck,
+  loadShopping, saveShopping, clearLocalShopping, loadPlan, savePlan, clearLocalPlan,
 } from '../shared/store.js';
-import { scanReceipt, fetchRecipes, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
+import { scanReceipt, fetchRecipes, fetchMealPlan, chat as chatApi, recipeDetail, identifyDish, apiConfigured } from '../shared/api.js';
+import { matchIngredient, buildPantryIndex } from '../shared/ingredients.js';
+import { UNIT_OPTIONS, parseQuantity, toCanonical, formatQuantity, standardizeAmount, scaleAmount, servingsFor } from '../shared/units.js';
+import { dishSlug, needsGeneratedImage, applyDishImages, primeDishImages, clearDishImages } from '../shared/dish-images.js';
 
 const DAY = 86400000;
 const THRESHOLD = 120;          // px of drag that commits a swipe
@@ -22,7 +26,12 @@ const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+const fmt1 = n => Number(Number(n).toFixed(1)).toString();   // "1.5", never "1.4999999"
 const uid = () => crypto.randomUUID();   // rows are keyed by uuid in storage too
+const sentenceCase = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+const listWords = arr => arr.length <= 1 ? (arr[0] || '') : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`;
+const normQ = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+const isoDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const wait = ms => new Promise(r => setTimeout(r, reduceMotion ? 0 : ms));
 
@@ -132,10 +141,11 @@ const NUTRITION = {
 };
 const nutriFor = key => NUTRITION[key] || NUTRI_DEFAULT;
 const timeMinutes = dish => parseInt(dish.time, 10) || 999;
-// Whole-dish totals summed over ingredients, plus per-serving figures.
-function dishStats(dish) {
+// Whole-dish totals summed over ingredients, plus per-serving figures. `ings` are the
+// analysed ingredients when the caller has them (their keys are resolved against the pantry).
+function dishStats(dish, ings = dish.ingredients) {
   const t = { kcal: 0, protein: 0, fat: 0, carbs: 0, cost: 0 };
-  for (const i of (dish.ingredients || [])) {
+  for (const i of (ings || [])) {
     const n = nutriFor(i.key), q = Math.max(0, i.need || 1);
     t.kcal += n.kcal * q; t.protein += n.protein * q; t.fat += n.fat * q; t.carbs += n.carbs * q; t.cost += n.cost * q;
   }
@@ -147,15 +157,6 @@ function dishStats(dish) {
   };
 }
 const money = v => `$${v.toFixed(2)}`;
-
-// Scale the leading number in a display amount ("5 oz" -> "10 oz"); leave "a pinch" alone.
-const scaleAmt = (amt, f) => {
-  if (!f || f === 1) return amt;
-  return String(amt || '').replace(/^\s*(\d+(?:\.\d+)?)/, (m, n) => {
-    const v = parseFloat(n) * f;
-    return m.replace(n, Number.isInteger(v) ? String(v) : v.toFixed(1).replace(/\.0$/, ''));
-  });
-};
 
 const ing = (name, key, need, amt) => ({ name, key, need, amt });
 // tags: what the dish is, for the preference filter. `contains` lists allergen keys
@@ -236,6 +237,9 @@ const DISHES = [
   },
 ];
 const DISH_IMAGES = DISHES.map(d => d.img);
+// Built-in dishes carry hand-set `need` per ingredient; every other dish's need is read
+// off its amount at analyze() time (F3).
+const BUILTIN_IDS = new Set(DISHES.map(d => d.id));
 // Until recipes come with their own photos, pick the stock shot that fits the dish best.
 const PHOTO_RULES = [
   ['pasta', /pasta|spaghetti|noodle|linguine|penne|fettuccine|orzo|lasagna|mac/],
@@ -255,8 +259,8 @@ function pickPhoto(recipe, index) {
 /** Live Gemini recipes when the API is up; null falls back to hardcoded DISHES. */
 let liveDishes = null;
 let recipeRefreshToken = 0;
-let recipeNotice = '';
 const chatDishes = new Map();
+const planDishes = new Map();   // this week's meals by plan- id, so a cell opens like any dish
 
 // Dishes from a photo live outside the deck: in Saved, or (picked for tonight and then
 // removed from Saved) in state.photoDishes, so the Tonight pill can still open them.
@@ -265,8 +269,17 @@ const dishById = id => (liveDishes || DISHES).find(d => d.id === id)
   || state.saved.find(d => d.id === id)
   || state.photoDishes.get(id)
   || chatDishes.get(id)
+  || planDishes.get(id)
   || null;
 const activeDishes = () => liveDishes || DISHES;
+const onDeck = id => activeDishes().some(d => d.id === id);
+
+// data- attributes that let shared/dish-images.js swap in a generated photo for a dish
+// the model wrote; '' for built-in and photo dishes, which already have their own.
+function dishImgAttrs(d) {
+  if (!needsGeneratedImage(d)) return '';
+  return ` data-dish-img="${dishSlug(d.name)}" data-dish-id="${esc(d.id)}" data-dish-name="${esc(d.name)}" data-dish-ings="${esc(dishNames(d).join(','))}"`;
+}
 
 const SAMPLE_RECEIPT = {
   store: 'Whole Foods Market', date: 'Sep 19', total: 64.18,
@@ -320,27 +333,35 @@ function formatReceiptDate(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+// Servings a review row's lot starts with (F3.1): what its quantity says, by the same serving
+// sizes every other lot and every recipe's `need` are measured in; the scanner's own estimate
+// only stands in when the quantity cannot be sized ("1 bag"), and the package default last.
+const lineServings = l => servingsFor(l.key, l.qty) ?? l.estimated ?? catalog(l.key).servings;
+
 /** Map a /scan item into a review-row + pantry seed fields. */
 function lineFromScanItem(item) {
   const key = keyForName(item.group_key || item.name);
   const purchaseMs = item.purchase_date ? Date.parse(item.purchase_date) : Date.now();
   const expiryMs = item.expiration_date ? Date.parse(item.expiration_date) : purchaseMs + catalog(key).shelf * DAY;
-  return {
+  const qty = formatQuantity(qtyLabel(item));   // "1.4 lb" -> "635 g": one spelling on the review row and the pantry row
+  const line = {
     id: uid(),
     raw: item.raw_text || item.name,
     name: item.name,
     key,
     variant: item.variant || '',
-    qty: qtyLabel(item),
+    qty,
     price: Number(item.price) || 0,
     nonFood: item.is_food === false,
     low: false,
     dropped: false,
-    initial: Number(item.initial_servings || item.servings) || catalog(key).servings,
+    estimated: Number(item.initial_servings || item.servings) || null,   // the parser's guess at the package, kept for unparseable quantities
     burn: Number(item.daily_burn_rate) || (item.burn_pattern === 'event' ? 0 : catalog(key).burn),
     purchase: Number.isFinite(purchaseMs) ? purchaseMs : Date.now(),
     expiry: Number.isFinite(expiryMs) ? expiryMs : Date.now() + catalog(key).shelf * DAY,
   };
+  line.initial = lineServings(line);
+  return line;
 }
 
 function slugify(title) {
@@ -356,11 +377,14 @@ function dishFromApi(recipe, index) {
     time: `${recipe.cook_minutes || 20} min`,
     servings: recipe.servings || 2,
     difficulty: (recipe.difficulty || 'easy').replace(/^\w/, c => c.toUpperCase()),
+    // No pantry key is baked in here: analyze() matches each ingredient against the
+    // pantry as it is now, so a scan or a check-in re-verifies every recipe.
     ingredients: (recipe.ingredients || [])
       .filter(ing => !ing.staple)
       .map(ing => ({
         name: ing.name,
-        key: keyForName(ing.matched_name || ing.name),
+        matched_name: ing.matched_name || '',
+        servings_used: Number(ing.servings_used) || null,
         need: Math.max(0.5, Number(ing.servings_used) || 1),
         amt: ing.amount || '',
       })),
@@ -420,7 +444,6 @@ function adoptCachedDeck(cached) {
   try {
     if (!cached || !cached.dishes.length) return false;
     liveDishes = cached.dishes;
-    recipeNotice = 'AI-generated recipes';
     return cached.signature === deckSignature() && Date.now() - cached.at < DECK_MAX_AGE;
   } catch (err) {
     console.warn('[pantry] could not use the cached deck', err);
@@ -429,18 +452,13 @@ function adoptCachedDeck(cached) {
 }
 
 // `quiet` keeps the deck on screen while a new one is generated behind it, so a
-// cached deck never flashes back to "Finding AI recipes…" on load.
+// cached deck never flashes away on load.
 async function refreshRecipes({ quiet = false } = {}) {
   const token = ++recipeRefreshToken;
   if (!apiConfigured() || !state.pantry.length) {
     liveDishes = null;
-    recipeNotice = state.pantry.length ? 'Built-in recipes · AI is not connected.' : '';
     renderAll({ enter: true });
     return [];
-  }
-  if (!quiet) {
-    recipeNotice = 'Finding AI recipes for your preferences…';
-    renderRecipeNotice();
   }
   const signature = deckSignature();
   // The structured prefs are the contract (allergies and diet are hard rules server-side);
@@ -448,23 +466,21 @@ async function refreshRecipes({ quiet = false } = {}) {
   const prefs = state.prefs;
   const request = prefsToRequest(prefs);
   try {
-    let data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 2, request, prefs });
+    // One batch serves both tabs: Curated takes the dishes they can make outright,
+    // Explore the ones up to three ingredients away.
+    const data = await fetchRecipes(pantryForApi(), { count: 10, maxMissing: 3, request, prefs });
     if (token !== recipeRefreshToken) return liveDishes || [];
-    let list = (data.recipes || []).map(dishFromApi);
-    // Soften the filter once if nothing made the cut
-    if (!list.length) {
-      data = await fetchRecipes(pantryForApi(), { count: 6, maxMissing: 4, request, prefs });
-      if (token !== recipeRefreshToken) return liveDishes || [];
-      list = (data.recipes || []).map(dishFromApi);
-    }
+    const list = (data.recipes || []).map(dishFromApi);
     liveDishes = list.length ? list : null;
-    recipeNotice = list.length ? 'AI-generated recipes' : 'No AI recipes returned · showing built-in recipes.';
     saveDeck(list, signature);           // so the next visit paints without waiting on the model
+    primeDishImages(list);               // pictures start generating before the cards are even dealt
     populateFoodOptions();               // live recipes bring new ingredient names
     const ids = new Set((liveDishes || DISHES).map(d => d.id));
     for (const set of [state.skipped, state.cooked, state.chosen]) {
-      for (const id of [...set]) if (!ids.has(id) && !isPhotoId(id)) set.delete(id);   // photo dishes are never in the deck; keep them
+      // photo, chat and plan dishes are never in the deck: keep them while they still resolve
+      for (const id of [...set]) if (!ids.has(id) && !isPhotoId(id) && !dishById(id)) set.delete(id);
     }
+    state.history = state.history.filter(h => ids.has(h.id));   // nothing to bring back that is no longer dealt
     renderAll({ enter: true });
     return liveDishes || [];
   } catch (err) {
@@ -474,17 +490,35 @@ async function refreshRecipes({ quiet = false } = {}) {
     // last visit beats dropping the user back to the built-ins.
     if (quiet && liveDishes) return liveDishes;
     liveDishes = null;
-    recipeNotice = 'AI is unavailable · showing built-in recipes.';
     renderAll({ enter: true });
     return [];
   }
 }
 
 /* ---------- the pantry model ---------- */
+// Servings a lot holds when it is new: read off the quantity ("24 pcs" of eggs is 24,
+// "2 lb" of rice about 15), and only when the quantity says nothing ("1 jar") the
+// catalog's package default. The check-in slider re-baselines from the same number.
+const baseServings = (key, qty) => servingsFor(key, qty) ?? catalog(key).servings;
 function mk(name, key, qty, daysAgo, raw = '') {
   const c = catalog(key);
   const purchase = Date.now() - daysAgo * DAY;
-  return { id: uid(), name, key, qty, raw, initial: c.servings, purchase, expiry: purchase + c.shelf * DAY, burn: c.burn, deducted: 0 };
+  return { id: uid(), name, key, qty, raw, initial: baseServings(key, qty), purchase, expiry: purchase + c.shelf * DAY, burn: c.burn, deducted: 0 };
+}
+// Lots saved before servings were read from quantities carry the package default.
+// Recompute those once, and only those: a lot they have checked in on (or cooked from)
+// is their number, not ours.
+function recomputeDefaultServings(items) {
+  let n = 0;
+  for (const it of items || []) {
+    if (!it || it.deducted !== 0 || it.initial !== catalog(it.key).servings) continue;
+    const s = servingsFor(it.key, it.qty);
+    if (s == null || s <= 0 || s === it.initial) continue;
+    it.initial = s;
+    n++;
+  }
+  if (n) console.info(`[pantry] servings recomputed from quantities for ${plural(n, 'lot')}`);
+  return n;
 }
 function seedPantry() {
   return [
@@ -512,7 +546,7 @@ function seedPantry() {
 // expiry dates — never merge and overwrite an older banana's use-by.
 function addLot(name, key, qty, raw = '', extras = null) {
   const c = catalog(key);
-  const initial = extras && extras.initial != null ? extras.initial : c.servings;
+  const initial = extras && extras.initial != null ? extras.initial : baseServings(key, qty);
   const burn = extras && extras.burn != null ? extras.burn : c.burn;
   const purchase = extras && extras.purchase != null ? extras.purchase : Date.now();
   const expiry = extras && extras.expiry != null ? extras.expiry : purchase + c.shelf * DAY;
@@ -646,17 +680,45 @@ function prefFit(dish) {
 }
 
 /* ---------- dishes against the pantry ---------- */
+// The pantry index (see shared/ingredients.js) is rebuilt whenever the pantry array is
+// replaced or grows; analyze() runs for every dish on every render, so it is cached.
+const CATALOG_KEYS = Object.keys(CATALOG);
+let pantryIndexCache = { pantry: null, size: -1, index: null };
+function pantryIndex() {
+  const p = state.pantry;
+  if (pantryIndexCache.pantry !== p || pantryIndexCache.size !== p.length) {
+    pantryIndexCache = { pantry: p, size: p.length, index: buildPantryIndex(p, CATALOG_KEYS) };
+  }
+  return pantryIndexCache.index;
+}
+// A key for an ingredient nothing in the pantry or the catalog matches: a plain slug of its
+// name, so nutrition, chips and the made-it sheet still have something stable to hang on.
+const fallbackKey = name => String(name || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim() || 'item';
+
+// Every ingredient is verified against the pantry at read time: matched by name, so a
+// scan or a check-in re-checks every recipe, then judged on amount. status is one of
+// 'have' (enough), 'short' (some, not enough), 'missing' (none) or 'staple' (assumed on hand).
 function analyze(dish) {
+  const index = pantryIndex();
+  const builtin = BUILTIN_IDS.has(dish.id);
   const ings = dish.ingredients.map(i => {
-    const item = findItem(i.key);
-    const avail = available(i.key);
-    // a staple (salt, oil) counts as "have" whether or not the pantry tracks it
-    return { ...i, item, avail, have: avail > 0 || Boolean(i.staple), staple: Boolean(i.staple) };
+    const staple = Boolean(i.staple);
+    const m = matchIngredient(i, index);
+    const key = m ? m.key : (i.key || fallbackKey(i.name));   // built-in dishes carry exact keys
+    // What the dish takes, in pantry servings. Built-ins say so by hand; for anything the
+    // model wrote the amount is the truth ("2 cloves" of garlic is 2, "8 oz" of spaghetti
+    // about 2.5) and the model's servings_used only stands in when the amount is wordless.
+    const fromAmount = builtin ? null : servingsFor(key, i.amt);
+    const need = Math.max(0, Number(fromAmount > 0 ? fromAmount : (i.servings_used ?? i.need)) || 1);
+    const avail = available(key);
+    const status = staple ? 'staple' : avail <= 0 ? 'missing' : avail + 1e-9 < need ? 'short' : 'have';
+    return { ...i, key, need, item: findItem(key), avail, approx: Boolean(m && m.approx), status, staple, have: status === 'have' || status === 'staple' };
   });
   const have = ings.filter(i => i.have);
-  const missing = ings.filter(i => !i.have);
+  const short = ings.filter(i => i.status === 'short');
+  const missing = ings.filter(i => i.status === 'missing');
   let urgent = null;
-  for (const i of have) {
+  for (const i of [...have, ...short]) {
     if (!i.item) continue;   // an assumed staple has no lot to expire
     const dl = daysLeft(i.item);
     if (!urgent || dl < urgent.dl) urgent = { item: i.item, dl };
@@ -665,14 +727,23 @@ function analyze(dish) {
   const badge = urgent && urgent.dl <= 5
     ? { text: `Uses your ${urgent.item.name.toLowerCase()} · ${shortDays(urgent.dl)}`, level: levelForDays(urgent.dl) }
     : null;
-  return { dish, ings, have, missing, urgentDays, badge, stats: dishStats(dish), warn: avoidHits(dish), fit: prefFit(dish), stretch: stretchOf(dish) };
+  return {
+    dish, ings, have, short, missing, gap: short.length + missing.length, urgentDays, badge,
+    stats: dishStats(dish, ings), warn: avoidHits(dish), fit: prefFit(dish), stretch: stretchOf(dish),
+  };
 }
-const eligible = a => a.missing.length <= 2;
+// Which deck a dish belongs on: Curated is strictly what they have, Explore is one to
+// three ingredients away (short or missing). Anything further is not dealt at all.
+const TAB_FILTER = {
+  curated: a => a.gap === 0,
+  explore: a => a.gap >= 1 && a.gap <= 3,
+};
+const eligible = a => a.gap <= 3;
 
 // Deck ordering modes for the sort control.
 const SORTS = {
-  urgent:   { label: 'Expiring first', cmp: (a, b) => (a.urgentDays - b.urgentDays) || (a.missing.length - b.missing.length) },
-  missing:  { label: 'Fewest missing', cmp: (a, b) => (a.missing.length - b.missing.length) || (a.urgentDays - b.urgentDays) },
+  urgent:   { label: 'Expiring first', cmp: (a, b) => (a.urgentDays - b.urgentDays) || (a.gap - b.gap) },
+  missing:  { label: 'Fewest missing', cmp: (a, b) => (a.gap - b.gap) || (a.urgentDays - b.urgentDays) },
   calories: { label: 'Fewest calories', cmp: (a, b) => a.stats.kcal - b.stats.kcal },
   protein:  { label: 'Most protein', cmp: (a, b) => b.stats.protein - a.stats.protein },
   cost:     { label: 'Cheapest', cmp: (a, b) => a.stats.cost - b.stats.cost },
@@ -680,37 +751,57 @@ const SORTS = {
 };
 
 /* ---------- state ---------- */
+// The sections in the top bar. The open one survives a reload within the session.
+const TABS = ['curated', 'explore', 'pantry', 'shopping'];
+const TAB_KEY = 'mise.tab';
+function readTab() {
+  try { const t = sessionStorage.getItem(TAB_KEY); return TABS.includes(t) ? t : 'curated'; } catch (_) { return 'curated'; }
+}
 const state = {
   pantry: [],
   deck: [],
   skipped: new Set(),
   cooked: new Set(),
   chosen: new Set(),        // dishes picked for tonight, in the order they were picked
+  history: [],              // swipes in order, { id, dir: 'skip'|'cook', tab }, so Undo can bring the last one back
+  undoing: null,            // the dish Undo just brought back: buildDeck puts it on top for one render
   saved: [],                // dishes kept from the photo flow, newest first; replaced by loadSavedDishes() at boot
   photoDishes: new Map(),   // photo dishes picked for tonight, by id, so they stay findable if removed from Saved
+  shopping: [],             // the shopping list, see the Shopping list section; replaced by loadShopping() at boot
   expanded: new Set(),      // pantry stack keys that are open
   prefs: normalizePrefs(DEFAULT_PREFS),   // cooking preferences; replaced by loadPrefs() at boot
   prefsHid: false,          // the deck is empty only because of the preferences (nothing to reshuffle)
+  tab: readTab(),           // curated | explore | pantry | shopping
+  tabTotal: 0,              // dishes this deck tab holds before skips and picks (0 = the tab is empty, not exhausted)
   sheet: null,
   sortMode: 'urgent',       // deck ordering, see SORTS
   detailDishId: null,       // recipe open in the detail sheet
   detailServings: 2,        // people the open recipe is scaled to
   detailFromSaved: false,   // retain the return destination while changing servings
-  panelTab: 'expiring',     // pantry panel sort tab: expiring | amount | category
-  panelOpen: false,
+  detailFromPlan: false,    // opened from the week sheet: "Back to this week" instead of the deck
+  panelTab: 'expiring',     // pantry page sort tab: expiring | amount | category
   leaving: false,
   sheetReturn: null,        // where keyboard focus goes back to when the sheet closes
-  panelReturn: null,
 };
+const isDeckTab = () => state.tab === 'curated' || state.tab === 'explore';
+const isPantryTab = () => state.tab === 'pantry';
+const isShoppingTab = () => state.tab === 'shopping';
 
 function buildDeck() {
-  const makeable = activeDishes().map(analyze).filter(eligible);
-  const all = makeable.filter(a => passesPrefs(a.dish));   // allergies/diet are hard rules
-  state.prefsHid = all.length === 0 && makeable.length > 0;
+  const filter = TAB_FILTER[state.tab] || TAB_FILTER.curated;   // the pantry and shopping tabs keep the curated deck ready behind them
+  const inTab = activeDishes().map(analyze).filter(filter);
+  const all = inTab.filter(a => passesPrefs(a.dish));   // allergies/diet are hard rules
+  state.prefsHid = all.length === 0 && inTab.length > 0;
+  state.tabTotal = all.length;
   const cmp = (SORTS[state.sortMode] || SORTS.urgent).cmp;
   state.deck = all
     .filter(a => !state.skipped.has(a.dish.id) && !state.cooked.has(a.dish.id) && !state.chosen.has(a.dish.id))
     .sort((a, b) => cmp(a, b) || (a.stretch - b.stretch) || (b.fit - a.fit));
+  // the dish Undo brought back goes on top, whatever the sort says, until it is painted
+  if (state.undoing) {
+    const i = state.deck.findIndex(a => a.dish.id === state.undoing);
+    if (i > 0) state.deck.unshift(...state.deck.splice(i, 1));
+  }
   return all;
 }
 const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
@@ -720,30 +811,75 @@ const chosenDishes = () => [...state.chosen].map(dishById).filter(Boolean);
    ========================================================================= */
 const el = {
   deck: $('#deck'), caption: $('#deck-caption'), status: $('#deck-status'), deckScreen: $('#deck-screen'), endScreen: $('#end-screen'), emptyScreen: $('#empty-screen'),
-  endTitle: $('#end-title'), endCopy: $('#end-copy'), reshuffle: $('#btn-reshuffle'), endPrefs: $('#btn-end-prefs'),
-  count: $('#btn-pantry'), tonight: $('#btn-tonight'), profile: $('#btn-profile'),
-  veil: $('#veil'), sheet: $('#sheet'), panel: $('#panel'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
+  endTitle: $('#end-title'), endCopy: $('#end-copy'), reshuffle: $('#btn-reshuffle'), endPrefs: $('#btn-end-prefs'), goExplore: $('#btn-go-explore'), endUndo: $('#btn-end-undo'),
+  tabs: $('#tabs'), tabCount: $('#tab-pantry-count'), tabShopCount: $('#tab-shopping-count'), undo: $('#btn-undo'),
+  tonight: $('#btn-tonight'), profile: $('#btn-profile'), week: $('#btn-week'),
+  veil: $('#veil'), sheet: $('#sheet'), panel: $('#pantry-screen'), panelBody: $('#panel-body'), panelCount: $('#panel-count'),
+  shoppingScreen: $('#shopping-screen'), shoppingBody: $('#shopping-body'), shoppingCount: $('#shopping-count'),
   toast: $('#toast'), file: $('#file-input'), dishFile: $('#dish-input'), savedBtn: $('#btn-saved'),
 };
 
 // The choke point after every mutation: everything derived is rebuilt here, then saved.
-function renderRecipeNotice() {
-  const notice = $('#recipe-notice');
-  notice.textContent = recipeNotice;
-  notice.hidden = !recipeNotice;
-}
 function renderAll(opts = {}) {
-  renderRecipeNotice();
   buildDeck();
   const n = state.pantry.length;
-  el.count.textContent = plural(n, 'item');
-  el.count.setAttribute('aria-label', `Pantry, ${plural(n, 'item')}`);
   el.panelCount.textContent = plural(n, 'item');
+  el.tabCount.textContent = String(n);
+  el.tabCount.hidden = n === 0;
+  const toBuy = state.shopping.filter(s => !s.done).length;
+  el.tabShopCount.textContent = String(toBuy);
+  el.tabShopCount.hidden = toBuy === 0;
   const clearBtn = $('#btn-clear'); if (clearBtn) clearBtn.hidden = n === 0;
   renderTonight();
   renderDeck(opts);
-  if (state.panelOpen) renderPanel();
+  el.undo.disabled = state.history.length === 0;
+  if (isPantryTab()) renderPanel();
+  if (isShoppingTab()) renderShopping();
   saveState({ pantry: state.pantry, skipped: [...state.skipped], cooked: [...state.cooked], chosen: [...state.chosen] });
+  if (shoppingDirty) { shoppingDirty = false; saveShopping(state.shopping); }
+}
+
+/* ---------- sections ---------- */
+// Switch sections: the tab buttons, which screens show, then a render of the one that opened.
+// The deck screens (deck / end / first-run) belong to Curated and Explore; renderDeck picks
+// between them and hides all three on the other tabs.
+function setTab(name, { render = true } = {}) {
+  if (!TABS.includes(name)) name = 'curated';
+  const changed = state.tab !== name;
+  state.tab = name;
+  try { sessionStorage.setItem(TAB_KEY, name); } catch (_) { /* private mode: the tab just does not survive a reload */ }
+  for (const b of $$('.tab', el.tabs)) {
+    const on = b.dataset.tab === name;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  el.panel.classList.toggle('hidden', name !== 'pantry');
+  el.shoppingScreen.classList.toggle('hidden', name !== 'shopping');
+  if (changed && name !== 'pantry') {
+    // leaving the pantry: fold the add form and drop a half-finished check-in
+    $('#add-form').hidden = true;
+    $('#btn-add').setAttribute('aria-expanded', 'false');
+    state.pantry.forEach(it => { it.asking = false; });
+  }
+  if (changed && name !== 'shopping') {
+    $('#shop-form').hidden = true;
+    $('#btn-shop-add').setAttribute('aria-expanded', 'false');
+  }
+  if (render) renderAll({ enter: changed && isDeckTab() });
+}
+// The last swipe comes back: out of skipped or tonight's list, onto the top of its deck.
+function undo() {
+  if (state.leaving) return;
+  const entry = state.history.pop();
+  if (!entry) return;
+  if (entry.dir === 'skip') state.skipped.delete(entry.id);
+  else {
+    state.chosen.delete(entry.id);
+    if (state.sheet === 'detail' && state.detailDishId === entry.id) closeSheet();   // the recipe that opened on the cook swipe
+  }
+  if (entry.tab !== state.tab && TABS.includes(entry.tab)) setTab(entry.tab, { render: false });   // it left from the other deck
+  state.undoing = entry.id;
+  renderAll({ enter: 'top' });
 }
 
 // Difficulty as a 1–3 level, and how far a dish sits above the cook's own skill
@@ -756,23 +892,36 @@ function difficultyHTML(d) {
   return `<span class="diff l${lvl}${stretch ? ' stretch' : ''}" title="${stretch ? 'Above your usual skill level' : 'Difficulty'}"><span class="bars"><i></i><i></i><i></i></span><span>${esc(d.difficulty)}</span></span>`;
 }
 
+// Every dish is served for the household (D5): the label says so, and the detail sheet scales the amounts.
+const servesLabel = () => `Serves ${servingsTarget(state.prefs)}`;
+// One ingredient chip by status; a stand-in from the pantry says which row it is using.
+function chipHTML(i) {
+  const using = i.approx && i.item ? ` title="Using your ${esc(i.item.name.toLowerCase())}"` : '';
+  if (i.status === 'staple') return `<span class="chip staple">${esc(i.name)}</span>`;
+  if (i.status === 'short') return `<span class="chip low"${using}><span class="dot"></span><span>Low on ${esc(i.name)}</span></span>`;
+  if (i.status === 'missing') return `<span class="chip missing">${esc(i.name)}</span>`;
+  return `<span class="chip have"${using}>${ICON.checkSm}<span>${esc(i.name)}</span></span>`;
+}
+// "missing 2: fresh noodles, lime · low on: garlic"
+function gapLine(a) {
+  const bits = [];
+  if (a.missing.length) bits.push(`missing ${a.missing.length}: ${a.missing.map(m => m.name.toLowerCase()).join(', ')}`);
+  if (a.short.length) bits.push(`low on: ${a.short.map(m => m.name.toLowerCase()).join(', ')}`);
+  return bits.length ? `<div class="missing-line">${esc(bits.join(' · '))}</div>` : '';
+}
 function cardHTML(a) {
   const d = a.dish;
   return `
     <div class="card-img">
-      <img src="${d.img}" alt="" draggable="false">
+      <img src="${esc(d.img)}" alt="" draggable="false"${dishImgAttrs(d)}>
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
     </div>
     <div class="card-body">
-      <h2>${esc(d.name)}</h2>
-      <div class="meta"><span>${d.time}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i>${difficultyHTML(d)}</div>
+      <h2 class="${d.name.length > 24 ? 'long' : ''}">${esc(d.name)}</h2>
+      <div class="meta"><span>${d.time}</span><i></i><span>${servesLabel()}</span><i></i>${difficultyHTML(d)}</div>
       <div class="stats"><span>${a.stats.kcal} cal</span><i></i><span>${a.stats.protein}g protein</span><i></i><span>${money(a.stats.cost)}/serving</span></div>
-      <div class="chips">${a.ings.map(i => i.have
-        ? `<span class="chip have">${ICON.checkSm}<span>${esc(i.name)}</span></span>`
-        : i.staple
-        ? `<span class="chip staple">${esc(i.name)}</span>`
-        : `<span class="chip missing">${esc(i.name)}</span>`).join('')}${warnChips(a)}</div>
-      ${a.missing.length ? `<div class="missing-line">missing ${a.missing.length}: ${esc(a.missing.map(m => m.name.toLowerCase()).join(', '))}</div>` : ''}
+      <div class="chips">${a.ings.map(chipHTML).join('')}${warnChips(a)}</div>
+      ${gapLine(a)}
     </div>
     <div class="overlay cook"><div class="glass ring">${ICON.checkBig}</div></div>
     <div class="overlay skip"><div class="glass ring">${ICON.xBig}</div></div>`;
@@ -782,25 +931,36 @@ function cardHTML(a) {
 const warnChips = a => (a.warn || []).map(w => `<span class="chip warn"><span class="dot"></span><span>Has ${esc(w)}</span></span>`).join('')
   + (a.stretch > 0 ? `<span class="chip warn"><span class="dot"></span><span>A stretch for you</span></span>` : '');
 
+// Why the deck is empty, and what to offer. `done` is the ordinary case: they went through it.
+const END_COPY = {
+  prefs:   { title: 'Nothing to cook yet', copy: 'Nothing here fits your preferences yet. Scan a receipt or loosen them in your profile.' },
+  curated: { title: 'Nothing to make with only what’s here yet', copy: 'Explore has dishes that are one to three ingredients away.' },
+  explore: { title: 'Nothing to explore right now', copy: 'Everything you can cook is in Curated. Scan a receipt for new ideas.' },
+  done:    { title: 'That’s everything we can make right now', copy: 'Scan another receipt for new dishes, or reshuffle to see the ones you skipped.' },
+};
 function renderDeck(opts = {}) {
   const hasPantry = state.pantry.length > 0;
-  el.emptyScreen.classList.toggle('hidden', hasPantry);
-  el.deckScreen.classList.toggle('hidden', !hasPantry || state.deck.length === 0);
-  el.endScreen.classList.toggle('hidden', !hasPantry || state.deck.length > 0);
-  // End of deck: either they went through everything, or the preferences left nothing to show
-  el.endTitle.textContent = state.prefsHid ? 'Nothing to cook yet' : 'That’s everything we can make right now';
-  el.endCopy.textContent = state.prefsHid
-    ? 'Nothing here fits your preferences yet. Scan a receipt or loosen them in your profile.'
-    : 'Scan another receipt for new dishes, or reshuffle to see the ones you skipped.';
-  el.reshuffle.hidden = state.prefsHid;
-  el.endPrefs.hidden = !state.prefsHid;
+  const deckTab = isDeckTab();
+  el.emptyScreen.classList.toggle('hidden', !deckTab || hasPantry);
+  el.deckScreen.classList.toggle('hidden', !deckTab || !hasPantry || state.deck.length === 0);
+  el.endScreen.classList.toggle('hidden', !deckTab || !hasPantry || state.deck.length > 0);
+  // End of deck: the preferences hid everything, this tab holds nothing, or they went through it
+  const end = state.prefsHid ? 'prefs' : state.tabTotal === 0 && END_COPY[state.tab] ? state.tab : 'done';
+  el.endTitle.textContent = END_COPY[end].title;
+  el.endCopy.textContent = END_COPY[end].copy;
+  el.reshuffle.hidden = end === 'prefs';
+  el.endPrefs.hidden = end !== 'prefs';
+  el.goExplore.hidden = end !== 'curated';
+  el.endUndo.hidden = end === 'prefs' || state.history.length === 0;   // the last swipe emptied the deck: bring it back
   el.deck.innerHTML = '';
   const show = state.deck.slice(0, 3);
-  // back to front so the top card is last in the DOM
+  // back to front so the top card is last in the DOM. enter: true animates the stack,
+  // 'top' only the top card (the one Undo just brought back).
   for (let pos = show.length - 1; pos >= 0; pos--) {
     const card = document.createElement('article');
-    card.className = `card pos${pos}${opts.enter ? ' enter' : ''}`;
-    if (opts.enter) {
+    const enter = opts.enter === 'top' ? pos === 0 : Boolean(opts.enter);
+    card.className = `card pos${pos}${enter ? ' enter' : ''}`;
+    if (enter) {
       card.style.animationDelay = `${pos * 70}ms`;
       // once the entrance has played the card is a plain .card again
       card.addEventListener('animationend', e => { if (e.target === card) card.classList.remove('enter'); });
@@ -810,14 +970,16 @@ function renderDeck(opts = {}) {
     card.innerHTML = cardHTML(show[pos]);
     el.deck.appendChild(card);
   }
+  state.undoing = null;   // painted on top once; the sort owns it from here
+  applyDishImages(el.deck);   // generated pictures replace the stand-ins as they arrive
   const top = $('#deck .pos0');
   if (top) top.addEventListener('pointerdown', onPointerDown);
   const n = state.deck.length;
-  const left = n === 1 ? '1 dish left' : plural(n, 'dish', 'dishes');
+  const left = plural(n, 'dish', 'dishes');
   el.caption.textContent = `${(SORTS[state.sortMode] || SORTS.urgent).label} · ${left}`;
   // one short line for screen readers, and only when it actually changed
-  const msg = !hasPantry ? 'Pantry is empty' : n ? `Now showing ${state.deck[0].dish.name}, ${left}` : state.prefsHid ? 'Nothing fits your preferences yet' : 'No dishes left';
-  if (msg !== el.status.textContent) el.status.textContent = msg;
+  const msg = !deckTab ? '' : !hasPantry ? 'Pantry is empty' : n ? `Now showing ${state.deck[0].dish.name}, ${left}` : END_COPY[end].title;
+  if (msg && msg !== el.status.textContent) el.status.textContent = msg;
 }
 
 // The "Tonight" pill: what has been picked from the deck so far
@@ -826,7 +988,7 @@ function renderTonight() {
   el.tonight.hidden = dishes.length === 0;
   if (!dishes.length) return;
   const label = dishes.length === 1 ? dishes[0].name : plural(dishes.length, 'dish', 'dishes');
-  $('span', el.tonight).textContent = `Tonight · ${label}`;
+  $('.t-dish', el.tonight).textContent = ` · ${label}`;   // the word "Tonight" is static markup; phones show only that
   el.tonight.setAttribute('aria-label', `Tonight: ${dishes.map(d => d.name).join(', ')}`);
 }
 
@@ -855,7 +1017,7 @@ function endDrag() {
   card.removeEventListener('lostpointercapture', onPointerUp);
 }
 function onPointerDown(e) {
-  if (state.sheet || state.panelOpen || state.leaving || e.button !== 0) return;
+  if (state.sheet || state.leaving || e.button !== 0) return;
   // one pointer at a time; a drag whose card was re-rendered away is stale and may be replaced
   if (drag.active && drag.el && drag.el.isConnected) return;
   const card = e.currentTarget;
@@ -907,7 +1069,7 @@ function springBack(card, x, vMs) {
 
 function commit(dir, fromDx = 0) {
   const a = state.deck[0];
-  if (!a || state.leaving || state.sheet || state.panelOpen) return;
+  if (!a || state.leaving || state.sheet || !isDeckTab()) return;
   // stop a spring or a live drag from painting over the fly-out
   cancelAnimationFrame(drag.raf);
   endDrag();
@@ -925,20 +1087,25 @@ function commit(dir, fromDx = 0) {
   }
   if (dir === 'skip') state.skipped.add(a.dish.id);
   else state.chosen.add(a.dish.id);   // cook: it joins tonight's list and leaves the deck
+  state.history.push({ id: a.dish.id, dir, tab: state.tab });
+  // cooking something they are short on means a shop first: what it needs goes on the list
+  if (dir === 'cook' && a.gap) {
+    const r = addDishToShopping(a.dish);
+    if (r.count) toast(`${plural(r.count, 'item')} added to your shopping list`, `for ${a.dish.name}`);
+  }
   setTimeout(() => {
     state.leaving = false;
     renderAll();
     // the recipe opens, unless the user went somewhere else in the meantime
-    if (dir === 'cook' && !state.sheet && !state.panelOpen) openDetail(a);
+    if (dir === 'cook' && !state.sheet && isDeckTab()) openDetail(a);
   }, reduceMotion ? 0 : 400);
 }
 
 /* ---------- sheets (modals) ---------- */
-// While a sheet or the panel is open the rest of the page is inert: no Tab into it, no clicks.
+// While a sheet is open the rest of the page is inert: no Tab into it, no clicks.
 function syncInert() {
-  const modal = !!(state.sheet || state.panelOpen);
-  for (const n of $$('.topbar, .stage, .foot')) n.inert = modal;
-  el.panel.inert = !state.panelOpen;
+  const modal = !!state.sheet;
+  for (const n of $$('.topbar, .stage, .foot')) n.inert = modal;   // the section tabs are inside the top bar
 }
 // The file inputs live in their dropzone while an upload sheet is open; park them before the sheet's markup is replaced.
 function parkFileInput() {
@@ -950,6 +1117,7 @@ function openSheet(kind, html, cls = '') {
   parkFileInput();
   el.sheet.className = `sheet glass ${cls}`;
   el.sheet.innerHTML = html;
+  applyDishImages(el.sheet);
   const h = $('h2', el.sheet);
   if (h) { h.id = h.id || 'sheet-title'; el.sheet.setAttribute('aria-labelledby', h.id); }
   else el.sheet.removeAttribute('aria-labelledby');
@@ -968,13 +1136,12 @@ function closeSheet() {
   state.sheet = null;
   syncInert();
   el.sheet.classList.remove('in');
-  if (!state.panelOpen) el.veil.classList.remove('in');
+  el.veil.classList.remove('in');
   // hand focus back to whatever opened the sheet, unless the user already clicked somewhere else
   const back = state.sheetReturn; state.sheetReturn = null;
   if (back && back.isConnected && (el.sheet.contains(document.activeElement) || document.activeElement === document.body)) back.focus({ preventScroll: true });
   setTimeout(() => {
-    if (!state.sheet) { parkFileInput(); el.sheet.hidden = true; el.sheet.innerHTML = ''; }
-    if (!state.sheet && !state.panelOpen) el.veil.hidden = true;
+    if (!state.sheet) { parkFileInput(); el.sheet.hidden = true; el.sheet.innerHTML = ''; el.veil.hidden = true; }
   }, reduceMotion ? 0 : 220);
 }
 const closeBtn = (extra = '') => `<button class="circle sm glass muted close ${extra}" type="button" data-close aria-label="Close">${ICON.x}</button>`;
@@ -1176,7 +1343,7 @@ function renderReview(animate = false) {
           <span class="qty">$${l.price.toFixed(2)}</span>
         </div>
         <div class="fixes">
-          <button class="pill glass sm" type="button" data-fix="${l.id}">${ICON.checkSm}<span>${esc(l.name)}, ${esc(l.qty)}</span></button>
+          <button class="pill glass sm" type="button" data-fix="${l.id}">${ICON.checkSm}<span>${esc(l.name)}, ${esc(formatQuantity(l.qty))}</span></button>
           <button class="linkish" type="button" data-editrow="${l.id}">Edit</button>
           <button class="linkish" type="button" data-drop="${l.id}">Drop</button>
         </div></div>`;
@@ -1184,7 +1351,7 @@ function renderReview(animate = false) {
     return `<div class="rrow" data-id="${l.id}" ${delay()}>
       <button class="main" type="button" data-editrow="${l.id}">
         <div class="name"><strong>${esc(l.name)}</strong><small>${esc(estimateLabel(l.key, l))}</small></div>
-        <span class="qty">${esc(l.qty || '')}</span>
+        <span class="qty">${esc(formatQuantity(l.qty || ''))}</span>
       </button>
       <button class="circle sm glass del" type="button" data-drop="${l.id}" aria-label="Remove ${esc(l.name)}">${ICON.trash}</button>
     </div>`;
@@ -1218,11 +1385,24 @@ function estimateLabel(key, line) {
   if (dl <= 7) { const d = new Date(Date.now() + dl * DAY); return `expires ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`; }
   return timeLabel(dl);
 }
+// A row's editor was saved: the name and quantity as typed, the quantity in the one spelling the
+// pantry uses, and the servings read again from it, so a corrected "2 lb" is not added with the
+// servings of the scanned "1 lb". A new name is keyed afresh; an unchanged one keeps the scanner's key.
+function saveReviewEdit(id, name, qty) {
+  const l = review.find(x => x.id === id);
+  if (!l) return null;
+  const newName = String(name || '').trim() || l.name;
+  if (newName !== l.name) { l.name = newName; l.key = keyForName(newName); }
+  l.qty = formatQuantity(String(qty || '').trim());
+  l.initial = lineServings(l);
+  l.editing = false; l.fixed = true;
+  return l;
+}
 // How many dishes would become makeable if these lines were added (dry run).
 function countNewDishes(lines, before) {
   const saved = state.pantry;
   state.pantry = saved.concat(lines.filter(l => !findItem(l.key)).map(l => mk(l.name, l.key, l.qty, 0)));
-  const after = activeDishes().filter(passesPrefs).map(analyze).filter(eligible).map(a => a.dish.id);
+  const after = activeDishes().filter(passesPrefs).map(analyze).filter(eligible).map(a => a.dish.id);   // anything either deck would deal
   state.pantry = saved;
   return after.filter(id => !before.has(id)).length;
 }
@@ -1253,18 +1433,44 @@ function addToPantry() {
 function detailBody(a, people) {
   const d = a.dish;
   const fromSaved = state.detailFromSaved;
+  const fromPlan = state.detailFromPlan;
   const kept = isSaved(d.id);
   const base = Math.max(1, d.servings || 1);
   const factor = people / base;
-  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmt(i.amt, factor))}</span></div>`;
+  const short = a.short || [];
+  const needed = [...a.missing, ...short];
+  // amount, then which pantry row a stand-in uses ("· your chicken thighs") or how low they are
+  const note = i => {
+    if (i.status === 'short') return ` <small>· low, ~${fmt1(i.avail)} of ${fmt1(i.need * factor)}</small>`;
+    if (i.approx && i.item) return ` <small>· your ${esc(i.item.name.toLowerCase())}</small>`;
+    return '';
+  };
+  const ing = (i, cls) => `<div class="ing ${cls}"><span class="mark">${cls === 'have' ? ICON.checkSm : ''}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(scaleAmount(i.amt, factor))}${note(i)}</span></div>`;
+  // everything under "You'll need" is already on the list: say so instead of offering it again
+  const listed = needed.length > 0 && needed.every(i => onShoppingList(i.key));
+  const shopBtn = needed.length
+    ? (listed
+      ? `<span class="shop-add listed">${ICON.checkSm}<span>On your shopping list</span></span>`
+      : `<button class="pill glass sm shop-add" type="button" data-shop-add="${esc(d.id)}">${ICON.plus}<span>Add ${needed.length} to shopping list</span></button>`)
+    : '';
+  // Cook tonight: for dishes that are not dealt on the deck (a chat or plan recipe, a saved
+  // photo) or were opened from the week, where a swipe is not how you pick them
+  const cookBtn = !state.chosen.has(d.id) && (!onDeck(d.id) || fromPlan)
+    ? `<button class="pill glass lg" type="button" data-cook-tonight="${esc(d.id)}">${ICON.checkMd}<span>Cook tonight</span></button>`
+    : '';
+  const back = fromSaved
+    ? `<button class="linkish" type="button" data-open-saved>Back to saved</button>`
+    : fromPlan
+      ? `<button class="linkish" type="button" data-open-plan>Back to this week</button>`
+      : `<button class="linkish" type="button" data-close>Back to deck</button>`;
   return `
     <div class="hero">
-      <img src="${esc(d.img)}" alt="">
+      <img src="${esc(d.img)}" alt=""${dishImgAttrs(d)}>
       ${a.badge ? `<div class="badge glass ${a.badge.level}"><span class="dot"></span><span>${esc(a.badge.text)}</span></div>` : ''}
       ${closeBtn()}
       <div class="hero-text">
         <h2>${esc(d.name)}</h2>
-        <div class="meta"><span>${d.time}</span><i></i>${difficultyHTML(d)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        <div class="meta"><span>${d.time}</span><i></i>${difficultyHTML(d)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}${short.length ? `<i></i><span>low on ${short.length}</span>` : ''}</div>
         ${(a.warn.length || a.stretch) ? `<div class="chips">${warnChips(a)}</div>` : ''}
       </div>
     </div>
@@ -1277,6 +1483,7 @@ function detailBody(a, people) {
           <button class="circle sm glass" type="button" data-serv="1" aria-label="More people"${people >= 20 ? ' disabled' : ''}>+</button>
         </div>
       </div>
+      ${base !== people ? `<p class="serv-note">Recipe written for ${base} · amounts scaled</p>` : ''}
       <div class="nutri">
         <div class="nstat"><strong>${a.stats.kcal}</strong><small>cal / serving</small></div>
         <div class="nstat"><strong>${a.stats.protein}g</strong><small>protein</small></div>
@@ -1288,7 +1495,7 @@ function detailBody(a, people) {
       <div class="ings">
         <div class="eyebrow">Ingredients</div>
         ${a.have.map(i => ing(i, 'have')).join('')}
-        ${a.missing.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => ing(i, 'need')).join('') : ''}
+        ${needed.length ? `<div class="divider"><span>You’ll need</span></div>` + a.missing.map(i => ing(i, 'need')).join('') + short.map(i => ing(i, 'low')).join('') + shopBtn : ''}
       </div>
       <div class="ings">
         <div class="eyebrow">Steps</div>
@@ -1300,18 +1507,19 @@ function detailBody(a, people) {
       </div>
     </div>
     <div class="sheet-foot">
-      ${fromSaved
-        ? `<button class="linkish" type="button" data-open-saved>Back to saved</button>`
-        : `<button class="linkish" type="button" data-close>Back to deck</button>`}
+      ${back}
       ${kept ? `<button class="linkish dim" type="button" data-remove-saved="${d.id}">Remove</button>` : ''}
       <span class="grow"></span>
+      ${cookBtn}
       <button class="pill prominent lg" type="button" data-madeit="${d.id}">${ICON.checkMd}<span>I made this</span></button>
     </div>`;
 }
+const DETAIL_FROM = new Set(['tonight', 'saved', 'plan']);   // sheets a recipe may open on top of
 function openDetail(a) {
   if (!a || state.leaving) return;
-  if (state.sheet && state.sheet !== 'tonight' && state.sheet !== 'saved') return;
+  if (state.sheet && !DETAIL_FROM.has(state.sheet)) return;
   state.detailFromSaved = state.sheet === 'saved';
+  state.detailFromPlan = state.sheet === 'plan';
   a = analyze(a.dish || a);
   state.detailDishId = a.dish.id;
   state.detailServings = servingsTarget(state.prefs);
@@ -1320,7 +1528,39 @@ function openDetail(a) {
 // Re-render the open recipe sheet in place (used by the servings stepper).
 function rerenderDetail() {
   const d = dishById(state.detailDishId);
-  if (d) el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
+  if (!d) return;
+  el.sheet.innerHTML = detailBody(analyze(d), state.detailServings);
+  applyDishImages(el.sheet);
+}
+// A chat or plan recipe arrives without steps (kept fast); the first time one is opened
+// we fetch its steps and fill them into the open sheet.
+async function openGeneratedDish(d) {
+  if ((d.steps && d.steps.length) || !apiConfigured()) { openDetail(d); return; }
+  d.stepsLoading = true;
+  openDetail(d);                       // shows ingredients now, "Writing the steps…" below
+  try {
+    const names = (d.names && d.names.length) ? d.names : d.ingredients.map(i => i.name);
+    const { steps } = await recipeDetail({ title: d.name, servings: d.servings, ingredients: names });
+    d.steps = Array.isArray(steps) ? steps : [];
+  } catch {
+    d.steps = [];
+  } finally {
+    d.stepsLoading = false;
+    if (state.detailDishId === d.id) rerenderDetail();
+  }
+}
+// Tonight, without a swipe: chat and plan recipes, saved photos, or a deck dish opened from
+// the week. A deck dish leaves the deck the way a cook swipe does, so Undo can bring it back.
+// A plan dish needs no parking here: adoptPlan() carries the chosen ones across a regenerate.
+function cookTonight(id) {
+  const d = dishById(id);
+  if (!d || state.chosen.has(id)) return;
+  if (isPhotoId(id)) state.photoDishes.set(id, d);   // stays openable even if removed from Saved
+  state.chosen.add(id);
+  if (onDeck(id)) state.history.push({ id, dir: 'cook', tab: isDeckTab() ? state.tab : 'curated' });
+  closeSheet();
+  renderAll();
+  toast(`Tonight · ${d.name}`);
 }
 
 // Tonight: one dish opens straight into its recipe; more than one gets a short list first.
@@ -1334,7 +1574,8 @@ function openTonight() {
     <div class="rlist scroll" style="padding-top:14px">
       ${dishes.map(d => `<div class="rrow" style="animation:none">
         <button class="main" type="button" data-open-dish="${d.id}">
-          <div class="name"><strong>${esc(d.name)}</strong><small>${d.time} · ${plural(d.servings, 'serving')} · ${d.difficulty}</small></div>
+          ${d.img ? `<img class="thumb" src="${esc(d.img)}" alt="" draggable="false"${dishImgAttrs(d)}>` : ''}
+          <div class="name"><strong>${esc(d.name)}</strong><small>${d.time} · ${servesLabel()} · ${d.difficulty}</small></div>
           <span class="chev">${ICON.chevron}</span>
         </button></div>`).join('')}
     </div>
@@ -1345,18 +1586,22 @@ function openMadeIt(dishId) {
   if (!dish) return;
   const a = analyze(dish);
   const factor = state.detailServings / Math.max(1, a.dish.servings || 1);
-  const rows = a.have.filter(i => i.item).map(original => {
+  // what they have, plus what they are low on: the pantry gives up whatever it holds of those
+  const rows = [...a.have, ...(a.short || [])].filter(i => i.item).map(original => {
     const i = { ...original, need: original.need * factor };
     const cur = i.avail;
-    const after = cur - i.need;
-    const last = after <= OUT;
+    const take = Math.min(cur, i.need);
+    const after = cur - take;
+    const low = i.need > cur + 1e-9;
+    const last = low || after <= OUT;
     const lots = lotsFor(i.key).filter(it => !needsCheckin(it) && current(it) > 0);
     let note;
-    if (i.item.burn > 0 && i.item.initial >= 20) note = 'Staple, barely moves';
+    if (low) note = `You’re low on this · uses all ${fmt1(cur)} you have`;
+    else if (i.item.burn > 0 && i.item.initial >= 20) note = 'Staple, barely moves';
     else if (last) note = 'This uses the last of it';
-    else if (lots.length > 1) note = `Uses oldest pack first · ${Math.round(after)} left after`;
-    else note = `${Math.round(after)} left after this`;
-    return { ...i, cur, last, note };
+    else if (lots.length > 1) note = `Uses oldest pack first · ${fmt1(after)} left after`;
+    else note = `${fmt1(after)} left after this`;
+    return { ...i, cur, take, last, note };
   });
   openSheet('madeit', `
     <div class="sheet-head"><h2>Update your pantry</h2>${closeBtn()}</div>
@@ -1365,7 +1610,7 @@ function openMadeIt(dishId) {
       <div class="deduct" id="deduct">
         ${rows.map(r => `<label><input class="chk" type="checkbox" checked data-key="${esc(r.key)}" data-last="${r.last ? 1 : 0}">
           <span class="name"><strong>${esc(r.name)}</strong><small class="${r.last ? 'warn' : ''}">${esc(r.note)}</small></span>
-          <span class="amt">${r.need} of ${Math.round(r.cur)}</span></label>`).join('')
+          <span class="amt">${fmt1(r.take)} of ${fmt1(r.cur)}</span></label>`).join('')
           || '<p class="empty-note">Nothing in this dish is tracked in your pantry yet.</p>'}
       </div>
     </div>
@@ -1386,21 +1631,28 @@ function finishMadeIt(dishId) {
   const dish = dishById(dishId);
   if (!dish) return closeSheet();
   const checked = $$('#deduct input').filter(b => b.checked).map(b => b.dataset.key);
+  // keys are resolved against the pantry here, the same way the sheet listed them
+  const a = analyze(dish);
+  const factor = state.detailServings / Math.max(1, dish.servings || 1);
   const ranOut = [];
+  const low = [];
   const used = [];
-  for (const i of dish.ingredients) {
-    if (!checked.includes(i.key)) continue;
-    const factor = state.detailServings / Math.max(1, dish.servings || 1);
-    const batch = deductServings(i.key, i.need * factor);
+  for (const i of [...a.have, ...(a.short || [])]) {
+    if (!i.item || !checked.includes(i.key)) continue;
+    const want = i.need * factor;
+    if (want > i.avail + 1e-9) low.push(i.name.toLowerCase());
+    const batch = deductServings(i.key, want);   // takes what is there and no more
     if (!batch.length) continue;
     used.push(...batch);
     if (available(i.key) <= OUT) ranOut.push(i.name.toLowerCase());
   }
   state.chosen.delete(dishId);
   state.cooked.add(dishId);
+  state.history = state.history.filter(h => h.id !== dishId);   // cooked is cooked: Undo cannot deal it again
   closeSheet();
   renderAll({ enter: true });
-  toast('Pantry updated', `${plural(checked.length, 'item')} used`, ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '');
+  const notes = [ranOut.length ? `You’re out of ${ranOut.join(', ')}.` : '', low.length ? `You were low on ${low.join(', ')}.` : ''].filter(Boolean).join(' ');
+  toast('Pantry updated', `${plural(checked.length, 'item')} used`, notes);
   logCook({ recipeId: dish.id, title: dish.name, items: used });
   refreshRecipes();
 }
@@ -1417,15 +1669,15 @@ const isImageFile = f => /^image\//i.test(f.type || '') || /\.(heic|heif)$/i.tes
 let identifyToken = 0;    // a cancelled identify must not open a result over a newer one
 let resultDish = null;    // the dish in the result sheet, until it is saved or dropped
 
-// Servings a recipe takes from the pantry: 1, or 2 for something that reads as the bulk of the dish.
+// Servings a recipe takes from the pantry when its amount cannot be sized for the food
+// (analyze() reads the amount first): 1, or 2 for something that reads as the bulk of the dish.
 function needFor(i) {
   if (i.staple) return 1;
-  const a = String(i.amount || '').toLowerCase();
-  const n = parseFloat(a.replace(/^[^\d.]*/, '')) || 0;
-  if (/\b(lb|lbs|pound|pounds)\b/.test(a) && n >= 1) return 2;
-  if (/\boz\b/.test(a) && n >= 8) return 2;
-  if (/\bcups?\b/.test(a) && n >= 2) return 2;
-  if (/^\s*\d+\s*$/.test(a) && n >= 4) return 2;   // "4" eggs
+  const c = toCanonical(String(i.amount || ''));
+  if (c.amount == null) return 1;
+  if (c.unit === 'g' && c.amount >= 400) return 2;    // a pound of anything
+  if (c.unit === 'ml' && c.amount >= 480) return 2;   // two cups
+  if (c.unit === 'pcs' && c.amount >= 4) return 2;    // "4" eggs
   return 1;
 }
 /** The /identify response as a deck-shaped dish (see the contract in shared/store.js). */
@@ -1435,7 +1687,7 @@ function dishFromIdentified(res, imgDataUrl) {
   const level = String(r.difficulty || 'easy').toLowerCase();
   const ingredients = (Array.isArray(r.ingredients) ? r.ingredients : [])
     .filter(i => i && i.name)
-    .map(i => ({ name: String(i.name).trim(), key: keyForName(i.name), need: needFor(i), amt: String(i.amount || '').trim(), staple: Boolean(i.staple) }));
+    .map(i => ({ name: String(i.name).trim(), need: needFor(i), amt: String(i.amount || '').trim(), staple: Boolean(i.staple) }));   // matched to the pantry by analyze()
   const cuisine = String(r.cuisine || '').toLowerCase().trim();
   return {
     id: `photo-${uid()}`,
@@ -1577,8 +1829,9 @@ async function startIdentify(file) {
   if (fallback) toast('Backend not ready yet — showing a sample');
 }
 
-const ingHaveHTML = i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`;
-const ingNeedHTML = i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(i.amt)}</span></div>`;
+const ingHaveHTML = i => `<div class="ing have"><span class="mark">${ICON.checkSm}</span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span></div>`;
+const ingNeedHTML = i => `<div class="ing need"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))}</span></div>`;
+const ingLowHTML = i => `<div class="ing low"><span class="mark"></span><span class="n">${esc(i.name)}</span><span class="a">${esc(standardizeAmount(i.amt))} <small>· low</small></span></div>`;
 
 // The result: the recipe detail's layout with the photo as the hero, split into what they have and what they'll need.
 function openDishResult(dish) {
@@ -1589,7 +1842,9 @@ function openDishResult(dish) {
   const haveCol = (matched.length || staples.length)
     ? matched.map(ingHaveHTML).join('') + (staples.length ? `<div class="divider"><span>Staples</span></div>${staples.map(ingHaveHTML).join('')}` : '')
     : '<p class="ing-note">Nothing from your pantry yet.</p>';
-  const needCol = a.missing.length ? a.missing.map(ingNeedHTML).join('') : '<p class="ing-note">Nothing — you have it all.</p>';
+  const needCol = (a.missing.length || a.short.length)
+    ? a.missing.map(ingNeedHTML).join('') + a.short.map(ingLowHTML).join('')
+    : '<p class="ing-note">Nothing — you have it all.</p>';
   openSheet('dish-result', `
     <div class="hero">
       <img src="${esc(dish.img)}" alt="">
@@ -1597,7 +1852,7 @@ function openDishResult(dish) {
       ${closeBtn()}
       <div class="hero-text">
         <h2>${esc(dish.name)}</h2>
-        <div class="meta"><span>${esc(dish.time)}</span><i></i><span>${plural(dish.servings, 'serving')}</span><i></i>${difficultyHTML(dish)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
+        <div class="meta"><span>${esc(dish.time)}</span><i></i><span>${servesLabel()}</span><i></i>${difficultyHTML(dish)}${a.missing.length ? `<i></i><span>${plural(a.missing.length, 'thing missing', 'things missing')}</span>` : ''}</div>
         ${dish.description ? `<p class="dish-desc">${esc(dish.description)}</p>` : ''}
       </div>
     </div>
@@ -1649,14 +1904,15 @@ function savedRowHTML(d, i) {
   const a = analyze(d);
   const counted = a.ings.filter(x => !x.staple);   // staples are assumed, so they don't count either way
   const haveN = counted.filter(x => x.have).length;
-  const thumb = d.img ? `<img class="thumb" src="${esc(d.img)}" alt="" draggable="false">` : `<span class="thumb" aria-hidden="true">${ICON.camera}</span>`;
+  const lowN = a.short.length;
+  const thumb = d.img ? `<img class="thumb" src="${esc(d.img)}" alt="" draggable="false"${dishImgAttrs(d)}>` : `<span class="thumb" aria-hidden="true">${ICON.camera}</span>`;
   return `<div class="rrow" style="animation-delay:${i * 50}ms">
     <button class="main" type="button" data-open-saved-dish="${esc(d.id)}">
       ${thumb}
       <div class="name">
         <strong>${esc(d.name)}</strong>
-        <small class="meta"><span>${esc(d.time)}</span><i></i><span>${plural(d.servings, 'serving')}</span><i></i>${difficultyHTML(d)}</small>
-        <small>you have ${haveN} of ${counted.length}</small>
+        <small class="meta"><span>${esc(d.time)}</span><i></i><span>${servesLabel()}</span><i></i>${difficultyHTML(d)}</small>
+        <small>you have ${haveN} of ${counted.length}${lowN ? ` · low on ${lowN}` : ''}</small>
       </div>
       <span class="chev">${ICON.chevron}</span>
     </button>
@@ -1674,34 +1930,9 @@ function openSaved() {
     </div>`, 'w-520');
 }
 
-/* ---------- pantry panel ---------- */
-function openPanel() {
-  if (!state.panelOpen) state.panelReturn = document.activeElement;
-  state.panelOpen = true;
-  renderPanel();
-  el.panel.setAttribute('aria-hidden', 'false');
-  el.count.setAttribute('aria-expanded', 'true');
-  el.veil.hidden = false;
-  syncInert();
-  void el.panel.offsetWidth;   // same reflow trick as openSheet
-  el.panel.classList.add('in'); el.veil.classList.add('in');
-  setTimeout(() => el.panel.focus({ preventScroll: true }), 50);
-}
-function closePanel() {
-  if (!state.panelOpen) return;
-  state.panelOpen = false;
-  syncInert();
-  el.panel.classList.remove('in');
-  el.panel.setAttribute('aria-hidden', 'true');
-  el.count.setAttribute('aria-expanded', 'false');
-  if (!state.sheet) { el.veil.classList.remove('in'); setTimeout(() => { if (!state.sheet && !state.panelOpen) el.veil.hidden = true; }, reduceMotion ? 0 : 400); }
-  $('#add-form').hidden = true;
-  $('#btn-add').setAttribute('aria-expanded', 'false');
-  state.pantry.forEach(it => { it.asking = false; });   // a half-finished check-in starts over next time
-  renderAll();
-  const back = state.panelReturn; state.panelReturn = null;
-  if (back && back.isConnected && (el.panel.contains(document.activeElement) || document.activeElement === document.body)) back.focus({ preventScroll: true });
-}
+/* ---------- pantry page ---------- */
+// The pantry is a section now, not a panel: opening it is setTab('pantry'), closing it is
+// setTab('curated'), and setTab folds the add form and any half-finished check-in on the way out.
 const shortDate = ms => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 function boughtLabel(it) {
   return `bought ${shortDate(it.purchase)}`;
@@ -1710,9 +1941,11 @@ function lotLabel(it) {
   const bits = [];
   if (it.variant) bits.push(it.variant);
   bits.push(boughtLabel(it));
-  if (it.qty) bits.push(it.qty);
+  if (it.qty) bits.push(formatQuantity(it.qty));
   return bits.join(' · ');
 }
+// The stored quantity string is left as it was typed or scanned; only the display is standardised.
+const qtyText = it => (it.qty ? formatQuantity(it.qty) : '');
 function stackDisplayName(lots) {
   const names = [...new Set(lots.map(l => l.name))];
   if (names.length === 1) return names[0];
@@ -1723,7 +1956,7 @@ function prowHTML(it, { lot = false } = {}) {
   const cur = current(it);
   const pctLeft = it.initial > 0 ? clamp(cur / it.initial, 0, 1) : 0;
   const lvl = amountLevel(pctLeft);
-  const sub = lot ? esc(lotLabel(it)) : `${esc(it.qty)}${it.qty ? ' · ' : ''}~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
+  const sub = lot ? esc(lotLabel(it)) : `${esc(qtyText(it))}${it.qty ? ' · ' : ''}~${plural(Math.max(1, Math.round(cur)), 'serving')}`;
   return `<div class="prow${lot ? ' lot' : ''}" data-id="${it.id}">
     <div class="name"><strong>${esc(lot && it.variant ? it.variant : it.name)}</strong><small>${sub}</small></div>
     <div class="fresh amt-${lvl}">
@@ -1780,7 +2013,7 @@ function checkinHTML(it) {
   }
   return `<div class="checkin" data-id="${it.id}">
     <div class="eyebrow">Still have this?</div>
-    <div class="item"><strong>${esc(it.name)}</strong><small>${esc(it.qty)}${it.qty ? ' · ' : ''}${when}</small></div>
+    <div class="item"><strong>${esc(it.name)}</strong><small>${esc(qtyText(it))}${it.qty ? ' · ' : ''}${when}</small></div>
     <div class="opts">
       <button class="pill glass sm" type="button" data-gone="${it.id}">All gone</button>
       <button class="pill prominent sm" type="button" data-ask="${it.id}">Still have some</button>
@@ -1811,7 +2044,331 @@ function renderPanel() {
   const tab_ = (id, label) => `<button class="ptab${tab === id ? ' on' : ''}" type="button" role="tab" aria-selected="${tab === id}" data-ptab="${id}">${label}</button>`;
   const tabs = stacks.length ? `<div class="ptabs" role="tablist">${tab_('expiring', 'Expiring')}${tab_('amount', 'Amount left')}${tab_('category', 'Category')}</div>` : '';
   el.panelBody.innerHTML = checkins + tabs + body;
-  restoreFocusIn(el.panelBody, '.checkin, .prow', mem, el.panel);
+  restoreFocusIn(el.panelBody, '.checkin, .prow', mem, $('#btn-add'));   // the page itself is not focusable; its add button is
+}
+
+/* ---------- shopping list ----------
+   Rows arrive from four places: a recipe's "You'll need" (a cook swipe, or the button on
+   the detail sheet), the kitchen helper, the add form, and the week's plan. The same
+   food still to buy merges into its row rather than stacking. Persisted through
+   store.js (localStorage, and app_state.shopping on the account) by renderAll once a
+   change has been made. */
+let shoppingDirty = false;
+const openShopping = () => state.shopping.filter(s => !s.done);
+const onShoppingList = key => openShopping().some(s => s.key === key);
+
+// The open row a new item would merge into: matched by name the way ingredients are
+// matched to the pantry (so "Roma tomatoes" joins "tomatoes"), else by key.
+function findOpenRow(item) {
+  const open = openShopping();
+  const m = matchIngredient({ name: item.name }, buildPantryIndex(open, []));
+  return (m && open.find(s => s.key === m.key)) || open.find(s => s.key === item.key) || null;
+}
+// A quantity for a row that is already there: the larger of two like amounts wins;
+// amounts that do not compare are kept side by side in the note ("+ 2 cloves").
+function mergeQty(row, qty) {
+  if (!qty) return;
+  const a = toCanonical(row.qty), b = toCanonical(qty);
+  if (b.amount == null) return;
+  if (a.amount == null) { row.qty = qty; return; }
+  if (a.unit === b.unit) { if (b.amount > a.amount) row.qty = qty; return; }
+  const extra = `+ ${formatQuantity(qty)}`;
+  if (!row.note.includes(extra)) row.note = [row.note, extra].filter(Boolean).join(' · ');
+}
+/**
+ * Put items on the list. items: [{ name, key?, qty?, note?, dishId?, dishName? }].
+ * Returns { count, names, merged }: rows added or merged, their names, how many merged.
+ */
+function addShopping(items, { source = 'manual' } = {}) {
+  const names = [];
+  let merged = 0;
+  for (const raw of items || []) {
+    const name = String(raw.name || '').trim();
+    if (!name) continue;
+    const item = { name, key: String(raw.key || keyForName(name)).toLowerCase(), qty: String(raw.qty || '').trim(), note: String(raw.note || '').trim() };
+    const row = findOpenRow(item);
+    if (row) {
+      mergeQty(row, item.qty);
+      if (item.note && !row.note.includes(item.note)) row.note = [row.note, item.note].filter(Boolean).join(' · ');
+      merged++;
+    } else {
+      state.shopping.push({
+        id: uid(), name, key: item.key, qty: item.qty, note: item.note, done: false, source,
+        dishId: String(raw.dishId || ''), dishName: String(raw.dishName || ''), addedAt: Date.now(),
+      });
+    }
+    names.push(name);
+  }
+  if (names.length) shoppingDirty = true;
+  return { count: names.length, names, merged };
+}
+// What a dish still needs, scaled to the people it is cooked for: its missing and low ingredients.
+function neededForDish(d, people = servingsTarget(state.prefs)) {
+  const a = analyze(d);
+  const factor = people / Math.max(1, d.servings || 1);
+  return [...a.missing, ...a.short].map(i => ({ name: i.name, key: i.key, qty: scaleAmount(i.amt, factor), dishId: d.id, dishName: d.name }));
+}
+const addDishToShopping = (d, people) => addShopping(neededForDish(d, people), { source: 'recipe' });
+function toggleShopping(id) {
+  const s = state.shopping.find(x => x.id === id);
+  if (s) { s.done = !s.done; shoppingDirty = true; }
+}
+function removeShopping(id) {
+  const n = state.shopping.length;
+  state.shopping = state.shopping.filter(x => x.id !== id);
+  if (state.shopping.length !== n) shoppingDirty = true;
+}
+// Rows by name as the assistant read them (its names are ours verbatim; a normalised
+// spelling is the fallback for the offline parser). Returns how many went.
+function removeShoppingByNames(names) {
+  let n = 0;
+  for (const name of names || []) {
+    const q = normQ(name);
+      // the row still to buy goes first, so "take milk off" is not the milk already bought (chat.py agrees)
+    const s = state.shopping.find(x => !x.done && x.name === name)
+      || state.shopping.find(x => x.name === name)
+      || state.shopping.find(x => !x.done && normQ(x.name) === q)
+      || state.shopping.find(x => normQ(x.name) === q);
+    if (s) { state.shopping = state.shopping.filter(x => x.id !== s.id); n++; }
+  }
+  if (n) shoppingDirty = true;
+  return n;
+}
+function clearBought() {
+  const n = state.shopping.length;
+  state.shopping = state.shopping.filter(s => !s.done);
+  if (state.shopping.length !== n) shoppingDirty = true;
+  return n - state.shopping.length;
+}
+// Checked rows become pantry lots, servings read from their quantity, and leave the list.
+function moveBoughtToPantry() {
+  const bought = state.shopping.filter(s => s.done);
+  for (const s of bought) addLot(s.name, s.key, s.qty ? formatQuantity(s.qty) : '', '');
+  state.shopping = state.shopping.filter(s => !s.done);
+  if (bought.length) shoppingDirty = true;
+  return bought.length;
+}
+// The list as the assistant reads it: canonical amounts, so it can answer "what's on my list?".
+function shoppingForApi() {
+  return state.shopping.map(s => {
+    const c = toCanonical(s.qty);
+    return { name: s.name, quantity: c.amount, unit: c.unit || '', done: s.done };
+  });
+}
+function shopSourceLine(s) {
+  if (s.source === 'recipe' || s.source === 'plan') {
+    const dish = s.dishName || (s.dishId ? (dishById(s.dishId) || {}).name : '');
+    return dish ? `for ${dish}` : s.source === 'plan' ? 'for this week' : 'for a recipe';
+  }
+  return s.source === 'chat' ? 'from the kitchen helper' : '';
+}
+function shopRowHTML(s) {
+  const sub = [s.qty ? formatQuantity(s.qty) : '', shopSourceLine(s), s.note].filter(Boolean).join(' · ');
+  return `<div class="prow shop${s.done ? ' done' : ''}" data-id="${s.id}">
+    <button class="shop-chk" type="button" role="checkbox" aria-checked="${s.done}" data-shop-toggle="${s.id}" aria-label="Mark ${esc(s.name)} as ${s.done ? 'still to buy' : 'bought'}">${ICON.checkSm}</button>
+    <div class="name"><strong>${esc(s.name)}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</div>
+    <button class="circle sm glass del" type="button" data-shop-remove="${s.id}" aria-label="Remove ${esc(s.name)}">${ICON.xSm}</button>
+  </div>`;
+}
+function renderShopping() {
+  const mem = focusIndexIn(el.shoppingBody, '.prow');
+  const open = openShopping(), done = state.shopping.filter(s => s.done);
+  el.shoppingCount.textContent = open.length ? `${plural(open.length, 'item')} to buy` : 'Nothing to buy';
+  const group = (label, rows) => `<section class="psection"><div class="phead"><span class="eyebrow">${label}</span><small>${rows.length}</small></div>${rows.map(shopRowHTML).join('')}</section>`;
+  el.shoppingBody.innerHTML = state.shopping.length
+    ? (open.length ? group('To buy', open) : '') + (done.length ? group('Bought', done) : '')
+    : '<p class="empty-note">Nothing to buy. Explore dishes add what they’re missing here.</p>';
+  const move = $('#btn-shop-move'), clear = $('#btn-shop-clear');
+  if (move) move.hidden = done.length === 0;
+  if (clear) clear.hidden = done.length === 0;
+  restoreFocusIn(el.shoppingBody, '.prow', mem, $('#btn-shop-add'));
+}
+
+/* ---------- this week: the meal plan ----------
+   Seven days of breakfast, lunch and dinner from POST /meal-plan, cached through store.js
+   under a fingerprint of the kitchen (food names, servings to the nearest whole one, the
+   preferences), so a day passing keeps the week and a scan or a changed diet regenerates
+   it. Without the backend, with nothing in the pantry, or on its 400, the week is dealt
+   round-robin from the dishes on hand so the sheet never dead-ends. Each generated meal is
+   a plan- dish in planDishes, opened like any other dish; the cached plan keeps that id so
+   a meal picked for Tonight still resolves after a reload. */
+const PLAN_DAYS = 7;
+const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner'];
+const SLOT_LABEL = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner' };
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+let plan = null;          // { start, days, signature, at, source: 'api'|'local' }
+let planLoading = false;
+let planError = '';
+let planToken = 0;
+const todayIso = () => isoDay(Date.now());
+const dayFrom = (iso, n) => isoDay(Date.parse(`${iso}T12:00:00`) + n * DAY);
+const shortDateOf = iso => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+function planSignature() {
+  const pantry = pantryForApi().map(i => `${i.name}:${Math.round(i.quantity_servings)}`).sort().join('|');
+  return `${pantry}#${JSON.stringify(state.prefs)}`;
+}
+// The dish behind a cell: a plan- dish the model wrote, or the dish on hand a local plan points at.
+const planDish = meal => (meal ? dishById(meal.ref || meal.id) : null);
+// Still this week, same kitchen, every cell still resolves. A week dealt locally while the
+// backend is up was a stopgap: it is asked for again the next time the sheet opens.
+function planFresh(p) {
+  if (!p || !Array.isArray(p.days) || !p.days.length) return false;
+  if (p.signature !== planSignature()) return false;
+  const today = todayIso();
+  if (!(p.start <= today && today <= p.days[p.days.length - 1].date)) return false;   // ISO dates order as text
+  if (p.source === 'local' && apiConfigured() && pantryForApi().length) return false;
+  return p.days.every(day => MEAL_SLOTS.every(slot => !day.meals[slot] || planDish(day.meals[slot])));
+}
+// The model's week (or a cached one) becomes dishes the app can open: each meal a plan- dish,
+// its id written back into the plan so a reload rebuilds the same ids. A meal picked for Tonight
+// outlives the week it came from: whatever is still in state.chosen is carried over from the
+// plan being replaced (and from a cached plan's own `parked` list) and saved with the new one.
+function adoptPlan(data, { source = 'api', signature = planSignature(), at = Date.now() } = {}) {
+  const parked = new Map();
+  for (const d of data.parked || []) if (d && d.id && state.chosen.has(d.id)) parked.set(d.id, d);
+  for (const [id, d] of planDishes) if (state.chosen.has(id)) parked.set(id, d);
+  planDishes.clear();
+  for (const [id, d] of parked) planDishes.set(id, d);
+  const inWeek = new Set();
+  const days = (data.days || []).map((day, di) => {
+    const meals = {};
+    MEAL_SLOTS.forEach((slot, si) => {
+      const meal = day.meals && day.meals[slot];
+      if (!meal) { meals[slot] = null; return; }
+      if (meal.ref) { meals[slot] = meal; return; }   // a local plan: points at a dish already on hand
+      const id = /^plan-/.test(String(meal.id || '')) ? String(meal.id) : `plan-${uid()}`;
+      planDishes.set(id, { ...dishFromApi(meal, di * MEAL_SLOTS.length + si), id });
+      inWeek.add(id);
+      meals[slot] = { ...meal, id };
+    });
+    return { date: day.date, meals };
+  });
+  plan = {
+    start: data.start || (days[0] && days[0].date) || todayIso(), days, signature, at, source,
+    parked: [...parked.values()].filter(d => !inWeek.has(d.id)),   // still on Tonight, no longer in the week
+  };
+  return plan;
+}
+// Without the model: the dishes on hand, dealt round-robin, the ones they can make first.
+// Breakfasts take the quickest.
+function buildLocalPlan(start = todayIso()) {
+  const all = activeDishes();
+  const fits = all.filter(passesPrefs);
+  const pool = (fits.length ? fits : all).map(analyze).sort((a, b) => (a.gap - b.gap) || (a.urgentDays - b.urgentDays));
+  const quick = pool.slice().sort((a, b) => dishMinutes(a.dish) - dishMinutes(b.dish));
+  const meal = d => ({ ref: d.id, title: d.name, cook_minutes: dishMinutes(d), servings: d.servings });
+  let qi = 0, mi = 0;
+  const days = [];
+  for (let i = 0; i < PLAN_DAYS; i++) {
+    const meals = {};
+    for (const slot of MEAL_SLOTS) {
+      const src = slot === 'breakfast' ? quick : pool;
+      meals[slot] = src.length ? meal(src[(slot === 'breakfast' ? qi++ : mi++) % src.length].dish) : null;
+    }
+    days.push({ date: dayFrom(start, i), meals });
+  }
+  return { start, days };
+}
+// The plan for this week: the cached one while it still fits, else a fresh one from the
+// model, or dealt locally when there is no backend, no food, or the backend says so (400).
+// `force` is the Regenerate button.
+async function ensurePlan({ force = false } = {}) {
+  if (!force && planFresh(plan)) return plan;
+  const token = ++planToken;
+  const start = todayIso();
+  const signature = planSignature();
+  const items = pantryForApi();
+  planError = '';
+  if (apiConfigured() && items.length) {
+    planLoading = true;
+    renderPlanSheet();
+    try {
+      const data = await fetchMealPlan(items, { prefs: normalizePrefs(state.prefs), days: PLAN_DAYS, start });
+      if (token !== planToken) return plan;
+      adoptPlan(data, { source: 'api', signature });
+      savePlan(plan);
+      return plan;
+    } catch (err) {
+      if (token !== planToken) return plan;
+      console.warn('[pantry] meal plan failed', err);
+      // A backend that is away, has no key (503), predates the route (404) or has nothing to
+      // cook from (400) is the offline case: deal the week locally. Only the model failing
+      // on a real request (502, a timeout) is worth a retry button.
+      const msg = String((err && err.message) || err || '');
+      const notReady = backendNotReady(err) || /pantry is empty|not found|api key|not set/i.test(msg);
+      if (!notReady) {
+        planError = msg || 'Could not reach the backend';
+        return plan;
+      }
+    } finally {
+      if (token === planToken) planLoading = false;
+    }
+  }
+  adoptPlan(buildLocalPlan(start), { source: 'local', signature });
+  savePlan(plan);
+  return plan;
+}
+const rangeLabel = p => `${shortDateOf(p.start)} – ${shortDateOf(p.days[p.days.length - 1].date)}`;
+function planCellHTML(meal, slot, cls) {
+  const d = planDish(meal);
+  if (!d) return `<div class="plan-cell empty${cls}"><span class="text"><span class="slot">${SLOT_LABEL[slot]}</span><small>Nothing planned</small></span></div>`;
+  const a = analyze(d);
+  const gap = a.missing.length ? `missing ${a.missing.length}` : a.short.length ? `low on ${a.short.length}` : 'all in pantry';
+  return `<button class="plan-cell${cls}" type="button" data-plan-open="${esc(d.id)}" aria-label="${SLOT_LABEL[slot]}: ${esc(d.name)}">
+    <img class="thumb sm" src="${esc(d.img)}" alt="" draggable="false"${dishImgAttrs(d)}>
+    <span class="text"><span class="slot">${SLOT_LABEL[slot]}</span><strong>${esc(d.name)}</strong><small>${esc(d.time)} · ${esc(gap)}</small></span>
+  </button>`;
+}
+function planGridHTML(p) {
+  const today = todayIso();
+  const rows = p.days.map(day => {
+    const cls = day.date < today ? ' past' : day.date === today ? ' today' : '';
+    const d = new Date(`${day.date}T12:00:00`);
+    return `<div class="plan-day${cls}"><strong>${DOW[d.getDay()]}</strong><small>${esc(shortDateOf(day.date))}</small></div>`
+      + MEAL_SLOTS.map(slot => planCellHTML(day.meals[slot], slot, cls)).join('');
+  }).join('');
+  return `<div class="plan-grid"><div class="plan-hdr"></div>${MEAL_SLOTS.map(s => `<div class="plan-hdr">${SLOT_LABEL[s]}</div>`).join('')}${rows}</div>`;
+}
+function planSheetHTML() {
+  const p = plan;
+  const sub = [p ? rangeLabel(p) : 'Seven days', servesLabel(), p && p.source === 'local' ? 'Built from your saved dishes' : ''].filter(Boolean);
+  let body;
+  if (planLoading) body = '<p class="plan-note"><span class="dots"><i></i><i></i><i></i></span> Planning your week from what’s in the pantry…</p>';
+  else if (planError && !p) {
+    body = `<div class="plan-err"><p>Couldn’t plan the week. ${esc(planError)}</p><div class="row-btns">
+      <button class="pill prominent" type="button" data-plan-retry>Try again</button>
+      <button class="linkish" type="button" data-plan-local>Use my saved dishes instead</button></div></div>`;
+  } else if (p) {
+    body = (planError ? `<p class="plan-err-line">Couldn’t refresh the week (${esc(planError)}) — showing the last one. <button class="linkish accent" type="button" data-plan-retry>Try again</button></p>` : '') + planGridHTML(p);
+  } else body = '<p class="plan-note">Nothing planned yet.</p>';
+  return `
+    <div class="sheet-head"><h2 id="plan-title">This week</h2>${closeBtn()}</div>
+    <div class="sheet-sub plan-sub">${sub.map(s => `<span>${esc(s)}</span>`).join('<i></i>')}</div>
+    <div class="sheet-body plan-body">${body}</div>
+    <div class="sheet-foot plan-foot">
+      <button class="linkish" type="button" data-plan-regen${planLoading ? ' disabled' : ''}>Regenerate</button>
+      <span class="grow"></span>
+      <button class="pill prominent" type="button" data-plan-shop${!p || planLoading ? ' disabled' : ''}>${ICON.plus}<span>Add the week’s missing ingredients to the shopping list</span></button>
+    </div>`;
+}
+function renderPlanSheet() {
+  if (state.sheet !== 'plan') return;
+  el.sheet.innerHTML = planSheetHTML();
+  applyDishImages(el.sheet);
+}
+function openPlan() {
+  if (state.sheet && state.sheet !== 'detail') return;   // the detail's "Back to this week" reopens it sheet-to-sheet
+  openSheet('plan', planSheetHTML(), 'w-720');
+  ensurePlan().then(renderPlanSheet);
+}
+function regeneratePlan() { ensurePlan({ force: true }).then(renderPlanSheet); }
+// Every cell's missing and low ingredients, deduplicated onto the list.
+function addPlanToShopping() {
+  if (!plan) return { count: 0, names: [], merged: 0 };
+  const items = [];
+  for (const day of plan.days) for (const slot of MEAL_SLOTS) { const d = planDish(day.meals[slot]); if (d) items.push(...neededForDish(d)); }
+  return addShopping(items, { source: 'plan' });
 }
 
 /* ---------- toast ---------- */
@@ -2072,6 +2629,9 @@ async function doSignOut(btn) {
   clearLocalPrefs();   // the next account on this browser starts from its own answers
   clearLocalSaved();   // and does not inherit this account's saved dishes (they stay in public.recipes)
   clearLocalDeck();    // nor its deck, which is cached on the account anyway
+  clearLocalShopping();   // nor the shopping list and the week, which live on app_state too
+  clearLocalPlan();
+  await clearDishImages();   // generated pictures are per dish, not per pantry: only a sign-out drops them
   await signOut();
   location.replace('../login/');
 }
@@ -2081,23 +2641,27 @@ async function doSignOut(btn) {
    ========================================================================= */
 $('#btn-scan').addEventListener('click', openScanChooser);
 el.savedBtn.addEventListener('click', openSaved);
+el.week.addEventListener('click', openPlan);
 $('#btn-scan-2').addEventListener('click', openScanUpload);
 $('#empty-drop').addEventListener('click', () => el.file.click());   // "click to browse" means the file picker
 $('#empty-sample').addEventListener('click', () => startProcessing(null));
-$('#btn-pantry').addEventListener('click', () => (state.panelOpen ? closePanel() : openPanel()));
-$('#btn-close-panel').addEventListener('click', closePanel);
+el.tabs.addEventListener('click', e => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
+el.goExplore.addEventListener('click', () => setTab('explore'));
 $('#btn-tonight').addEventListener('click', openTonight);
 $('#btn-skip').addEventListener('click', () => commit('skip'));
 $('#btn-cook').addEventListener('click', () => commit('cook'));
-$('#btn-details').addEventListener('click', () => openDetail(state.deck[0]));
-$('#btn-reshuffle').addEventListener('click', () => { state.skipped.clear(); state.chosen.clear(); renderAll({ enter: true }); });
+el.undo.addEventListener('click', undo);
+el.endUndo.addEventListener('click', undo);
+$('#btn-reshuffle').addEventListener('click', () => { state.skipped.clear(); state.chosen.clear(); state.history = []; renderAll({ enter: true }); });
 $('#btn-end-prefs').addEventListener('click', openProfile);   // shown instead of Reshuffle when the preferences hid every dish
 function clearPantry() {
   if (!state.pantry.length) return;
   state.pantry = [];
   state.skipped.clear(); state.cooked.clear(); state.chosen.clear();
+  state.history = [];
   clearLocal();
-  closeSheet(); closePanel();
+  closeSheet();
+  setTab('curated', { render: false });   // the first-run card lives on the deck
   renderAll({ enter: true });
   toast('Pantry cleared');
   refreshRecipes();
@@ -2162,7 +2726,7 @@ const isFileDrag = e => e.dataTransfer && Array.from(e.dataTransfer.types).inclu
 document.addEventListener('dragover', e => { if (isFileDrag(e)) { e.preventDefault(); if (!e.target.closest('.drop')) e.dataTransfer.dropEffect = 'none'; } });
 document.addEventListener('drop', e => { if (isFileDrag(e)) e.preventDefault(); });
 
-el.veil.addEventListener('click', () => { closeSheet(); closePanel(); });
+el.veil.addEventListener('click', closeSheet);
 
 // Everything inside the sheet is delegated
 el.sheet.addEventListener('click', e => {
@@ -2181,6 +2745,26 @@ el.sheet.addEventListener('click', e => {
   if (t.dataset.openDish) return openDetail(dishById(t.dataset.openDish));
   if (t.dataset.madeit) return openMadeIt(t.dataset.madeit);
   if (t.dataset.done) return finishMadeIt(t.dataset.done);
+  // shopping list and tonight, from the recipe sheet
+  if (t.dataset.shopAdd) {
+    const d = dishById(t.dataset.shopAdd);
+    if (!d) return;
+    const r = addDishToShopping(d, state.detailServings);
+    toast(r.count ? `${plural(r.count, 'item')} added to your shopping list` : 'Nothing to add', r.count ? `for ${d.name}` : '');
+    renderAll();
+    return rerenderDetail();
+  }
+  if (t.dataset.cookTonight) return cookTonight(t.dataset.cookTonight);
+  // this week
+  if (t.hasAttribute('data-open-plan')) return openPlan();
+  if (t.dataset.planOpen) { const d = dishById(t.dataset.planOpen); if (d) openGeneratedDish(d); return; }
+  if (t.hasAttribute('data-plan-regen') || t.hasAttribute('data-plan-retry')) return regeneratePlan();
+  if (t.hasAttribute('data-plan-local')) { planError = ''; adoptPlan(buildLocalPlan(), { source: 'local' }); savePlan(plan); return renderPlanSheet(); }
+  if (t.hasAttribute('data-plan-shop')) {
+    const r = addPlanToShopping();
+    renderAll();
+    return toast(r.count ? `${plural(r.count, 'item')} on your shopping list` : 'Nothing missing this week', r.count ? 'for this week' : 'You have it all');
+  }
   // photo of a dish, and the saved list
   if (t.hasAttribute('data-dish-upload')) return openDishUpload();
   if (t.hasAttribute('data-choose-receipt')) return openScanUpload();
@@ -2214,13 +2798,7 @@ el.sheet.addEventListener('submit', e => {
   const form = e.target.closest('form[data-edit]');
   if (!form) return;
   e.preventDefault();
-  const l = review.find(x => x.id === form.dataset.edit);
-  if (l) {
-    l.name = form.name.value.trim() || l.name;
-    l.qty = form.qty.value.trim();
-    l.key = CATALOG[l.name.toLowerCase()] ? l.name.toLowerCase() : l.key;
-    l.editing = false; l.fixed = true;
-  }
+  saveReviewEdit(form.dataset.edit, form.name.value, form.qty.value);
   renderReview();
 });
 el.sheet.addEventListener('change', e => { if (e.target.matches('#deduct input')) updateDeductSummary(); });
@@ -2249,8 +2827,9 @@ el.panel.addEventListener('click', e => {
       if (pct <= 0) {
         state.pantry = state.pantry.filter(x => x.id !== it.id);   // slid to empty = gone
       } else {
-        // The check-in is a correction: reset the estimate from what they told us.
-        it.initial = Math.max(0.1, catalog(it.key).servings * (pct / 100));
+        // The check-in is a correction: reset the estimate from what they told us, as a
+        // share of what the pack held (its quantity, or the package default).
+        it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (pct / 100));
         it.purchase = Date.now(); it.deducted = 0; it.asking = false;
         it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
       }
@@ -2259,6 +2838,39 @@ el.panel.addEventListener('click', e => {
     return refreshRecipes();
   }
 });
+// Shopping list page: check off, remove, and the footer's two actions
+$('#btn-shop-add').addEventListener('click', () => {
+  const f = $('#shop-form');
+  f.hidden = !f.hidden;
+  $('#btn-shop-add').setAttribute('aria-expanded', String(!f.hidden));
+  if (!f.hidden) $('#shop-name').focus();
+});
+$('#shop-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const name = $('#shop-name').value.trim();
+  if (!name) return;
+  const amount = Number($('#shop-qty').value);
+  const qty = amount > 0 ? formatQuantity({ amount, unit: $('#dd-shop-unit').dataset.value }) : '';
+  const r = addShopping([{ name: sentenceCase(name), qty }], { source: 'manual' });
+  $('#shop-name').value = ''; $('#shop-qty').value = '';   // keep the unit
+  renderAll();
+  toast(r.merged ? `${sentenceCase(name)} updated on your list` : `${sentenceCase(name)} added to your list`);
+  $('#shop-name').focus();
+});
+el.shoppingScreen.addEventListener('click', e => {
+  const t = e.target.closest('button');
+  if (!t) return;
+  if (t.dataset.shopToggle) { toggleShopping(t.dataset.shopToggle); return renderAll(); }
+  if (t.dataset.shopRemove) { removeShopping(t.dataset.shopRemove); return renderAll(); }
+  if (t.id === 'btn-shop-move') {
+    const n = moveBoughtToPantry();
+    renderAll();
+    populateFoodOptions();
+    toast(`${plural(n, 'item')} moved to your pantry`, apiConfigured() ? 'Finding recipes…' : 'Deck updated');
+    return refreshRecipes();
+  }
+  if (t.id === 'btn-shop-clear') { const n = clearBought(); renderAll(); return toast(`${plural(n, 'item')} cleared`); }
+});
 // Live label while dragging the "how much is left" slider (no re-render, keeps the thumb)
 el.panel.addEventListener('input', e => {
   if (!e.target.classList.contains('amt-slider')) return;
@@ -2266,11 +2878,10 @@ el.panel.addEventListener('input', e => {
   if (out) out.textContent = Number(e.target.value) <= 0 ? 'empty' : `${e.target.value}% left`;
 });
 /* ---------- autocomplete: foods we know about, for the add form ---------- */
-const sentenceCase = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
 function foodSuggestions() {
   const names = new Map();               // key -> display name (first one wins)
   const add = (key, name) => { const k = String(key || '').toLowerCase(); if (k && !names.has(k)) names.set(k, name || sentenceCase(k)); };
-  for (const d of activeDishes()) for (const i of (d.ingredients || [])) add(i.key, i.name);
+  for (const d of activeDishes()) for (const i of (d.ingredients || [])) add(i.key || i.name, i.name);   // generated dishes carry no key
   for (const l of SAMPLE_RECEIPT.lines) if (!l.nonFood) add(l.key || l.name, l.name);
   for (const k of Object.keys(CATALOG)) add(k, sentenceCase(k));
   return [...names.values()].sort((a, b) => a.localeCompare(b));
@@ -2307,6 +2918,9 @@ function initDropdown(el, onChange) {
 }
 document.addEventListener('click', e => { document.querySelectorAll('.dd.open').forEach(d => { if (!d.contains(e.target)) d.__close(); }); });
 initDropdown($('#dd-unit'));
+// the shopping form's unit list is the same one, built from the units module so the two never drift
+$('#dd-shop-unit .dd-menu').innerHTML = UNIT_OPTIONS.map(u => `<li class="dd-opt" role="option" data-value="${u}">${u}</li>`).join('');
+initDropdown($('#dd-shop-unit'));
 initDropdown($('#dd-sort'), v => {
   state.sortMode = SORTS[v] ? v : 'urgent';
   buildDeck();
@@ -2317,8 +2931,6 @@ initDropdown($('#dd-sort'), v => {
 const chatEl = { fab: $('#btn-chat'), panel: $('#chat'), log: $('#chat-log'), form: $('#chat-form'), input: $('#chat-input'), close: $('#btn-chat-close') };
 let chatGreeted = false;
 const chatHistory = [];   // [{ role, content }] plain text, sent to /chat for multi-turn context
-const normQ = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-const listWords = arr => arr.length <= 1 ? (arr[0] || '') : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`;
 
 function addChat(who, html) {
   const div = document.createElement('div');
@@ -2326,6 +2938,7 @@ function addChat(who, html) {
   div.innerHTML = html;
   chatEl.log.appendChild(div);
   chatEl.log.scrollTop = chatEl.log.scrollHeight;
+  applyDishImages(div);   // recipe cards in the reply get their generated thumbs
   return div;
 }
 function chatOpen() {
@@ -2336,8 +2949,8 @@ function chatOpen() {
   if (!chatGreeted) {
     chatGreeted = true;
     const hint = apiConfigured()
-      ? 'Hey! I can help with your pantry. Try “what can I make in 15 minutes?”, “I finished the milk”, “I have about half my eggs left”, or “I don’t like seafood”.'
-      : 'Hey! Tell me a dish you want to make and I’ll tell you what to buy. Try “shakshuka” or “fried rice”.';
+      ? 'Hey! I can help with your pantry and your list. Try “what can I make in 15 minutes?”, “add eggs to my pantry”, “put lemons on my shopping list”, “I finished the milk”, or “I don’t like seafood”.'
+      : 'Hey! Tell me a dish you want to make and I’ll tell you what to buy. Try “shakshuka”, “add eggs to my pantry” or “put lemons on my shopping list”.';
     addChat('bot', hint);
   }
   chatEl.input.focus();
@@ -2359,7 +2972,7 @@ function findDishForQuery(text) {
     let score = 0;
     if (name === q) score = 100;
     else if (name.includes(q) || q.includes(name)) score = 60;
-    const hay = normQ(`${d.name} ${d.ingredients.map(i => `${i.name} ${i.key}`).join(' ')}`);
+    const hay = normQ(`${d.name} ${d.ingredients.map(i => `${i.name} ${i.key || ''}`).join(' ')}`);
     for (const w of words) if (hay.includes(w)) score += 12;
     if (score > bestScore) { bestScore = score; best = d; }
   }
@@ -2370,12 +2983,14 @@ function shoppingAnswer(d) {
   const have = a.have.map(i => i.name.toLowerCase());
   const open = `<button class="chat-open" type="button" data-chat-open="${d.dish ? d.dish.id : d.id}">See recipe</button>`;
   if (!a.missing.length) {
-    return `You’ve got everything for <strong>${esc(d.name)}</strong> 🎉 Uses ${esc(listWords(have))}. Serves ${d.servings}, about ${money(a.stats.cost)}/serving. ${open}`;
+    return `You’ve got everything for <strong>${esc(d.name)}</strong> 🎉 Uses ${esc(listWords(have))}. ${servesLabel()}, about ${money(a.stats.cost)}/serving. ${open}`;
   }
-  const buy = a.missing.map(i => `${i.name.toLowerCase()}${i.amt ? ` (${i.amt})` : ''}`);
+  const buy = a.missing.map(i => `${i.name.toLowerCase()}${i.amt ? ` (${standardizeAmount(i.amt)})` : ''}`);
   const buyCost = a.missing.reduce((s, i) => s + nutriFor(i.key).cost * Math.max(1, i.need || 1), 0);
   const haveBit = have.length ? ` You already have ${esc(listWords(have))}.` : '';
-  return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit} ${open}`;
+  const lowBit = a.short.length ? ` You’re low on ${esc(listWords(a.short.map(i => i.name.toLowerCase())))}.` : '';
+  if (!buy.length) return `You’ve got everything for <strong>${esc(d.name)}</strong>, just about.${lowBit} ${open}`;
+  return `For <strong>${esc(d.name)}</strong>, buy: <b>${esc(buy.join(', '))}</b> — roughly ${money(buyCost)}.${haveBit}${lowBit} ${open}`;
 }
 // Claude replies in plain text. Escape it, then honour a little markdown (**bold**)
 // and line breaks so a multi-line answer reads cleanly in the bubble.
@@ -2402,8 +3017,9 @@ function renderChatRecipes(recipes) {
     const missing = r.missing_count ? `${plural(r.missing_count, 'thing')} to buy` : 'all in your pantry';
     cards.push(
       `<button class="chat-recipe" type="button" data-chat-open="${dish.id}">`
-      + `<strong>${esc(dish.name)}</strong>`
-      + `<small>${esc(dish.time)} · ${esc(dish.difficulty)} · ${esc(missing)}</small>`
+      + `<img class="chat-thumb" src="${esc(dish.img)}" alt="" draggable="false"${dishImgAttrs(dish)}>`
+      + `<span class="chat-text"><strong>${esc(dish.name)}</strong>`
+      + `<small>${esc(dish.time)} · ${esc(dish.difficulty)} · ${esc(missing)}</small></span>`
       + `</button>`,
     );
   });
@@ -2413,7 +3029,8 @@ function renderChatRecipes(recipes) {
 // Apply the validated write-actions the backend returned. All the quantity / expiry math
 // stays here in the deterministic client model — Claude only asked for the change.
 function applyChatActions(actions) {
-  let changed = false;
+  let changed = false;       // the pantry or the preferences moved: re-render and regenerate
+  let listChanged = false;   // only the shopping list moved: re-render is enough
   for (const a of actions || []) {
     if (a.type === 'update_preference') {
       state.prefs = normalizePrefs({ ...state.prefs, [a.field]: a.value });
@@ -2433,16 +3050,89 @@ function applyChatActions(actions) {
         if (Number(a.percent) <= 0) {
           state.pantry = state.pantry.filter(x => x.id !== it.id);
         } else {
-          it.initial = Math.max(0.1, catalog(it.key).servings * (Number(a.percent) / 100));
+          it.initial = Math.max(0.1, baseServings(it.key, it.qty) * (Number(a.percent) / 100));
           it.purchase = Date.now(); it.deducted = 0; it.asking = false;
           it.expiry = Math.max(it.expiry, Date.now() + 2 * DAY);
         }
         changed = true;
       }
+    } else if (a.type === 'add_pantry_items') {
+      // quantities arrive canonical (g/kg/ml/l/pcs/pack or ''); the lot's servings are read off them
+      const names = [];
+      for (const it of a.items || []) {
+        const name = String(it.name || '').trim();
+        if (!name) continue;
+        const days = Number(it.expires_in_days);
+        addLot(sentenceCase(name), keyForName(name), chatQty(it), '', days > 0 ? { expiry: Date.now() + days * DAY } : null);
+        names.push(name.toLowerCase());
+      }
+      if (names.length) {
+        changed = true;
+        populateFoodOptions();
+        toast(`${plural(names.length, 'item')} added to your pantry`, listWords(names));
+      }
+    } else if (a.type === 'add_shopping_items') {
+      const r = addShopping((a.items || []).map(it => ({ name: sentenceCase(String(it.name || '').trim()), qty: chatQty(it), note: it.note || '' })), { source: 'chat' });
+      if (r.count) { listChanged = true; toast(`${plural(r.count, 'item')} on your shopping list`, listWords(r.names.map(n => n.toLowerCase()))); }
+    } else if (a.type === 'remove_shopping_items') {
+      const n = removeShoppingByNames(a.names || []);
+      if (n) { listChanged = true; toast(`${plural(n, 'item')} taken off your shopping list`); }
     }
   }
   if (changed) { renderAll(); refreshRecipes(); }
-  return changed;
+  else if (listChanged) renderAll();
+  return changed || listChanged;
+}
+// "2 lb" from the assistant is already { quantity: 907.2, unit: 'g' }; '' when it gave no amount.
+const chatQty = it => (it.quantity == null ? '' : formatQuantity({ amount: it.quantity, unit: it.unit || '' }) || '');
+
+/* Offline (or when the assistant is away): the three plain commands are handled here, so
+   "add eggs to my pantry" still works without a backend. */
+const CMD_SHOP_ADD = /^(?:add|put)\s+(.+?)\s+(?:to|on|in)\s+(?:my\s+|the\s+)?(?:shopping\s+)?list$/i;
+const CMD_PANTRY_ADD = /^(?:add|put)\s+(.+?)\s+(?:to|in)\s+(?:my\s+|the\s+)?pantry$/i;
+const CMD_SHOP_REMOVE = /^(?:remove|take)\s+(.+?)\s+(?:from|off)\s+(?:my\s+|the\s+)?(?:shopping\s+)?list$/i;
+// Words that read as a unit in "2 lb of chicken" / "1 bunch basil" (the units module knows more,
+// but only this short list is ever typed in a chat command).
+const CMD_UNIT = /^(?:kgs?|kilos?|kilograms?|g|gr|grams?|lbs?|pounds?|oz|ounces?|ml|l|litres?|liters?|cups?|tbsps?|tablespoons?|tsps?|teaspoons?|pcs?|pieces?|packs?|packets?|jars?|bottles?|cans?|bags?|box|boxes|bunch|bunches|dozen|heads?|cloves?|cartons?|tubs?|loaf|loaves|sticks?|slices?|pints?|quarts?|qts?|gallons?|gal)$/i;
+const CMD_NUMBER = /^(?:[\d.,/¼½¾⅓⅔⅛-]+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)$/i;
+// "2 lb of chicken thighs" -> { name: 'chicken thighs', qty: '905 g' }; "eggs" -> { name: 'eggs', qty: '' }
+function parseItemText(text) {
+  const words = String(text).trim().replace(/^(?:some|a few)\s+/i, '').split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  let i = 0;
+  while (i < words.length - 1 && CMD_NUMBER.test(words[i])) i++;
+  if (i === 0) return { name: words.join(' '), qty: '' };
+  if (i < words.length - 1 && CMD_UNIT.test(words[i].replace(/\.$/, ''))) i++;
+  if (i < words.length - 1 && /^of$/i.test(words[i])) i++;
+  const name = words.slice(i).join(' ');
+  const qty = formatQuantity(words.slice(0, i).filter(w => !/^of$/i.test(w)).join(' '));
+  return name ? { name, qty: parseQuantity(qty).qty == null ? '' : qty } : { name: words.join(' '), qty: '' };
+}
+const splitItems = s => String(s).split(/\s*,\s*|\s+and\s+/i).map(parseItemText).filter(Boolean);
+function localChatCommand(text) {
+  const t = String(text || '').trim().replace(/[.!?]+$/, '');
+  let m;
+  if ((m = CMD_PANTRY_ADD.exec(t))) {
+    const items = splitItems(m[1]);
+    for (const it of items) addLot(sentenceCase(it.name), keyForName(it.name), it.qty, '');
+    renderAll(); populateFoodOptions(); refreshRecipes();
+    return `Added ${listWords(items.map(it => `<b>${esc(it.qty ? `${it.qty} ${it.name}` : it.name)}</b>`))} to your pantry.`;
+  }
+  if ((m = CMD_SHOP_ADD.exec(t))) {
+    const items = splitItems(m[1]);
+    const r = addShopping(items.map(it => ({ name: sentenceCase(it.name), qty: it.qty })), { source: 'chat' });
+    renderAll();
+    return `Put ${listWords(items.map(it => `<b>${esc(it.name)}</b>`))} on your shopping list${r.merged ? ' (some were already there, so I topped them up)' : ''}.`;
+  }
+  if ((m = CMD_SHOP_REMOVE.exec(t))) {
+    const names = splitItems(m[1]).map(it => it.name);
+    const n = removeShoppingByNames(names);
+    renderAll();
+    return n
+      ? `Took ${listWords(names.map(x => `<b>${esc(x)}</b>`))} off your shopping list.`
+      : `I couldn’t find ${listWords(names.map(x => `<b>${esc(x)}</b>`))} on your list.`;
+  }
+  return null;
 }
 
 // Offline / no-API fallback: the old "what do I buy to make X" keyword helper.
@@ -2453,7 +3143,7 @@ function offlineChatAnswer(text) {
     reply = shoppingAnswer(d);
   } else {
     const opts = activeDishes().filter(passesPrefs).map(analyze).filter(eligible)
-      .sort((a, b) => a.missing.length - b.missing.length).slice(0, 3).map(a => a.dish.name);
+      .sort((a, b) => a.gap - b.gap).slice(0, 3).map(a => a.dish.name);
     reply = opts.length
       ? `With your preferences, you can make: <b>${esc(opts.join(', '))}</b>.`
       : 'No available recipes match your pantry and preferences. Try adding ingredients or reviewing your preferences.';
@@ -2476,6 +3166,7 @@ async function handleChat(text) {
           pantry: pantryForApi(),
           prefs: normalizePrefs(state.prefs),
           recentMeals: recentMealsForApi(),
+          shopping: shoppingForApi(),
         }),
         new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('timeout')), 25000); }),
       ]);
@@ -2494,7 +3185,14 @@ async function handleChat(text) {
 
   if (!done) {
     thinking.remove();
-    chatHistory.push({ role: 'assistant', content: '(answered from built-in recipes while offline)' });
+    // a plain "add X to my pantry / list" needs no model at all
+    const local = localChatCommand(text);
+    if (local) {
+      chatHistory.push({ role: 'assistant', content: local.replace(/<[^>]+>/g, '') });
+      addChat('bot', local);
+      return;
+    }
+    chatHistory.push({ role: 'assistant', content: '(answered offline from the local recipe list)' });
     addChat('bot', offlineChatAnswer(text));
   }
 }
@@ -2508,23 +3206,11 @@ chatEl.form.addEventListener('submit', e => {
   chatEl.input.value = '';
   handleChat(t);
 });
-// Open a recipe from a chat card. Assistant suggestions arrive without steps (kept fast);
-// the first time one is opened we fetch its steps and fill them into the open popup.
-async function openChatDish(d) {
+// Open a recipe from a chat card: the panel folds away and the step-less card opens like a
+// plan cell does (steps written on first open, see openGeneratedDish).
+function openChatDish(d) {
   chatClose();
-  if ((d.steps && d.steps.length) || !apiConfigured()) { openDetail(d); return; }
-  d.stepsLoading = true;
-  openDetail(d);                       // shows ingredients now, "Writing the steps…" below
-  try {
-    const names = (d.names && d.names.length) ? d.names : d.ingredients.map(i => i.name);
-    const { steps } = await recipeDetail({ title: d.name, servings: d.servings, ingredients: names });
-    d.steps = Array.isArray(steps) ? steps : [];
-  } catch {
-    d.steps = [];
-  } finally {
-    d.stepsLoading = false;
-    if (state.detailDishId === d.id) rerenderDetail();
-  }
+  return openGeneratedDish(d);
 }
 
 chatEl.log.addEventListener('click', e => {
@@ -2536,7 +3222,6 @@ chatEl.log.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !chatEl.panel.hidden) chatClose(); });
 
-const isoDay = ms => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 // Default use-by tracks the food's own shelf life (7 days only for unknown items).
 const shelfExpiryStr = name => isoDay(Date.now() + catalog(keyForName(name || '')).shelf * DAY);
 const resetAddDefaults = () => { $('#add-expiry').value = shelfExpiryStr($('#add-name').value); };
@@ -2556,10 +3241,10 @@ $('#add-form').addEventListener('submit', e => {
   if (!name || !amount) return;   // name and quantity are both required
   const key = keyForName(name);
   const unit = $('#dd-unit').dataset.value;
-  const qty = `${amount} ${unit}`;
+  const qty = formatQuantity({ amount: Number(amount), unit });   // "24 pcs", "1.5 kg": one spelling everywhere
   const expVal = $('#add-expiry').value;
   const expiry = expVal ? new Date(`${expVal}T12:00:00`).getTime() : Date.now() + 7 * DAY;
-  upsert(name.charAt(0).toUpperCase() + name.slice(1), key, qty, '', { expiry });
+  upsert(sentenceCase(name), key, qty, '', { expiry });   // servings come from the quantity (addLot)
   $('#add-name').value = ''; $('#add-qty').value = '';   // keep the unit; refresh the date default
   resetAddDefaults();
   renderAll();
@@ -2567,17 +3252,28 @@ $('#add-form').addEventListener('submit', e => {
   refreshRecipes();
 });
 
-// Keyboard: arrows drive the deck, Escape closes whatever is open (even from inside a field)
+// Keyboard: arrows drive the deck (on its tabs only), Escape closes the open sheet (even from inside a field)
 document.addEventListener('keydown', e => {
   if (e.isComposing) return;
   if (e.key === 'Escape') {
     // an open row editor is what Escape cancels, not the whole review
     if (state.sheet === 'review' && review.some(l => l.editing)) { review.forEach(l => { l.editing = false; }); renderReview(); return; }
-    if (state.sheet) closeSheet(); else if (state.panelOpen) closePanel();
+    if (state.sheet) closeSheet();
     return;
   }
-  if (e.target.matches('input, textarea, select')) return;
-  if (state.sheet || state.panelOpen || state.leaving || !state.deck.length) return;
+  const t = e.target instanceof Element ? e.target : document.body;   // a keydown can target the document itself
+  // on the tab bar, Left/Right move between sections
+  if (el.tabs.contains(t) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    const i = TABS.indexOf(state.tab);
+    setTab(TABS[(i + (e.key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length]);
+    const b = $(`.tab[data-tab="${state.tab}"]`, el.tabs); if (b) b.focus();
+    return;
+  }
+  if (t.matches('input, textarea, select') || t.closest('.dd')) return;
+  if (state.sheet || !isDeckTab() || state.leaving) return;
+  if (e.key === 'ArrowDown' || e.key === 'Backspace') { if (state.history.length) { e.preventDefault(); undo(); } return; }
+  if (!state.deck.length) return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); commit('skip'); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); commit('cook'); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); openDetail(state.deck[0]); }
@@ -2585,10 +3281,19 @@ document.addEventListener('keydown', e => {
 
 /* ---------- fit the deck to shorter laptop screens and narrower phones ---------- */
 let fitScale = 1;
+const topbarEl = $('.topbar');
+// The top bar is 88px on wide screens and grows by the tab row under 1100px (the section tabs
+// are laid out inside it either way): its measured height is what the stage does not get.
+function topbarHeight() {
+  const h = topbarEl ? topbarEl.offsetHeight : 0;
+  return h > 0 ? h : 88;
+}
 function fit() {
   const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
   if (vh <= 0 || window.innerHeight <= 0) return;             // hidden tab / pre-layout: keep the last value
-  const avail = vh - 88 - 44 - 16;                             // minus top bar, footer, breathing room
+  const bar = topbarHeight();
+  document.documentElement.style.setProperty('--topbar-h', `${bar}px`);   // the toast sits just under it
+  const avail = vh - bar - 44 - 16;                            // minus top bar (tab row included), footer, breathing room
   const need = 760;                                            // caption + 580 card + stack offset + buttons + hints
   fitScale = clamp(Math.min(avail / need, (vw - 32) / 420), 0.6, 1);
   document.documentElement.style.setProperty('--fit', String(fitScale));
@@ -2610,24 +3315,29 @@ user = session && session.user ? session.user : null;
 renderAvatar();
 // Keep the avatar honest when the session changes under us: metadata saved, token refreshed, signed out in another tab.
 onAuthChange((event, s) => { user = s && s.user ? s.user : null; renderAvatar(); });
-const [saved, prefs, kept, cachedDeck] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes(), loadDeck()]);
+const [saved, prefs, kept, cachedDeck, shopping, cachedPlan] = await Promise.all([loadState(), loadPrefs(), loadSavedDishes(), loadDeck(), loadShopping(), loadPlan()]);
 state.prefs = prefs;   // before the first refreshRecipes(), so the deck already honours them
 state.saved = Array.isArray(kept) ? kept.filter(d => d && d.id && Array.isArray(d.ingredients)) : [];   // before renderAll, so a photo dish on tonight's list resolves
+state.shopping = Array.isArray(shopping) ? shopping : [];
 if (saved) {
   state.pantry = saved.pantry;
   state.skipped = new Set(saved.skipped);
   state.cooked = new Set(saved.cooked);
   state.chosen = new Set(saved.chosen);
+  recomputeDefaultServings(state.pantry);   // lots saved with the package default get their servings from their quantity, once
 } else {
   state.pantry = seedPantry();
 }
+// last week's plan comes back with the same plan- ids, so a meal on Tonight still opens
+if (cachedPlan) adoptPlan(cachedPlan, { source: cachedPlan.source, signature: cachedPlan.signature, at: cachedPlan.at });
 // Last visit's deck goes in before the first render, so the app opens with
 // recipes already on screen instead of waiting on two model calls. If it no
 // longer matches the kitchen, regenerate quietly behind it.
 const deckFresh = adoptCachedDeck(cachedDeck);
 populateFoodOptions();
+setTab(state.tab, { render: false });   // the section from last time in this session, before the first paint
 renderAll({ enter: true });
 if (!deckFresh) refreshRecipes({ quiet: Boolean(liveDishes) });
 // First visit (a fresh sign-in, or once per browser in demo mode): ask the five questions before anything else.
 if (!state.prefs.onboarded) openOnboarding();
-window.pantry = { state, drag, session, openOnboarding, openProfile, openDishUpload, openSaved, get prefs() { return state.prefs; }, get user() { return user; } };   // module scope hides these; handy in the console
+window.pantry = { state, drag, session, setTab, undo, analyze, openDetail, openOnboarding, openProfile, openDishUpload, openSaved, openPlan, addShopping, get prefs() { return state.prefs; }, get user() { return user; }, get plan() { return plan; } };   // module scope hides these; handy in the console and in scripts/merge-browser-check.js

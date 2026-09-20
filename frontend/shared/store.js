@@ -1,4 +1,4 @@
-/* Pantry — storage layer (ES module).
+/* mise en feast — storage layer (ES module).
    One API, two backends: Supabase when the project is configured and the user is
    signed in, localStorage otherwise. Nothing in here throws; failures are logged
    with console.warn and the function resolves to null / does nothing.
@@ -22,7 +22,11 @@
      { id: 'photo-<uuid>', name, img (data: URL), time: '30 min', servings,
        difficulty: 'Easy'|'Medium'|'Hard', ingredients: [{ name, key, need, amt, staple }],
        names[], steps[], tags: { vegetarian, vegan, contains[] }, cuisine,
-       source: 'photo', confidence, description, savedAt (ms epoch) } */
+       source: 'photo', confidence, description, savedAt (ms epoch) }
+
+   The shopping list (loadShopping / saveShopping) and the weekly plan
+   (loadPlan / savePlan) are one jsonb blob each on app_state (0006), with a
+   localStorage copy that is demo mode's only copy; see their sections below. */
 
 import { configured, getClient, getSession, getUser } from './supabase.js';
 
@@ -30,6 +34,8 @@ export const LOCAL_KEY = 'pantry.state.v1';
 export const PREFS_KEY = 'pantry.prefs.v1';
 export const SAVED_KEY = 'pantry.saved.v1';
 export const DECK_KEY = 'pantry.deck.v1';
+export const SHOPPING_KEY = 'pantry.shopping.v1';
+export const PLAN_KEY = 'pantry.plan.v1';
 const DEBOUNCE_MS = 400;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -260,6 +266,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
     try { flush(); } catch (err) { console.warn('[pantry] flush on pagehide failed', err); }
     try { flushPrefs(); } catch (err) { console.warn('[pantry] prefs flush on pagehide failed', err); }
+    try { flushShopping(); } catch (err) { console.warn('[pantry] shopping flush on pagehide failed', err); }
   });
 }
 
@@ -625,13 +632,19 @@ function normalizeIngredient(i) {
   if (!i || typeof i !== 'object') return null;
   const name = str(i.name).trim();
   if (!name) return null;
-  return {
+  const out = {
     name,
     key: lc(i.key || name) || 'item',
     need: Math.max(0.5, num(i.need, 1)),
     amt: str(i.amt ?? i.amount),
     staple: Boolean(i.staple),
   };
+  // What the model matched the ingredient to, and how much of it the dish takes:
+  // analyze() prefers these over the baked key, so a saved or planned dish
+  // re-verifies against the pantry exactly like a fresh one.
+  if (i.matched_name != null && str(i.matched_name).trim()) out.matched_name = str(i.matched_name).trim();
+  if (i.servings_used != null && Number.isFinite(Number(i.servings_used)) && Number(i.servings_used) > 0) out.servings_used = Number(i.servings_used);
+  return out;
 }
 
 function normalizeTags(t, cuisine) {
@@ -914,6 +927,195 @@ export function saveDeck(dishes, signature) {
     }
   } catch (err) {
     console.warn('[pantry] saveDeck failed', err);
+  }
+}
+
+/* ---------- the shopping list ----------
+   Rows the app adds from a recipe's "You'll need", the kitchen helper, the add
+   form or the weekly plan. One jsonb blob on the account (app_state.shopping,
+   0006) beside the deck, and this browser's copy under SHOPPING_KEY, which is
+   also demo mode's only copy. Row shape (ms epochs):
+     { id, name, key, qty: string, note, done: bool,
+       source: 'recipe'|'chat'|'manual'|'plan', dishId, dishName, addedAt } */
+
+const SHOPPING_SOURCES = new Set(['recipe', 'chat', 'manual', 'plan']);
+
+function normalizeShoppingRow(r) {
+  if (!r || typeof r !== 'object') return null;
+  const name = str(r.name).trim();
+  if (!name) return null;
+  const source = lc(r.source);
+  return {
+    id: UUID_RE.test(str(r.id)) ? str(r.id).toLowerCase() : newId(),
+    name,
+    key: lc(r.key || name) || 'item',
+    qty: str(r.qty).trim(),
+    note: str(r.note).trim(),
+    done: Boolean(r.done),
+    source: SHOPPING_SOURCES.has(source) ? source : 'manual',
+    dishId: str(r.dishId || ''),
+    dishName: str(r.dishName || ''),   // the source line ("for Shakshuka") outlives the deck the dish came from
+    addedAt: num(r.addedAt, Date.now()),
+  };
+}
+
+const normalizeShopping = rows => (Array.isArray(rows) ? rows : []).map(normalizeShoppingRow).filter(Boolean);
+
+function readLocalShopping() {
+  try {
+    const raw = localStorage.getItem(SHOPPING_KEY);
+    return raw ? normalizeShopping(JSON.parse(raw)) : [];
+  } catch (err) {
+    console.warn('[pantry] could not read the shopping list', err);
+    return [];
+  }
+}
+
+function writeLocalShopping(rows) {
+  try { localStorage.setItem(SHOPPING_KEY, JSON.stringify(rows)); } catch (err) { console.warn('[pantry] could not write the shopping list', err); }
+}
+
+/** Drop the browser's copy of the shopping list (on sign-out). */
+export function clearLocalShopping() {
+  try { localStorage.removeItem(SHOPPING_KEY); } catch (err) { console.warn('[pantry] could not clear the shopping list', err); }
+}
+
+/** Resolve to the shopping list. Signed in: the account's rows, empty included
+    (clearing the list on another device is a real change, see saveShopping);
+    this browser's only when the account has no app_state row yet (a list
+    started in demo mode carries over on first sign-in) or the column is not
+    migrated. Never rejects. */
+export async function loadShopping() {
+  const local = readLocalShopping();
+  try {
+    const user = await signedInUser();
+    if (!user) return local;
+    const client = await getClient();
+    const { data, error } = await client.from('app_state').select('shopping').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    if (!data || !Array.isArray(data.shopping)) return local;
+    const rows = normalizeShopping(data.shopping);
+    writeLocalShopping(rows);
+    return rows;
+  } catch (err) {
+    console.warn('[pantry] loadShopping failed, using the local copy', err);
+    return local;
+  }
+}
+
+let shoppingPending = null;
+let shoppingTimer = null;
+
+async function persistShopping(rows) {
+  const user = await signedInUser();
+  if (!user) return;
+  const client = await getClient();
+  const { error } = await client.from('app_state').upsert({ user_id: user.id, shopping: rows }, { onConflict: 'user_id' });
+  if (error) throw error;
+}
+
+function flushShopping() {
+  if (shoppingTimer) { clearTimeout(shoppingTimer); shoppingTimer = null; }
+  const rows = shoppingPending;
+  shoppingPending = null;
+  if (!rows) return;
+  queueRemote('saveShopping', () => persistShopping(rows));
+}
+
+/** Save the shopping list: this browser right away, the account after a ~400ms
+    debounce (latest call wins). An empty list is written too, since clearing it
+    is a real change. Never throws. */
+export function saveShopping(rows) {
+  try {
+    const snapshot = normalizeShopping(rows);
+    writeLocalShopping(snapshot);
+    if (!configured) return;
+    shoppingPending = snapshot;
+    if (shoppingTimer) clearTimeout(shoppingTimer);
+    shoppingTimer = setTimeout(flushShopping, DEBOUNCE_MS);
+  } catch (err) {
+    console.warn('[pantry] saveShopping failed', err);
+  }
+}
+
+/* ---------- the weekly plan ----------
+   Seven days of breakfast / lunch / dinner from POST /meal-plan (or built from
+   the deck when the backend is away), cached like the deck: the app's own
+   fingerprint of the kitchen decides whether it is still good. Shape:
+     { start: 'YYYY-MM-DD', days: [{ date, meals: { breakfast, lunch, dinner } }],
+       signature, at (ms), source: 'api'|'local' } */
+
+function normalizePlan(p) {
+  if (!p || typeof p !== 'object' || !Array.isArray(p.days) || !p.days.length) return null;
+  return {
+    start: str(p.start),
+    days: p.days,
+    signature: str(p.signature),
+    at: num(p.at, 0),
+    source: str(p.source) === 'local' ? 'local' : 'api',
+    // meals picked for Tonight that a regenerated week no longer holds (app.js adoptPlan)
+    parked: Array.isArray(p.parked) ? p.parked.filter(d => d && typeof d === 'object' && d.id) : [],
+  };
+}
+
+function readLocalPlan() {
+  try {
+    const raw = localStorage.getItem(PLAN_KEY);
+    return raw ? normalizePlan(JSON.parse(raw)) : null;
+  } catch (err) {
+    console.warn('[pantry] could not read the cached plan', err);
+    return null;
+  }
+}
+
+/** Drop the browser's copy of the weekly plan (on sign-out). */
+export function clearLocalPlan() {
+  try { localStorage.removeItem(PLAN_KEY); } catch (err) { console.warn('[pantry] could not clear the cached plan', err); }
+}
+
+/** Resolve to the cached plan, or null. Signed in: the account's copy, falling
+    back to this browser's when the account has none. Never rejects. */
+export async function loadPlan() {
+  const local = readLocalPlan();
+  try {
+    const user = await signedInUser();
+    if (!user) return local;
+    const client = await getClient();
+    const { data, error } = await client.from('app_state').select('plan, plan_at').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    const plan = data && normalizePlan(data.plan);
+    if (!plan) return local;
+    if (!plan.at) plan.at = Date.parse(data.plan_at) || 0;
+    return plan;
+  } catch (err) {
+    console.warn('[pantry] loadPlan failed, using the local copy', err);
+    return local;
+  }
+}
+
+/** Cache a plan: this browser right away, the account in the background.
+    Pass null to forget it. Never throws. */
+export function savePlan(plan) {
+  try {
+    const snapshot = plan == null ? null : normalizePlan(plan);
+    if (!snapshot) { clearLocalPlan(); } else {
+      try { localStorage.setItem(PLAN_KEY, JSON.stringify(snapshot)); } catch (err) { console.warn('[pantry] could not cache the plan', err); }
+    }
+    if (configured) {
+      queueRemote('savePlan', async () => {
+        const user = await signedInUser();
+        if (!user) return;
+        const client = await getClient();
+        const { error } = await client.from('app_state').upsert({
+          user_id: user.id,
+          plan: snapshot,
+          plan_at: snapshot ? new Date(snapshot.at || Date.now()).toISOString() : null,
+        }, { onConflict: 'user_id' });
+        if (error) throw error;
+      });
+    }
+  } catch (err) {
+    console.warn('[pantry] savePlan failed', err);
   }
 }
 

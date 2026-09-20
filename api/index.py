@@ -9,8 +9,10 @@ function, mounted under /api so the static frontend can call it same-origin.
   /api/recipe-detail -> backend /recipe-detail  (Claude/Bedrock: recipe steps on demand)
   /api/cook          -> backend /cook
   /api/identify      -> backend /identify
+  /api/dish-image    -> backend /dish-image    (Gemini: a picture of a dish, cached a year)
+  /api/meal-plan     -> backend /meal-plan     (Gemini: breakfast/lunch/dinner for the week)
 
-Set GEMINI_API_KEY (and optionally GEMINI_MODEL) for the Gemini features, and the
+Set GEMINI_API_KEY (and optionally GEMINI_MODEL and GEMINI_IMAGE_MODEL) for the Gemini features, and the
 AWS Bedrock variables for the Claude chatbot (AWS_BEARER_TOKEN_BEDROCK, AWS_REGION,
 BEDROCK_MODEL_ID), in the Vercel project's environment variables. Locally, run
 backend/ with uvicorn instead (see backend/README.md).
@@ -28,7 +30,7 @@ from fastapi import FastAPI  # noqa: E402
 
 from main import app as backend_app  # noqa: E402  (backend/main.py)
 
-_wrapper = FastAPI(title="Pantry AI (Vercel)")
+_wrapper = FastAPI(title="mise en feast API (Vercel)")
 _wrapper.mount("/api", backend_app)
 
 

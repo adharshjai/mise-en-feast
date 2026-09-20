@@ -1,11 +1,11 @@
--- Pantry — full database setup. Paste this whole file into the Supabase SQL Editor and Run.
+-- mise en feast — full database setup. Paste this whole file into the Supabase SQL Editor and Run.
 -- Source of truth: supabase/migrations/000{1,2,3}_*.sql (base tables + foods + intelligence).
 -- Matches the frontend data layer (frontend/shared/store.js) and adds the learning layer.
 
 
 -- ============================ supabase/migrations/0001_base.sql ============================
 -- ===========================================================================
--- Pantry — Base schema (matches the frontend's data layer: frontend/shared/store.js)
+-- mise en feast — Base schema (matches the frontend's data layer: frontend/shared/store.js)
 --
 -- Tables the frontend reads/writes directly:
 --   pantry_items, app_state, receipts, recipes, cook_log
@@ -113,8 +113,16 @@ create table if not exists public.app_state (
   deck           jsonb not null default '[]'::jsonb,
   deck_at        timestamptz,
   deck_signature text,
-  updated_at     timestamptz not null default now()
+  updated_at     timestamptz not null default now(),
+  -- The shopping list and the cached weekly plan, one blob each (0006).
+  shopping       jsonb not null default '[]'::jsonb,
+  plan           jsonb,
+  plan_at        timestamptz
 );
+-- Projects created from an earlier schema.sql pick the 0006 columns up here.
+alter table public.app_state add column if not exists shopping jsonb not null default '[]'::jsonb;
+alter table public.app_state add column if not exists plan jsonb;
+alter table public.app_state add column if not exists plan_at timestamptz;
 
 -- =============================================================================
 -- Row Level Security — each user only sees their own rows
@@ -178,7 +186,7 @@ create policy "app_state delete own" on public.app_state for delete to authentic
 
 -- ============================ supabase/migrations/0002_foods.sql ============================
 -- ===========================================================================
--- Pantry — Canonical foods (reference data for autofill + smart estimates).
+-- mise en feast — Canonical foods (reference data for autofill + smart estimates).
 -- Shared, read-only to signed-in users. The frontend can query this to power
 -- autofill (type "garlic" -> matches the "garlic" row via name/aliases) and to
 -- pre-fill shelf life / burn rate / servings when adding an item.
@@ -207,7 +215,7 @@ create policy "foods readable" on public.foods for select to authenticated using
 create index if not exists foods_category_idx on public.foods (category);
 
 -- ===========================================================================
--- Pantry — Migration 2/4: canonical foods seed (generated from food-catalog.ts).
+-- mise en feast — Migration 2/4: canonical foods seed (generated from food-catalog.ts).
 -- Re-run safe: upserts on id.
 -- ===========================================================================
 
@@ -271,7 +279,7 @@ ON CONFLICT (id) DO UPDATE SET
 
 -- ============================ supabase/migrations/0003_intelligence.sql ============================
 -- ===========================================================================
--- Pantry — Intelligence layer (additive; does not change the frontend contract).
+-- mise en feast — Intelligence layer (additive; does not change the frontend contract).
 --
 --   consumption_profiles : per-household learned consumption rate
 --   checkin_item(...)     : "do you still have this?" — corrects the item AND

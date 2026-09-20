@@ -28,7 +28,11 @@ return (async () => {
   click('[data-ob-edit="0"]');
   click('[data-ob-skip]');
   await wait(450);
-  click('#btn-details');
+  // Details open from the top card itself (a tap, or ArrowUp); there is no details button any more.
+  window.pantry.setTab('curated');
+  assert(state.deck.length > 0, 'The curated deck has a dish to open');
+  window.pantry.openDetail(state.deck[0]);
+  await wait(450);
   const target = Math.ceil(state.prefs.household.adults + state.prefs.household.kids / 2);
   assert(state.detailServings === target && !document.querySelector('#sheet').textContent.includes('NaN'), 'Household object produces valid recipe servings');
   click('[data-serv="1"]');
@@ -37,12 +41,15 @@ return (async () => {
   assert(state.sheet === 'madeit', 'Scaled recipe opens pantry deduction confirmation');
   click('[data-close]');
   await wait(450);
-  click('#btn-pantry');
+  // The pantry is a section now: its tab opens it, the Curated tab leaves it.
+  click('#tabs [data-tab="pantry"]');
+  assert(state.tab === 'pantry' && !document.querySelector('#pantry-screen').classList.contains('hidden'), 'Pantry tab shows the pantry page');
   for (const tab of ['amount', 'category', 'expiring']) {
     click(`[data-ptab="${tab}"]`);
     assert(state.panelTab === tab, `Pantry ${tab} tab works`);
   }
-  click('#btn-close-panel');
+  click('#tabs [data-tab="curated"]');
+  assert(state.tab === 'curated', 'Curated tab leaves the pantry page');
   click('#btn-scan');
   assert(state.sheet === 'scan-choose', 'Scan offers receipt and dish flows');
   click('[data-choose-dish]');

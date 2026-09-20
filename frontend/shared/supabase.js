@@ -1,4 +1,4 @@
-/* Pantry — Supabase auth layer (ES module).
+/* mise en feast — Supabase auth layer (ES module).
    Expects shared/config.js to have run first as a classic script; works without it
    (everything degrades to "not configured" and the app runs in demo mode).
 

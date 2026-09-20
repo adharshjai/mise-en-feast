@@ -1,5 +1,5 @@
 -- ===========================================================================
--- Pantry — Canonical foods (reference data for autofill + smart estimates).
+-- mise en feast — Canonical foods (reference data for autofill + smart estimates).
 -- Shared, read-only to signed-in users. The frontend can query this to power
 -- autofill (type "garlic" -> matches the "garlic" row via name/aliases) and to
 -- pre-fill shelf life / burn rate / servings when adding an item.
@@ -28,7 +28,7 @@ create policy "foods readable" on public.foods for select to authenticated using
 create index if not exists foods_category_idx on public.foods (category);
 
 -- ===========================================================================
--- Pantry — Migration 2/4: canonical foods seed (generated from food-catalog.ts).
+-- mise en feast — Migration 2/4: canonical foods seed (generated from food-catalog.ts).
 -- Re-run safe: upserts on id.
 -- ===========================================================================
 

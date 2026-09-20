@@ -1,4 +1,4 @@
-# Pantry — design notes
+# mise en feast — design notes
 
 Warm dark ground, liquid-glass controls, one orange accent, and otherwise the restraint of a
 serious product site: plain language, a lot of quiet, nothing that glows or floats. The glass
@@ -42,6 +42,31 @@ The app and login load Outfit only.
 - **Sheets / panel**: denser glass (`.sheet.glass`), 28px radius, neutral shadow. Veil `rgba(18,16,14,.62)`.
 - **Toast**: glass pill, top centre under the bar.
 - **Icons**: inline stroke SVG, currentColor. No emoji. No icon on every row.
+
+## Tab bar and page screens
+
+The app has four sections in one glass capsule in the middle column of the top bar: **Curated ·
+Explore · Pantry · Shopping List**. The active tab is the emerald fill of a prominent pill; inactive
+tabs are plain `--text-2`. Pantry and Shopping List carry a small count badge (items; things still
+to buy). The bar is a three-column grid (wordmark, capsule, cluster) whose side columns are never
+narrower than what they hold: with room to spare they are equal and the capsule sits on the page's
+centre line; when the cluster needs more than its half the capsule shifts rather than going under
+it. The Tonight pill is the one thing that yields (150px, 240px from 1500px up, never narrower than
+the word). Under 1100px the capsule becomes its own row directly below the top bar. The right
+cluster keeps Tonight, Scan, Saved, This week and the avatar, all on one axis with 12px gaps (8px on
+phones under 480px, where a 360px screen cannot hold 12).
+
+Curated and Explore share the swipe deck (scaled by `--fit`). Pantry and Shopping List are **page
+screens** (`.screen.page`): a plain scrolling column, `min(720px, 100% - 32px)` wide, never scaled,
+with a header row (title, count, a + circle for adding by hand), an optional add form, the rows, and
+a hairline footer for the page's one or two quiet actions. Rows are the pantry's `.prow`: name and a
+small line on the left, the freshness bar (pantry) or a check box (shopping) on the right, a remove
+circle on hover. The shopping list's check is the made-it sheet's box; bought rows strike through
+in `--text-2`, never opacity.
+
+The week (`This week`, calendar icon) is a `w-720` sheet: seven rows by breakfast / lunch / dinner.
+Cells are content, so they are a quiet tint (`rgba(var(--ink), .045)`), not glass, with a 40px thumb,
+the name and "20 min · missing 2". On phones the grid folds to one column and each cell names its meal.
 
 ## Landing page
 

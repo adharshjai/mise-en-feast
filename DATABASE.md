@@ -1,4 +1,4 @@
-# Pantry — Database
+# mise en feast — database
 
 The database matches the frontend's data layer (`frontend/shared/store.js`) and adds an
 intelligence layer (canonical foods + household consumption learning) on top, without

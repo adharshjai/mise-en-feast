@@ -1,4 +1,4 @@
-# Pantry on Supabase — setup
+# mise en feast on Supabase — setup
 
 1. Create a project at https://supabase.com/dashboard (any region, free tier is fine).
 2. SQL Editor -> New query -> paste `schema.sql` -> Run. Re-running it is safe.

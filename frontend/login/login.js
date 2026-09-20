@@ -1,4 +1,4 @@
-/* Pantry login page. Talks to Supabase through ../shared/supabase.js. */
+/* mise en feast login page. Talks to Supabase through ../shared/supabase.js. */
 import { configured, getClient, getSession, onAuthChange, providerEnabled, exitDemo } from '../shared/supabase.js';
 
 const $ = s => document.querySelector(s);

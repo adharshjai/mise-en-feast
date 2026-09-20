@@ -1,4 +1,4 @@
-/* Pantry — connection settings.
+/* mise en feast — connection settings.
    Loaded as a classic <script> BEFORE any module that imports shared/supabase.js
    or shared/api.js.
 

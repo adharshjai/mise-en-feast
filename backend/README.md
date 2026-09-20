@@ -1,21 +1,29 @@
-# Pantry AI backend
+# mise en feast backend
 
-FastAPI + Gemini. Reads a receipt photo into pantry items (with servings, shelf
-life, burn rate and a brand-agnostic `group_key` so repeat purchases stack as
-separate lots), and generates dishes from whatever is in the pantry, ranked by
-what expires first.
+FastAPI + Gemini, with Claude on Bedrock for the chat. Reads a receipt photo into
+pantry items (with servings, shelf life, burn rate and a brand-agnostic
+`group_key` so repeat purchases stack as separate lots), generates dishes from
+whatever is in the pantry ranked by what expires first, plans the week, draws a
+picture for each dish, and runs the in-app assistant.
 
 | Endpoint | What it does |
 |---|---|
 | `POST /scan` | multipart `file` (image or PDF) → parsed, enriched items |
-| `POST /recipes` | `{ items, count, max_missing, request }` → ranked recipes |
+| `POST /recipes` | `{ items, count, max_missing, request, prefs }` → ranked recipes |
+| `POST /chat` | `{ messages, pantry, prefs, recent_meals, shopping }` → `{ reply, actions, recipes }`, see below |
+| `POST /recipe-detail` | `{ title, servings, ingredients, request }` → `{ steps }` for one chat/plan card |
 | `POST /cook` | subtract a cooked recipe's servings |
 | `POST /identify` | multipart `file` (photo of a dish) → its recipe, see below |
-| `GET /health` | `{ ok, model, key_set }` |
+| `GET /dish-image` | `?title=&ingredients=&seed=` → JPEG bytes, cached for a year, see below |
+| `POST /meal-plan` | `{ items, prefs, days, start, request }` → `{ start, days: [{ date, meals }] }`, see below |
+| `GET /health` | `{ ok, model, image_model, key_set, chat: {...} }` |
 
-Everything runs on Gemini. `GEMINI_API_KEY` is the only key; `GEMINI_MODEL`
-(default `gemini-3.5-flash-lite`) picks the model, and `IDENTIFY_STUB=1` makes
-`/identify` answer without calling anything.
+Gemini runs everything except the chat. `GEMINI_API_KEY` is its only key;
+`GEMINI_MODEL` (default `gemini-3.5-flash-lite`) picks the text model,
+`GEMINI_IMAGE_MODEL` pins the image model (unset: the first of
+`gemini-3.5-flash-image`, `gemini-3-flash-image`, `gemini-2.5-flash-image` that
+answers), and `IDENTIFY_STUB=1` makes `/identify` answer without calling
+anything. The chat needs the Bedrock variables in `bedrock.py`'s docstring.
 
 ## Run locally
 
@@ -127,10 +135,86 @@ print(r.status_code, r.json()['title'])"
 
 Deployed, the same route is `https://<your-app>.vercel.app/api/identify`.
 
+## The assistant's tools (`POST /chat`)
+
+Claude never touches the database. Every write comes back as a validated
+`action` the client applies itself; every read is answered from the request
+body. `chat.py` has the full contract. Besides preferences, "gone" and
+check-ins, the assistant can now stock the pantry and keep the shopping list:
+
+| Tool | The user says | Action sent to the client |
+|---|---|---|
+| `add_pantry_items` | "add eggs to my pantry", "I bought 2 lb of chicken thighs" | `{ type: 'add_pantry_items', items: [{ name, quantity, unit, expires_in_days }] }` |
+| `add_to_shopping_list` | "put lemons on my shopping list", "I need to buy rice" | `{ type: 'add_shopping_items', items: [{ name, quantity, unit, note }] }` |
+| `remove_from_shopping_list` | "take milk off the list" | `{ type: 'remove_shopping_items', names: [...] }` (only names that matched a row in `shopping`) |
+| `read_shopping_list` | "what's on my list?" | none (a read) |
+
+Names are trimmed to 1–60 characters, quantities must be positive, and units are
+folded into the six the pantry stores (`g, kg, ml, l, pcs, pack`): `2 lb` becomes
+`907.2 g`, `1 dozen` `12 pcs`, a `jar`, `bag` or `bunch` a `pack`, and a unit
+nobody recognises becomes `""` with the quantity kept. `expires_in_days` is
+1–730 or null. The request's `shopping` field (`[{ name, quantity, unit, done }]`)
+is what `read_shopping_list` answers from and what removals are matched against.
+
+## Dish pictures (`GET /dish-image`)
+
+```
+GET /dish-image?title=Spinach+and+garlic+pasta&ingredients=spinach,garlic,pasta&seed=0
+
+200 → image/jpeg bytes
+      Cache-Control: public, max-age=31536000, immutable
+      X-Dish-Slug: spinach-and-garlic-pasta
+400 → no title, or title over 120 / ingredients over 400 characters
+503 → GEMINI_API_KEY not set
+502 → the model call failed
+```
+
+`images.py` builds one prompt (overhead shot, ceramic plate, wooden table, no
+text, the ingredients visible), calls `generate_content` with
+`response_modalities=["IMAGE"]`, takes the first inline image part, downsizes it
+to 1024 px on the long side with Pillow (JPEG quality 82; without Pillow the
+model's bytes go out as-is with their own mime type) and keeps the last 64 in
+memory by slug. `seed` asks for a different take on the same title and gets its
+own cache slot. The browser caches by URL for a year, so the client's slug is
+what decides when a dish gets a new picture.
+
+## Meal plan (`POST /meal-plan`)
+
+```
+POST /meal-plan  { items: [PantryItem], prefs: Prefs|null, days: 1..14 (default 7),
+                   start: 'YYYY-MM-DD' (default today), request: str|null }
+
+200 → { start: 'YYYY-MM-DD',
+        days: [ { date: 'YYYY-MM-DD',
+                  meals: { breakfast: Meal|null, lunch: Meal|null, dinner: Meal|null } } ] }
+400 → the pantry has no food in it
+503 → GEMINI_API_KEY not set
+502 → the model call failed
+```
+
+`Meal` is the step-less recipe the chat cards use (`title, description,
+cook_minutes, servings, difficulty, ingredients[{ name, amount, matched_name,
+servings_used, staple, have }], missing_count, coverage, urgency_days,
+uses_expiring, steps: []`); fetch steps with `/recipe-detail` when a cell is
+opened. `meal_plan.py` asks for the soonest-expiring food in the first days,
+15-minute breakfasts, at most three non-pantry ingredients per dish and one
+shared shopping basket for the week, with the same hard rules and preferences
+as `/recipes`. The week is generated in chunks of four days: the first chunk
+fixes the basket, then the rest run in parallel with that basket, the titles
+already used and the pantry as the first chunk left it. Every meal is annotated
+with `recipes.annotate()`, the non-filtering half of `rank()`, so a plan cell and
+a deck card agree on what you own; a meal that trips an allergy or diet rule
+comes back `null`.
+
 ## Files
 
-- `main.py` — app, receipt parsing (`/scan`), `/cook`, `/health`, and the `/identify` route
-- `recipes.py` — recipe generation (ideas, then recipes) and ranking (`rank`)
+- `main.py` — app, receipt parsing (`/scan`), `/cook`, `/health`, and the routes for everything below
+- `recipes.py` — recipe generation (ideas, then recipes), `annotate` (have/missing against the pantry) and `rank`
+- `recipes_ai.py` — the chat's step-less suggestions and `/recipe-detail` (Claude)
+- `chat.py` — the assistant: tools, validation, the actions the client applies
+- `meal_plan.py` — `/meal-plan`: the week's meals, chunked, annotated
+- `images.py` — `/dish-image`: one image call per dish, model fallback, LRU, downscale
 - `identify.py` — photo of a dish → recipe: models, prompt, sample, the call
+- `bedrock.py` — the Bedrock Converse client and its environment variables
 - `llm.py` — the shared "answer as this pydantic model" Gemini call
-- `.env.example` — the variables the app reads (`IDENTIFY_STUB=1` is the one extra, for keyless demos)
+- `.env.example` — the variables the app reads (`IDENTIFY_STUB=1` and `GEMINI_IMAGE_MODEL` are the extras)

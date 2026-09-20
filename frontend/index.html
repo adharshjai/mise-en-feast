@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>/* theme before first paint: the saved choice, else light */(function(){var t;try{t=localStorage.getItem('pantry-theme')}catch(e){}document.documentElement.dataset.theme=t==='dark'?'dark':'light'})()</script>
-<title>Pantry</title>
+<title>mise en feast</title>
 <link rel="icon" type="image/svg+xml" href="shared/mark.svg">
 <script src="shared/config.js"></script>
 <script>
@@ -18,7 +18,7 @@
   }
 })();
 </script>
-<meta name="description" content="Pantry fills itself from your grocery receipts and tells you what to cook, ordered by what is expiring first.">
+<meta name="description" content="mise en feast fills itself from your grocery receipts and tells you what to cook, ordered by what is expiring first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;1,8..60,400;1,8..60,700&display=swap" rel="stylesheet">
@@ -28,9 +28,9 @@
 <body>
 
 <header class="topbar wrap">
-  <a class="wordmark" href="./" aria-label="Pantry home">
-    <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" style="fill:var(--on-accent)"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" style="fill:var(--on-accent)"/><path d="M17.2 3.6l-3.6 7.2" style="stroke:var(--on-accent)" stroke-width="2.6" stroke-linecap="round"/></svg>
-    <span>Pantry</span>
+  <a class="wordmark" href="./" aria-label="mise en feast home">
+    <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><g transform="rotate(-18 5 17)"><circle cx="12" cy="5.3" r="1.45" style="fill:var(--on-accent)"/><rect x="11.3" y="6.2" width="1.4" height="1.5" rx=".7" style="fill:var(--on-accent)"/><path d="M5.2 14a6.8 6.8 0 0 1 13.6 0z" style="fill:var(--on-accent)"/><rect x="3.9" y="13.3" width="16.2" height="1.7" rx=".85" style="fill:var(--on-accent)"/></g><circle cx="15.6" cy="16.5" r="1.45" style="fill:var(--on-accent)"/><rect x="3" y="18.6" width="18" height="2.3" rx="1.15" style="fill:var(--on-accent)"/></svg>
+    <span>mise en feast</span>
   </a>
   <nav class="glass pillbar" aria-label="Primary">
     <a class="pill ghost" id="nav-signin" href="login/">Sign in</a>
@@ -46,7 +46,7 @@
   <section class="hero wrap" aria-labelledby="hero-title">
     <h1 id="hero-title"><em>Now</em> we're cooking.</h1>
     <p class="tagline">a pantry that fills itself.</p>
-    <p class="lede">Photograph a grocery receipt. Pantry reads what you bought, works out how long each item lasts, and tells you what to cook before it goes bad.</p>
+    <p class="lede">Photograph a grocery receipt. mise en feast reads what you bought, works out how long each item lasts, and tells you what to cook before it goes bad.</p>
     <div class="row-btns">
       <a class="pill prominent lg go" href="login/">
         <span>Get started</span>
@@ -128,14 +128,14 @@
           <span class="num" aria-hidden="true">01</span>
           <div class="step-body">
             <h3>Scan a receipt</h3>
-            <p>Photograph the receipt from your grocery run. Pantry reads the items, quantities, prices and the purchase date, so &ldquo;GV MLK 1GAL&rdquo; becomes &ldquo;Milk, 1 gal&rdquo;. Non-food lines are set aside, not deleted.</p>
+            <p>Photograph the receipt from your grocery run. mise en feast reads the items, quantities, prices and the purchase date, so &ldquo;GV MLK 1GAL&rdquo; becomes &ldquo;Milk, 1 gal&rdquo;. Non-food lines are set aside, not deleted.</p>
           </div>
         </li>
         <li class="step">
           <span class="num" aria-hidden="true">02</span>
           <div class="step-body">
             <h3>Your pantry runs itself</h3>
-            <p>Every item gets an estimate of how long it lasts in a normal household and when it goes bad. Quantities fall on their own over time, so nobody logs anything. When an estimate hits zero, Pantry asks &ldquo;Still have this?&rdquo; instead of guessing, and buying the same thing again corrects the estimate.</p>
+            <p>Every item gets an estimate of how long it lasts in a normal household and when it goes bad. Quantities fall on their own over time, so nobody logs anything. When an estimate hits zero, mise en feast asks &ldquo;Still have this?&rdquo; instead of guessing, and buying the same thing again corrects the estimate.</p>
             <figure class="panel" role="img" aria-label="Pantry rows with freshness bars: spinach, 5 ounces, 2 days left; milk, 1 gallon, 6 days left; jasmine rice, 2 pounds, about a year.">
               <div class="prow">
                 <span class="name"><strong>Spinach</strong><small>5 oz</small></span>
@@ -156,7 +156,7 @@
           <span class="num" aria-hidden="true">03</span>
           <div class="step-body">
             <h3>Swipe to dinner</h3>
-            <p>From what is in the pantry, Pantry generates dishes you can make right now, ordered by what is expiring first. Swipe right to cook, left to skip. &ldquo;I made this&rdquo; takes the ingredients out, and you can untick anything you skipped.</p>
+            <p>From what is in the pantry, mise en feast generates dishes you can make right now, ordered by what is expiring first. Swipe right to cook, left to skip. &ldquo;I made this&rdquo; takes the ingredients out, and you can untick anything you skipped.</p>
           </div>
         </li>
       </ol>
@@ -177,7 +177,7 @@
       </li>
       <li>
         <h3>Honest about uncertainty</h3>
-        <p>Shelf lives are estimates, and Pantry treats them that way. When one runs out it asks &ldquo;Still have this?&rdquo; rather than guessing, and the next receipt corrects it.</p>
+        <p>Shelf lives are estimates, and mise en feast treats them that way. When one runs out it asks &ldquo;Still have this?&rdquo; rather than guessing, and the next receipt corrects it.</p>
       </li>
     </ul>
   </section>
@@ -194,9 +194,9 @@
 
 <footer class="foot wrap">
   <div class="foot-row">
-    <a class="wordmark" href="./" aria-label="Pantry home">
-      <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><path d="M4.5 11.5h15a7.5 7.5 0 0 1-15 0z" style="fill:var(--on-accent)"/><rect x="3.5" y="10.4" width="17" height="2.4" rx="1.2" style="fill:var(--on-accent)"/><path d="M17.2 3.6l-3.6 7.2" style="stroke:var(--on-accent)" stroke-width="2.6" stroke-linecap="round"/></svg>
-      <span>Pantry</span>
+    <a class="wordmark" href="./" aria-label="mise en feast home">
+      <svg class="mark" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" style="fill:var(--accent)"/><g transform="rotate(-18 5 17)"><circle cx="12" cy="5.3" r="1.45" style="fill:var(--on-accent)"/><rect x="11.3" y="6.2" width="1.4" height="1.5" rx=".7" style="fill:var(--on-accent)"/><path d="M5.2 14a6.8 6.8 0 0 1 13.6 0z" style="fill:var(--on-accent)"/><rect x="3.9" y="13.3" width="16.2" height="1.7" rx=".85" style="fill:var(--on-accent)"/></g><circle cx="15.6" cy="16.5" r="1.45" style="fill:var(--on-accent)"/><rect x="3" y="18.6" width="18" height="2.3" rx="1.15" style="fill:var(--on-accent)"/></svg>
+      <span>mise en feast</span>
     </a>
     <nav class="foot-links" aria-label="Footer">
       <a href="app/">Open the app</a>
@@ -205,6 +205,10 @@
   </div>
   <div class="foot-row small">
     <p>Built for VTHacks14</p>
+    <a class="github" href="https://github.com/adharshjai/mise-en-feast" target="_blank" rel="noopener" aria-label="mise en feast on GitHub" title="View the source on GitHub">
+      <svg width="20" height="20" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span>GitHub</span>
+    </a>
   </div>
 </footer>
 
@@ -217,7 +221,7 @@
       const meta = user.user_metadata || {};
       const name = meta.full_name || meta.name || (user.email || '').split('@')[0] || 'You';
       const photo = /^https:/.test(meta.avatar_url || meta.picture || '') ? (meta.avatar_url || meta.picture) : '';
-      const initial = name.trim().charAt(0).toUpperCase() || 'P';
+      const initial = name.trim().charAt(0).toUpperCase() || 'M';
       const nav = document.querySelector('#nav-signin');
       if (nav) {
         const a = document.createElement('a');

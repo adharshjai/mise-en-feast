@@ -1,4 +1,4 @@
-/* Pantry landing page. Layout only: colors, materials and controls come from shared/tokens.css.
+/* mise en feast landing page. Layout only: colors, materials and controls come from shared/tokens.css.
    The dish card, badge, chips and action buttons copy the app's rules (app/styles.css) so the
    preview is the card people will see in the app. Nothing on this page moves. */
 
@@ -14,7 +14,7 @@ p { text-wrap: pretty; }
   height: 88px; display: flex; align-items: center; justify-content: space-between;
   border-bottom: 1px solid rgba(var(--ink),.08);
 }
-.wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; }
+.wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; white-space: nowrap; }
 .wordmark:hover { color: var(--text); }
 .pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; }
 
@@ -133,6 +133,10 @@ h1 em { font-style: italic; font-weight: 700; }
 .foot-links a { color: var(--text-2); font-size: 14px; font-weight: 500; padding: 4px 0; }
 .foot-links a:hover { color: var(--text); }
 .foot .small { font-size: 13px; color: var(--text-3); }
+/* Source link: the GitHub mark in the site's own green, with its label */
+.foot .github { display: inline-flex; align-items: center; gap: 7px; color: var(--accent-text); font-size: 13px; font-weight: 600; padding: 4px 0; }
+.foot .github svg { display: block; flex-shrink: 0; }
+.foot .github:hover { color: var(--accent-hover); }
 
 /* ---------- narrower screens ---------- */
 @media (max-width: 800px) {

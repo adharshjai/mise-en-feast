@@ -1,5 +1,5 @@
 -- ===========================================================================
--- Pantry — Intelligence layer (additive; does not change the frontend contract).
+-- mise en feast — Intelligence layer (additive; does not change the frontend contract).
 --
 --   consumption_profiles : per-household learned consumption rate
 --   checkin_item(...)     : "do you still have this?" — corrects the item AND

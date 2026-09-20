@@ -1,5 +1,5 @@
 -- ===========================================================================
--- Pantry — Base schema (matches the frontend's data layer: frontend/shared/store.js)
+-- mise en feast — Base schema (matches the frontend's data layer: frontend/shared/store.js)
 --
 -- Tables the frontend reads/writes directly:
 --   pantry_items, app_state, receipts, recipes, cook_log

@@ -31,6 +31,7 @@ from recipes import (  # reuse the deck's contract + prompt blocks; recipes.py i
     _pantry_lines,
     _preferences,
     rank,
+    servings_rule,
 )
 
 SYSTEM = (
@@ -128,7 +129,10 @@ def _build_prompt(req: RecipeRequest, spares: int) -> str:
     food = [i for i in req.items if i.is_food and i.quantity_servings > 0]
     preference = f"\nThe cook asked for: {req.request.strip()}" if req.request and req.request.strip() else ""
     hard_rules = _hard_rules(req.prefs) if req.prefs else ""
-    preferences = _preferences(req.prefs) if req.prefs else ""
+    # The household-size rule is always stated exactly once, even without prefs (then it
+    # is 2), so the household size the cards are labelled with is the one the amounts were
+    # written for: inside the preferences block, or alone when there is no block.
+    preferences = _preferences(req.prefs) if req.prefs else "\n" + servings_rule(None) + "\n"
     return PROMPT.format(
         pantry=_pantry_lines(food),
         want=min(req.count + max(0, spares), 12),

@@ -5,17 +5,51 @@
 body { overflow: hidden; }
 /* The layout grid is on .app, not <body>: browser extensions inject elements into <body>,
    and as grid items they would claim the first row and push the whole app down. */
-.app { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 88px minmax(0, 1fr); }
+/* Two rows: the top bar (which grows by a row when the section tabs move under it, see the
+   1100px query) and the stage. */
+.app { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
 
 /* ---------- top bar ---------- */
+/* Three columns: the wordmark, the section tabs, the right cluster. The side columns are never
+   narrower than what they hold, so the capsule cannot end up under the cluster however wide the
+   Tonight pill gets; with room to spare they are equal and the capsule sits on the page's centre
+   line. (An absolutely centred capsule used to paint over the Tonight pill between 900 and 1450px.) */
 .topbar {
   position: relative; z-index: 5;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 40px;
+  display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); grid-template-rows: 88px;
+  align-items: center; column-gap: 12px; padding: 0 40px;
 }
-.wordmark { display: flex; align-items: center; gap: 10px; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; }
+.wordmark { grid-column: 1; grid-row: 1; justify-self: start; display: flex; align-items: center; gap: 10px; white-space: nowrap; color: var(--text); font-weight: 800; font-size: 19px; letter-spacing: -.035em; }
 .wordmark:hover { color: var(--text); }
-/* the nav capsule keeps the right edge; the avatar sits after it */
-.pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; margin-left: auto; }
+.pillbar { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 999px; }
+/* The right cluster: the capsule, then each standalone 40px circle, on one axis with equal gaps.
+   Only the Tonight pill gives up width when the bar is short of room (see .pill.tonight). */
+.topright { grid-column: 3; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: 12px; }
+.topright > * { flex-shrink: 0; }
+.topright > .pillbar { flex-shrink: 1; min-width: 0; }
+/* an inline SVG sits on the text baseline; as a block it is centred by the flex box */
+.circle > svg, .pill > svg { display: block; }
+
+/* ---------- section tabs: Curated · Explore · Pantry · Shopping List ---------- */
+.tabs { grid-column: 2; grid-row: 1; gap: 2px; min-width: 0; }
+.tab {
+  height: 40px; padding: 0 14px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2);
+  font-size: 14px; font-weight: 600; white-space: nowrap; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+}
+.tab:hover { color: var(--text); background: rgba(var(--ink), .06); }
+/* the active tab is the emerald fill of a prominent pill: the same bevel, without its drop shadow
+   (it sits inside the capsule) */
+.tab[aria-selected="true"], .tab[aria-selected="true"]:hover {
+  background: var(--accent); color: var(--on-accent);
+  box-shadow: inset 0 1px 0 var(--accent-hi), inset 0 -2px 6px var(--accent-lo), 0 1px 2px rgba(var(--shadow), calc(.35 * var(--shadow-k)));
+}
+.tab-count {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: rgba(var(--ink), .10); color: var(--text-2);
+  font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+}
+.tab[aria-selected="true"] .tab-count { background: rgba(var(--on-accent-rgb), .22); color: inherit; }
 /* Account avatar: a glass ring around the photo, or the initial / a person icon on the glass */
 .avatar {
   position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -24,14 +58,29 @@ body { overflow: hidden; }
 }
 .avatar img { position: absolute; inset: 2px; width: calc(100% - 4px); height: calc(100% - 4px); border-radius: 50%; object-fit: cover; pointer-events: none; }
 .avatar.lg { width: 48px; height: 48px; font-size: 19px; }
-/* Tonight: the dishes picked from the deck, left of the item count */
-.pill.tonight { max-width: 240px; padding: 0 14px 0 12px; }
-.pill.tonight span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Tonight: the dishes picked from the deck, left of Scan. It is the one thing in the bar that
+   yields: it shrinks (never below the word "Tonight") before anything else moves, and only
+   takes its full width when the capsule can still sit centred beside it. */
+.pill.tonight { max-width: 150px; min-width: 112px; flex: 0 1 auto; padding: 0 14px 0 12px; }
+.pill.tonight > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-width: 1500px) { .pill.tonight { max-width: 240px; } }
+/* the last stretch where the capsule still shares the bar: only the word, so the cluster stays
+   inside its half and the capsule within ~25px of the centre line (measured: 64px with the dish) */
+@media (min-width: 1101px) and (max-width: 1300px) { .pill.tonight .t-dish { display: none; } }
 .pill.tonight svg { color: var(--accent-text); flex-shrink: 0; }
 
 /* ---------- stage ---------- */
 .stage { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; min-width: 0; }
 .screen { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding-bottom: 8px; transform: scale(var(--fit, 1)); transform-origin: center center; }
+/* Page screens (Pantry, Shopping List) are a plain scrolling column, never scaled by --fit.
+   margin-bottom:auto keeps a short page at the top of the centred stage. */
+.screen.page {
+  width: min(720px, 100% - 32px); max-height: 100%; overflow: auto; transform: none;
+  /* 10px at the sides is where a row's hover background bleeds to (.prow has -10px margins);
+     without it a short page scrolls sideways by that much */
+  align-items: stretch; justify-content: flex-start; gap: 0; padding: 8px 10px 40px; margin-bottom: auto;
+  scrollbar-width: thin; scrollbar-color: rgba(var(--ink),.18) transparent;
+}
 .caption { font-size: 13px; color: var(--text-3); }
 .foot { display: flex; align-items: center; justify-content: flex-end; padding: 0 40px; position: relative; z-index: 1; }
 
@@ -54,20 +103,29 @@ body { overflow: hidden; }
 .card.enter { animation: card-in .55s var(--ease) backwards; }
 .card-img { position: relative; height: 320px; flex-shrink: 0; background: var(--img-ph); }
 .card-img img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
-.card-body { display: flex; flex-direction: column; gap: 12px; padding: 20px 24px 22px; flex-grow: 1; min-height: 0; }
+.card-body { display: flex; flex-direction: column; gap: 10px; padding: 18px 24px 20px; flex-grow: 1; min-height: 0; overflow: hidden; }
+/* The title never gives up height to the rows below it: a long name shrinks its type
+   instead of losing its second line, and the chips are what get clipped if anything does. */
 .card-body h2 {
-  font-size: 34px; line-height: 1.02; letter-spacing: -.03em; font-weight: 800;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  flex-shrink: 0; font-size: 32px; line-height: 1.08; letter-spacing: -.03em; font-weight: 800;
+  /* .08em keeps the clip edge under Outfit's deepest descenders (g j p q y) on the last line */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; padding-bottom: .08em;
 }
+.card-body h2.long { font-size: 27px; }
+.card-body .meta, .card-body .stats, .card-body .missing-line { flex-shrink: 0; }
 .meta { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-2); }
 .meta i { width: 3px; height: 3px; border-radius: 50%; background: var(--text-2); flex-shrink: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.card-body .chips { flex: 0 1 auto; min-height: 0; overflow: hidden; }
 .chip {
   display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border-radius: 999px;
   font-size: 13px; font-weight: 500;
 }
 .chip.have { background: rgba(var(--ink),.10); color: var(--text); padding-left: 8px; }
 .chip.missing { border: 1px dashed rgba(var(--ink),.35); color: var(--text-2); }
+/* in the pantry, but not enough of it: a yellow dot, like the running-low bar */
+.chip.low { background: rgba(var(--yellow-rgb),.16); color: var(--text); padding-left: 9px; }
+.chip.low .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--yellow); flex-shrink: 0; }
 /* something they'd rather not eat: the dish stays, the chip says what it has */
 .chip.warn { background: rgba(var(--ink),.06); color: var(--text-2); padding-left: 9px; }
 .chip.warn .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }   /* neutral: the freshness colours stay on freshness */
@@ -100,6 +158,9 @@ body { overflow: hidden; }
 
 .actions { display: flex; align-items: flex-start; gap: 36px; }
 .action { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* Undo with nothing to bring back */
+.circle:disabled { opacity: .4; cursor: default; }
+.circle:disabled:hover { transform: none; background: var(--glass-bg); }
 .hint { font-size: 11px; color: var(--text-3); letter-spacing: .02em; }
 
 /* ---------- empty / end states ---------- */
@@ -124,13 +185,13 @@ body { overflow: hidden; }
 .drop.over { border-width: 2px; }
 
 /* ---------- veil / sheet ---------- */
-/* Sheets and the panel hold reading content, so their glass carries a denser tint. */
-.sheet.glass, .panel.glass {
+/* Sheets hold reading content, so their glass carries a denser tint. */
+.sheet.glass {
   background: var(--sheet-bg);
   -webkit-backdrop-filter: blur(40px) saturate(160%);
   backdrop-filter: blur(40px) saturate(160%);
 }
-.sheet:focus, .panel:focus { outline: none; }
+.sheet:focus { outline: none; }
 .veil { position: fixed; inset: 0; z-index: 20; background: var(--veil); opacity: 0; transition: opacity .25s ease; }
 .veil.in { opacity: 1; }
 .sheet {
@@ -237,8 +298,14 @@ button.rrow { background: none; border: 0; padding: 0; text-align: left; cursor:
 .ing.have .mark { background: rgba(var(--ink),.12); }
 .ing.need .mark { border: 1.5px dashed rgba(var(--ink),.35); }
 .ing.need { color: var(--text-2); }
+/* some in the pantry, not enough: the yellow dot from the card chip */
+.ing.low .mark::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--yellow); }
+.ing.low .mark { background: rgba(var(--yellow-rgb),.16); }
 .ing .n { flex-grow: 1; font-weight: 500; }
 .ing .a { font-size: 14px; color: var(--text-2); }
+.ing .a small { font-size: 12px; color: var(--text-3); }
+/* under the people stepper: the recipe's own yield, only when it differs */
+.serv-note { font-size: 12px; color: var(--text-3); grid-column: 1 / -1; padding: 0 16px; margin-top: -6px; }
 .divider { display: flex; align-items: center; gap: 10px; padding-top: 6px; }
 .divider::before, .divider::after { content: ""; flex-grow: 1; height: 1px; background: rgba(var(--ink),.10); }
 .divider span { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
@@ -356,22 +423,15 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 .choice.desc strong { font-weight: 600; }
 .choice.desc small { font-size: 13px; font-weight: 400; color: var(--text-2); }
 
-/* ---------- pantry panel ---------- */
-.panel {
-  position: fixed; top: 0; right: 0; z-index: 30; width: 420px; height: 100vh; height: 100dvh;
-  border-radius: 28px 0 0 28px; display: flex; flex-direction: column;
-  transform: translateX(105%); visibility: hidden;
-  transition: transform .4s var(--ease), visibility 0s linear .4s;   /* hide after the slide-out */
-}
-.panel.in { transform: none; visibility: visible; transition-delay: 0s; }
-.panel-head { display: flex; align-items: center; gap: 10px; padding: 24px 20px 12px 28px; }
+/* ---------- pantry page (and the shopping list, which reuses the head/body/foot) ---------- */
+.panel-head { display: flex; align-items: center; gap: 10px; padding: 12px 0 12px; }
 .panel-head h2 { font-size: 24px; font-weight: 700; letter-spacing: -.02em; }
 .panel-head .count { font-size: 14px; color: var(--text-2); }
-.add-form { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 20px 12px 28px; }
+.add-form { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 12px; }
 .add-form #add-name { flex: 1 1 140px; }
 .add-form .field.short, .add-form .field.unit { flex: 0 0 auto; }
 .field.unit { width: 88px; }
-.panel-body { flex-grow: 1; padding: 4px 20px 28px 28px; display: flex; flex-direction: column; }
+.panel-body { flex-grow: 1; padding: 4px 0 28px; display: flex; flex-direction: column; }
 .checkin { border-radius: 18px; background: rgba(var(--accent-rgb),.10); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb),.28); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; margin-bottom: 8px; }
 .checkin .eyebrow { color: var(--accent-text); }
 .checkin .item { display: flex; flex-direction: column; gap: 2px; }
@@ -409,7 +469,7 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 /* Sits in the empty middle of the top bar, where nothing is laid out. Always in the
    accessibility tree (never display:none) so role=status announcements land. */
 .toast {
-  position: fixed; left: 50%; top: 96px; bottom: auto; z-index: 40; transform: translateX(-50%) translateY(-12px); opacity: 0;   /* just under the top bar, clear of the Tonight pill */
+  position: fixed; left: 50%; top: calc(var(--topbar-h, 88px) + 8px); bottom: auto; z-index: 40; transform: translateX(-50%) translateY(-12px); opacity: 0;   /* just under the top bar (fit() measures it, tab row included), clear of the Tonight pill */
   pointer-events: none;
   display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 10px 20px 10px 12px; border-radius: 999px;
   font-size: 14px; font-weight: 500; transition: transform .35s var(--spring), opacity .2s ease;
@@ -432,10 +492,25 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 }
 
 /* ---------- small screens: keep the column usable ---------- */
-@media (max-width: 1100px) {
+/* the tabs still share the top bar down to 1100px: tighter gutters and tabs keep the capsule
+   near the centre line while the cluster takes more than its half */
+@media (max-width: 1200px) {
   .topbar, .foot { padding: 0 20px; }
-  .panel { width: min(420px, 100vw); }
+  .tab { padding: 0 11px; font-size: 13px; }
+}
+@media (max-width: 1100px) {
   .detail-body { grid-template-columns: 1fr; }
+  /* The tab row moves under the top bar (fit() reads the bar's height for the deck's room). The
+     bar is now two columns; the right one can be narrower than the cluster, which then squeezes
+     its Tonight pill rather than overflowing. */
+  .topbar { grid-template-columns: max-content minmax(0, 1fr); grid-template-rows: 88px auto; }
+  .topright { grid-column: 2; justify-self: stretch; justify-content: flex-end; min-width: 0; }
+  .tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; margin: 0 0 8px; max-width: 100%; }
+  .pill.tonight { max-width: 240px; }
+}
+/* the mark alone is the wordmark once the bar cannot hold the word and a full Tonight pill */
+@media (max-width: 600px) {
+  .wordmark span { display: none; }
 }
 /* phones: the receipt preview and its step list stack instead of sharing a 310px row */
 @media (max-width: 640px) {
@@ -460,10 +535,21 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
   .result-foot .pill { flex: 1 1 auto; }
   .result-foot .linkish { width: 100%; text-align: center; }
 }
-/* narrow phones: the top bar has five things in a row; the wordmark keeps its mark and drops the word */
+/* narrow phones: the top bar has six things in a row and 335px to put them in. Tonight keeps
+   its word and drops the dish, Scan keeps its camera (aria-label carries the name); the four
+   tabs and their badges tighten up. The cluster's 12px gaps become 8px here on purpose: with
+   44px touch circles the cluster needs ~352px at 8px and ~368px at 12px, and a 360px phone
+   only has 320px between its gutters. */
 @media (max-width: 480px) {
-  .topbar { gap: 8px; }
-  .wordmark span { display: none; }
+  .topbar { column-gap: 8px; }
+  .topright { gap: 8px; }
+  .pill.tonight { max-width: none; min-width: 0; padding: 0 12px; }
+  .pill.tonight svg, .pill.tonight .t-dish { display: none; }
+  .pill.scan { padding: 0 12px; }
+  .pill.scan span { display: none; }
+  .tabs { gap: 1px; padding: 4px; }
+  .tab { padding: 0 8px; font-size: 12.5px; gap: 5px; }
+  .tab-count { min-width: 18px; height: 18px; padding: 0 5px; font-size: 11px; }
 }
 
 /* ---------- touch: no hover to reveal, bigger targets ---------- */
@@ -473,6 +559,8 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 @media (pointer: coarse) {
   .linkish { min-height: 44px; padding: 0 8px; }
   .pill.sm, .circle.sm, .rrow .del, .prow .del { min-width: 44px; min-height: 44px; }
+  /* the avatar grows with the Saved and Week circles beside it, so the three still match */
+  .topright .avatar { width: 44px; height: 44px; }
 }
 
 /* deck sort control + recipe stats (nutrition & cost) */
@@ -498,8 +586,11 @@ a.prominent, a.prominent:hover { color: var(--on-accent); }
 .msg b, .msg strong { font-weight: 600; }
 .chat-open { display: inline-block; margin-top: 8px; padding: 5px 12px; border-radius: 999px; border: 0; background: var(--accent); color: var(--on-accent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
 .chat-recipes { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.chat-recipe { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 9px 12px; border-radius: 12px; border: 0; background: rgba(255,255,255,.08); box-shadow: inset 0 0 0 1px rgba(255,122,26,.28); color: inherit; font: inherit; cursor: pointer; transition: background .12s ease; }
-.chat-recipe:hover, .chat-recipe:focus-visible { background: rgba(255,122,26,.16); outline: none; }
+/* a recipe card in a reply: a small thumb, then the name and a one-line summary */
+.chat-recipe { display: flex; align-items: center; gap: 10px; text-align: left; padding: 8px 10px; border-radius: 12px; border: 0; background: rgba(var(--ink),.04); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb),.28); color: inherit; font: inherit; cursor: pointer; transition: background .12s ease; }
+.chat-recipe:hover, .chat-recipe:focus-visible { background: rgba(var(--accent-rgb),.14); outline: none; }
+.chat-recipe .chat-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.chat-thumb { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; flex-shrink: 0; background: var(--img-ph); }
 .chat-recipe strong { font-size: 14px; font-weight: 600; }
 .chat-recipe small { color: var(--text-2); font-size: 12px; }
 .chat-form { display: flex; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid rgba(var(--ink),.08); }
@@ -569,8 +660,7 @@ select.field option { background: var(--surface); color: var(--text); }
 .amt-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .amt-out { min-width: 66px; text-align: right; font-size: 13px; font-weight: 600; color: var(--accent-text); }
 
-/* topbar right cluster + account/profile menu */
-.topright { display: flex; align-items: center; gap: 10px; }
+/* account/profile menu (the .topright cluster itself is with the top bar rules) */
 .profile { position: relative; }
 .avatar { color: var(--text); }
 .profile .menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 45; min-width: 190px; padding: 6px; border-radius: 14px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 12px 32px rgba(var(--shadow), calc(.45 * var(--shadow-k))); }
@@ -596,8 +686,74 @@ select.field option { background: var(--surface); color: var(--text); }
 .fresh.amt-yellow .pct, .fresh.amt-yellow .exp { color: var(--yellow-text); }
 .fresh.amt-red .pct, .fresh.amt-red .exp { color: var(--red); }
 
-/* clear-pantry lives in the panel footer now */
-.panel-foot { padding: 10px 28px 16px; border-top: 1px solid rgba(var(--ink),.07); }
+/* clear-pantry lives in the page footer */
+.panel-foot { padding: 10px 0 16px; border-top: 1px solid rgba(var(--ink),.07); }
+
+/* ---------- shopping list: the pantry page's rows, with a check instead of a bar ---------- */
+.shop-foot { display: flex; align-items: center; gap: 12px; }
+/* the check is the made-it sheet's box, as a button */
+.shop-chk {
+  width: 22px; height: 22px; padding: 0; margin: 0; flex-shrink: 0; border-radius: 7px; cursor: pointer;
+  border: 1.5px solid rgba(var(--ink),.35); background: rgba(var(--ink),.04); color: var(--on-accent);
+  display: inline-grid; place-content: center; transition: background .15s ease, border-color .15s ease;
+}
+.shop-chk svg { display: block; opacity: 0; transition: opacity .15s ease; }
+.shop-chk:hover { border-color: rgba(var(--ink),.55); }
+.shop-chk[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.shop-chk[aria-checked="true"] svg { opacity: 1; }
+.prow.shop .name strong { overflow-wrap: anywhere; }
+/* bought: dimmed by colour, not opacity, so nothing drops below --text-3 */
+.prow.shop.done .name strong { color: var(--text-2); text-decoration: line-through; }
+.prow.shop.done .name small { color: var(--text-3); }
+/* under a recipe's "You'll need": the offer, or the note that it is already on the list */
+.shop-add { align-self: flex-start; }
+.shop-add.listed { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); padding: 2px 0; }
+
+/* ---------- this week: seven rows of breakfast, lunch, dinner ---------- */
+.plan-body { gap: 12px; }
+.plan-grid { display: grid; grid-template-columns: 56px repeat(3, minmax(0, 1fr)); gap: 6px; align-items: stretch; }
+.plan-hdr { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); padding: 0 4px 4px; }
+.plan-day { display: flex; flex-direction: column; justify-content: center; gap: 1px; padding: 0 4px; }
+.plan-day strong { font-size: 14px; font-weight: 700; }
+.plan-day small { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.plan-day.today strong { color: var(--accent-text); }
+/* a cell is content, not navigation: a quiet tint, no glass */
+.plan-cell {
+  display: flex; align-items: center; gap: 10px; min-height: 64px; min-width: 0; padding: 8px 10px;
+  border: 0; border-radius: 14px; background: rgba(var(--ink),.045); color: inherit; font: inherit; text-align: left; cursor: pointer;
+  transition: background .15s ease, transform .18s var(--spring);
+}
+.plan-cell:hover, .plan-cell:focus-visible { background: rgba(var(--ink),.085); transform: translateY(-1px); }
+.plan-cell.empty { cursor: default; color: var(--text-3); }
+.plan-cell.empty:hover { background: rgba(var(--ink),.045); transform: none; }
+.plan-cell .thumb.sm { width: 40px; height: 40px; border-radius: 10px; }
+.plan-cell .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.plan-cell .slot { display: none; }
+.plan-cell strong { font-size: 13px; font-weight: 600; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.plan-cell small { font-size: 11px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* days already gone stay legible but step back */
+.plan-day.past strong, .plan-cell.past strong { color: var(--text-2); }
+.plan-cell.past { background: rgba(var(--ink),.03); }
+.plan-note { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 48px 0; font-size: 14px; color: var(--text-2); text-align: center; }
+.plan-err { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 28px 0; text-align: center; color: var(--text-2); }
+.plan-err-line { font-size: 13px; color: var(--text-2); }
+.plan-foot { flex-wrap: wrap; }
+.plan-foot .pill svg { flex-shrink: 0; }
+/* nothing to add to yet, or a week still being planned */
+.plan-foot .pill:disabled, .plan-foot .linkish:disabled { opacity: .4; cursor: default; }
+.plan-foot .pill:disabled:hover { transform: none; }
+/* the subtitle's three facts wrap as whole phrases on a narrow sheet */
+.plan-sub { flex-wrap: wrap; row-gap: 2px; }
+.plan-sub span { white-space: nowrap; }
+/* the week on a phone: one column, the day as a heading, each cell naming its meal
+   (after the base rules above, so these win at the same specificity) */
+@media (max-width: 640px) {
+  .plan-grid { grid-template-columns: 1fr; gap: 6px; }
+  .plan-hdr { display: none; }
+  .plan-day { flex-direction: row; align-items: baseline; gap: 8px; padding: 12px 4px 2px; }
+  .plan-cell .slot { display: block; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+  .plan-foot .pill { flex: 1 1 auto; justify-content: center; }
+}
 
 /* ---------- difficulty rating: three bars, filled to the level ---------- */
 .diff { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -620,5 +776,4 @@ select.field option { background: var(--surface); color: var(--text); }
 .choose .option small { font-size: 13px; color: var(--text-2); line-height: 1.4; }
 .choose .option .go { color: var(--text-3); flex-shrink: 0; }
 
-.recipe-notice { font-size: 13px; color: var(--text-2); text-align: center; margin: 0 0 12px; }
 .chat-source { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }

@@ -1,5 +1,5 @@
 """
-Recipe generation for Pantry: Gemini writes the dishes, we rank them.
+Recipe generation for mise en feast: Gemini writes the dishes, we rank them.
 
 Two model calls, not one. The first asks only for dish ideas — a title, the one
 pantry item the dish is built around, and a line on why it is worth cooking
@@ -518,10 +518,17 @@ def _hard_rules(prefs: Prefs) -> str:
     )
 
 
+def servings_rule(prefs: Prefs | None) -> str:
+    """The one prompt line that sizes every dish for the household. Part of _preferences()
+    when there are prefs; the callers emit it on its own when there are none, so it is
+    stated exactly once either way."""
+    n = servings_target(prefs)
+    return f"- Make every dish serve {n}: set servings = {n} and size the amounts for {n} people."
+
+
 def _preferences(prefs: Prefs) -> str:
     """Servings, cuisines, time, skill, equipment, dislikes: the block the model should favour."""
-    n = servings_target(prefs)
-    lines = [f"- Make every dish serve {n}: set servings = {n} and size the amounts for {n} people."]
+    lines = [servings_rule(prefs)]
     if prefs.cuisines:
         lines.append(f"- Cuisines they enjoy: {_join(prefs.cuisines)}. Favour these styles, but do not restrict every dish to them.")
     if prefs.max_minutes > 0:
@@ -726,6 +733,68 @@ def _match(ingredient: dict, pantry: dict[str, PantryItem]) -> PantryItem | None
     return best if best_score > 0.5 else None
 
 
+def _annotate(r: dict, pantry: dict[str, PantryItem], allergies: list[str], diets: list[str]) -> dict | None:
+    """The core of annotate() and rank(): pantry already normalised, prefs already split.
+
+    Mutates `r` in place (each ingredient gets have/staple/matched_name, the recipe
+    gets missing_count/coverage/urgency_days/uses_expiring) and returns it, or None
+    when the dish trips an allergy or breaks a diet.
+    """
+    have = missing = 0
+    urgency = 999
+    expiring: list[str] = []
+    for ing in r.get("ingredients", []):
+        if ing.get("staple") or is_staple(ing.get("name", "")):
+            ing["staple"] = True
+            ing["have"] = True
+            continue
+        item = _match(ing, pantry) if pantry else None
+        if item is None and not pantry and ing.get("matched_name"):
+            item = PantryItem(name=ing["matched_name"])  # trust the model when we were not given a pantry
+        if item is not None:
+            ing["have"] = True
+            ing["matched_name"] = item.name
+            have += 1
+            urgency = min(urgency, item.days_left)
+            if item.days_left <= 5 and item.name not in expiring:
+                expiring.append(item.name)
+        else:
+            ing["have"] = False
+            missing += 1
+
+    if allergies or diets:
+        names = []
+        for ing in r.get("ingredients", []):
+            names.append(ing.get("name", ""))
+            names.append(ing.get("matched_name", ""))
+        # Unsafe or off-diet for this household, whatever the model said.
+        if allergies and ingredient_hits(names, allergies):
+            return None
+        if diets and diet_conflicts(names, diets):
+            return None
+
+    r["missing_count"] = missing
+    r["coverage"] = round(have / max(have + missing, 1), 3)
+    r["urgency_days"] = urgency
+    r["uses_expiring"] = expiring or list(r.get("uses_expiring", []) or [])
+    return r
+
+
+def annotate(recipe: dict, items: list[PantryItem] | None = None, prefs: Prefs | None = None) -> dict | None:
+    """Mark one recipe's ingredients against the pantry, without filtering it.
+
+    Sets `have` (and `staple`, `matched_name`) on every ingredient and
+    `missing_count`, `coverage`, `urgency_days`, `uses_expiring` on the recipe,
+    using the same matching rank() uses, so a meal-plan cell and a deck card
+    agree on what you own. Returns the same dict, or None when the dish trips
+    one of the household's allergies or breaks its diet (staples included).
+    """
+    pantry = {_norm(i.name): i for i in (items or []) if i.is_food}
+    allergies = list(prefs.allergies) if prefs else []
+    diets = list(prefs.diet) if prefs else []
+    return _annotate(recipe, pantry, allergies, diets)
+
+
 def rank(
     recipes: list[dict],
     max_missing: int,
@@ -737,7 +806,8 @@ def rank(
     With `prefs`, any dish whose ingredients trip one of the household's
     allergies, or break its diet, is dropped outright (staples included:
     "butter" or "sesame oil" marked as a staple is still the allergen), so a
-    model slip never reaches the client.
+    model slip never reaches the client. Dishes that use nothing from the
+    pantry, or need more than `max_missing`, are dropped too.
     """
     pantry = {_norm(i.name): i for i in (items or []) if i.is_food}
     allergies = list(prefs.allergies) if prefs else []
@@ -751,46 +821,11 @@ def rank(
             continue
         seen_titles.add(title_key)
 
-        have = missing = 0
-        urgency = 999
-        expiring: list[str] = []
-        for ing in r.get("ingredients", []):
-            if ing.get("staple") or is_staple(ing.get("name", "")):
-                ing["staple"] = True
-                ing["have"] = True
-                continue
-            item = _match(ing, pantry) if pantry else None
-            if item is None and not pantry and ing.get("matched_name"):
-                item = PantryItem(name=ing["matched_name"])  # trust the model when we were not given a pantry
-            if item is not None:
-                ing["have"] = True
-                ing["matched_name"] = item.name
-                have += 1
-                urgency = min(urgency, item.days_left)
-                if item.days_left <= 5 and item.name not in expiring:
-                    expiring.append(item.name)
-            else:
-                ing["have"] = False
-                missing += 1
-
-        if have == 0 or missing > max_missing:
+        if _annotate(r, pantry, allergies, diets) is None:
             continue
-
-        if allergies or diets:
-            names = []
-            for ing in r.get("ingredients", []):
-                names.append(ing.get("name", ""))
-                names.append(ing.get("matched_name", ""))
-            # Unsafe or off-diet for this household, whatever the model said.
-            if allergies and ingredient_hits(names, allergies):
-                continue
-            if diets and diet_conflicts(names, diets):
-                continue
-
-        r["missing_count"] = missing
-        r["coverage"] = round(have / max(have + missing, 1), 3)
-        r["urgency_days"] = urgency
-        r["uses_expiring"] = expiring or list(r.get("uses_expiring", []) or [])
+        have = sum(1 for ing in r.get("ingredients", []) if ing.get("have") and not ing.get("staple"))
+        if have == 0 or r["missing_count"] > max_missing:
+            continue
         ranked.append(r)
 
     ranked.sort(key=lambda r: (r["urgency_days"], r["missing_count"], -r["coverage"], r.get("cook_minutes", 0)))

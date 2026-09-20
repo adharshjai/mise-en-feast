@@ -1,5 +1,5 @@
 """
-Pantry chatbot — Claude (Bedrock) with a small set of controlled app tools.
+mise en feast chatbot — Claude (Bedrock) with a small set of controlled app tools.
 
 The assistant can reason about the user's pantry, expiring food, preferences and
 recent meals, and can request safe changes. It does NOT get database access.
@@ -15,7 +15,8 @@ Contract with the frontend (frontend/shared/api.js -> chat, app.js -> handleChat
         messages:      [ { role: 'user'|'assistant', content: str } ],   # the turn history
         pantry:        [ PantryItem ],   # same shape /recipes takes (pantryForApi)
         prefs:         Prefs | null,     # the v2 preferences object
-        recent_meals:  [ { title, cooked_at? } ]   # optional, newest first
+        recent_meals:  [ { title, cooked_at? } ],  # optional, newest first
+        shopping:      [ { name, quantity?, unit?, done? } ]   # the shopping list, optional
       }
     ->
       {
@@ -29,6 +30,15 @@ Actions the client knows how to apply:
     { type: 'update_preference', field, value }        # field/value validated here
     { type: 'mark_food_gone',    id?, name, key? }      # resolved to a pantry item
     { type: 'record_checkin',    id?, name, key?, percent }   # percent 0..100
+    { type: 'add_pantry_items',  items: [ { name, quantity, unit, expires_in_days } ] }
+    { type: 'add_shopping_items',    items: [ { name, quantity, unit, note } ] }
+    { type: 'remove_shopping_items', names: [ str ] }   # names as they read on the list
+
+In the add_* actions `quantity` is a number > 0 or null, `unit` is one of
+g, kg, ml, l, pcs, pack or "" (imperial and packaging words are converted here,
+see _clean_unit), `expires_in_days` is 1..730 or null and `note` is free text.
+remove_shopping_items only carries names that matched an item in `shopping`,
+so the client never has to guess what the model meant.
 
 Reads never produce actions. The deterministic layers (decay, expiration,
 consumption-rate learning) stay in the frontend / SQL exactly as before; the
@@ -37,6 +47,7 @@ chatbot only triggers them, it never recomputes them.
 
 from __future__ import annotations
 
+import math
 import re
 
 from fastapi import HTTPException
@@ -69,14 +80,24 @@ class Meal(BaseModel):
     cooked_at: str = ""
 
 
+class ShoppingItem(BaseModel):
+    """One row of the client's shopping list, as much of it as the assistant needs."""
+
+    name: str
+    quantity: float | None = None
+    unit: str = ""
+    done: bool = False
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
     pantry: list[PantryItem] = Field(default_factory=list)
     prefs: Prefs | None = None
     recent_meals: list[Meal] = Field(default_factory=list)
+    shopping: list[ShoppingItem] = Field(default_factory=list)
 
 
-SYSTEM = """You are the in-app assistant for Pantry, an app that tracks what food a
+SYSTEM = """You are the in-app assistant for mise en feast, an app that tracks what food a
 household has, what is expiring, their dietary preferences, and what they have cooked.
 
 You can call tools to read the pantry, expiring food, preferences and recent meals,
@@ -90,13 +111,21 @@ When the user tells you something actionable, take the action AND confirm it pla
   the percentage REMAINING (30% gone means 70 remaining).
 - "I don't like seafood" / "we went vegetarian" / "no more than 30 minutes" ->
   update_preference.
+- "add eggs to my pantry" / "I bought 2 lb of chicken thighs" / "we picked up milk and
+  bread" -> add_pantry_items (one call with every item; pass the quantity and unit the
+  user said, and expires_in_days only if they said when it goes off).
+- "put lemons on my shopping list" / "I need to buy rice" / "remind me to get butter"
+  -> add_to_shopping_list.
+- "take milk off the list" / "I got the eggs, remove them" -> remove_from_shopping_list.
+- "what's on my list?" / "what do I still need to buy?" -> read_shopping_list.
 
 For "what can I make ..." questions, call suggest_recipes directly and immediately — it
 already receives the full pantry and preferences, so do NOT call read_pantry or
 get_expiring first. The recipes it returns are shown to the user as tappable cards.
 
 Be concise, friendly and specific. Never invent pantry items the user does not have. Do
-not claim you changed something unless you called the tool for it."""
+not claim you changed something unless you called the tool for it: never say an item was
+added to the pantry or the list, or removed, without the matching tool call in this turn."""
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +244,97 @@ TOOLS = [
             },
         }
     },
+    {
+        "toolSpec": {
+            "name": "read_shopping_list",
+            "description": "List what is on the household's shopping list, with quantities and whether each item is already bought.",
+            "inputSchema": {"json": {"type": "object", "properties": {}}},
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "add_pantry_items",
+            "description": (
+                "Add food the user has bought or already has to the pantry. Use it when they say "
+                "they bought, got, picked up or have something, or ask to add it to the pantry. "
+                "One call with every item mentioned. Pass quantity and unit only when the user "
+                "gave them (any unit is fine: lb, oz, dozen, bag, pack, g, ml...), and "
+                "expires_in_days only when they said when it goes off."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "description": "The foods to add.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "The food, e.g. 'chicken thighs'."},
+                                    "quantity": {"type": "number", "description": "How much, if the user said. Omit otherwise."},
+                                    "unit": {"type": "string", "description": "The unit the user used, e.g. 'lb', 'dozen', 'bag'. Omit otherwise."},
+                                    "expires_in_days": {"type": "integer", "description": "Days until it goes off, only if the user said."},
+                                },
+                                "required": ["name"],
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "add_to_shopping_list",
+            "description": (
+                "Put items on the household's shopping list. Use it when the user needs to buy "
+                "something, wants a reminder to get it, or asks to add it to the list. One call "
+                "with every item mentioned; quantity and unit only when given."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "description": "The things to buy.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "The item, e.g. 'lemons'."},
+                                    "quantity": {"type": "number", "description": "How much, if the user said."},
+                                    "unit": {"type": "string", "description": "The unit the user used, if any."},
+                                    "note": {"type": "string", "description": "A short note, e.g. 'for the curry'. Optional."},
+                                },
+                                "required": ["name"],
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                }
+            },
+        }
+    },
+    {
+        "toolSpec": {
+            "name": "remove_from_shopping_list",
+            "description": (
+                "Take items off the shopping list. Pass the item names the user mentioned; the "
+                "result says which ones were on the list and which were not."
+            ),
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "names": {"type": "array", "items": {"type": "string"}, "description": "The items to remove."}
+                    },
+                    "required": ["names"],
+                }
+            },
+        }
+    },
 ]
 
 
@@ -229,28 +349,48 @@ def _norm(s: str) -> str:
     return " ".join(_WORD.findall((s or "").lower()))
 
 
-def _match_item(name: str, pantry: list[PantryItem]) -> PantryItem | None:
-    """Best pantry item for a free-text food name: exact, then substring, then token overlap."""
+def _best_match(name: str, candidates: list[tuple[list[str], object]]):
+    """Best candidate for a free-text food name: exact, then substring, then token overlap.
+
+    Each candidate is ([names it answers to], value): the first name is the display
+    name and drives the substring and overlap passes, any extra names (a group_key)
+    only count as exact hits. Shared by the pantry and shopping-list lookups so
+    "take milk off the list" and "we're out of milk" resolve the same way."""
     q = _norm(name)
     if not q:
         return None
-    food = [i for i in pantry if i.is_food]
-    for it in food:
-        if _norm(it.name) == q or _norm(it.group_key) == q:
-            return it
-    for it in food:
-        n = _norm(it.name)
+    for names, value in candidates:
+        if any(_norm(n) == q for n in names if n):
+            return value
+    for names, value in candidates:
+        n = _norm(names[0]) if names else ""
         if n and (q in n or n in q):
-            return it
+            return value
     words = set(q.split())
     best, best_score = None, 0.0
-    for it in food:
-        overlap = len(words & set(_norm(it.name).split()))
+    for names, value in candidates:
+        overlap = len(words & set(_norm(names[0] if names else "").split()))
         if overlap:
             score = overlap / max(len(words), 1)
             if score > best_score:
-                best, best_score = it, score
+                best, best_score = value, score
     return best if best_score >= 0.5 else None
+
+
+def _match_item(name: str, pantry: list[PantryItem]) -> PantryItem | None:
+    """Best pantry item for a free-text food name."""
+    return _best_match(name, [([it.name, it.group_key], it) for it in pantry if it.is_food])
+
+
+def _match_shopping(name: str, shopping: list[ShoppingItem]) -> ShoppingItem | None:
+    """Best shopping-list row for a free-text name. Unchecked rows are tried first, so
+    "take milk off" removes the milk still to buy rather than the one already bought."""
+    rows = sorted(shopping, key=lambda s: s.done)
+    return _best_match(name, [([s.name], s) for s in rows])
+
+
+def _shopping_view(shopping: list[ShoppingItem]) -> list[dict]:
+    return [{"name": s.name, "quantity": s.quantity, "unit": s.unit, "done": s.done} for s in shopping]
 
 
 def _pantry_view(pantry: list[PantryItem]) -> list[dict]:
@@ -329,6 +469,106 @@ def _validate_pref(field: str, value):
             raise ValueError("household needs adults and/or kids")
         return field, out
     raise ValueError(f"unknown preference field: {field}")
+
+
+# ---- item validation for add_pantry_items / add_to_shopping_list ----
+
+UNITS = ("g", "kg", "ml", "l", "pcs", "pack")  # what the pantry stores; same list as units.js
+
+# Unit word -> (canonical unit, factor applied to the quantity). Imperial, volume
+# and packaging words are folded into the six units above, so the client never
+# has to know what an ounce is. Factors match frontend/shared/units.js. Anything
+# not listed comes back as "" and the quantity is kept as the user said it.
+_UNIT_MAP: dict[str, tuple[str, float]] = {
+    **{w: ("g", 1.0) for w in ("g", "gr", "gram", "grams")},
+    **{w: ("kg", 1.0) for w in ("kg", "kilo", "kilos", "kilogram", "kilograms")},
+    **{w: ("ml", 1.0) for w in ("ml", "milliliter", "milliliters", "millilitre", "millilitres")},
+    **{w: ("l", 1.0) for w in ("l", "liter", "liters", "litre", "litres")},
+    **{w: ("pcs", 1.0) for w in ("pcs", "pc", "piece", "pieces", "count", "ct", "each", "ea", "whole", "egg", "eggs", "clove", "cloves")},
+    **{w: ("pack", 1.0) for w in (
+        "pack", "packs", "pk", "packet", "packets", "jar", "jars", "bottle", "bottles", "can", "cans",
+        "bag", "bags", "box", "boxes", "carton", "cartons", "tub", "tubs", "bunch", "bunches",
+    )},
+    **{w: ("g", 28.35) for w in ("oz", "ounce", "ounces")},
+    **{w: ("g", 453.6) for w in ("lb", "lbs", "pound", "pounds")},
+    "dozen": ("pcs", 12.0),
+    **{w: ("ml", 5.0) for w in ("tsp", "teaspoon", "teaspoons")},
+    **{w: ("ml", 15.0) for w in ("tbsp", "tablespoon", "tablespoons")},
+    **{w: ("ml", 240.0) for w in ("cup", "cups")},
+    **{w: ("ml", 29.57) for w in ("fl oz", "floz", "fluid ounce", "fluid ounces")},
+    **{w: ("ml", 473.0) for w in ("pint", "pints", "pt")},
+    **{w: ("ml", 946.0) for w in ("quart", "quarts", "qt")},
+    **{w: ("ml", 3785.0) for w in ("gallon", "gallons", "gal")},
+}
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _clean_name(value) -> str | None:
+    """A display name the client can store: trimmed, inner whitespace collapsed, no
+    control characters, at most 60 chars. None when nothing usable is left."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(_CONTROL.sub("", value).split())[:60].strip()
+    return text or None
+
+
+def _clean_quantity(value) -> float | None:
+    """A positive finite number, else None (the model sends 0 or null for "some")."""
+    try:
+        q = float(value)
+    except (TypeError, ValueError):
+        return None
+    return q if math.isfinite(q) and q > 0 else None
+
+
+def _clean_days(value) -> int | None:
+    """expires_in_days: a whole number of days from 1 to 730 (two years), else None."""
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 730 else None
+
+
+def _clean_note(value) -> str:
+    return " ".join(_CONTROL.sub("", str(value or "")).split())[:120]
+
+
+def _clean_unit(unit, quantity: float | None) -> tuple[float | None, str]:
+    """Fold a free-text unit into one of UNITS, scaling the quantity for imperial,
+    volume and dozen. Returns (quantity, unit); unknown units come back as ""."""
+    word = " ".join(_WORD.findall(str(unit or "").lower()))
+    hit = _UNIT_MAP.get(word)
+    if hit is None:
+        return quantity, ""
+    canonical, factor = hit
+    if quantity is not None and factor != 1.0:
+        quantity = round(quantity * factor, 2)
+    return quantity, canonical
+
+
+def _clean_items(raw, extra: str) -> list[dict]:
+    """Validate a tool's `items` into [{ name, quantity, unit, <extra> }], where `extra`
+    is 'expires_in_days' (pantry) or 'note' (shopping). Rows without a usable name are
+    dropped and a food named twice keeps its first row, so the client can apply the
+    list as-is."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in raw if isinstance(raw, list) else []:
+        if isinstance(row, str):
+            row = {"name": row}  # the model occasionally sends bare names
+        if not isinstance(row, dict):
+            continue
+        name = _clean_name(row.get("name"))
+        if not name or _norm(name) in seen:
+            continue
+        seen.add(_norm(name))
+        quantity, unit = _clean_unit(row.get("unit"), _clean_quantity(row.get("quantity")))
+        item = {"name": name, "quantity": quantity, "unit": unit}
+        item[extra] = _clean_days(row.get(extra)) if extra == "expires_in_days" else _clean_note(row.get(extra))
+        out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +667,42 @@ def _run_tool(name: str, args: dict, req: ChatRequest, actions: list[dict], reci
             {"type": "record_checkin", "id": item.id, "name": item.name, "key": item.group_key, "percent": percent}
         )
         return {"ok": True, "item": item.name, "percent_remaining": percent}
+
+    if name == "read_shopping_list":
+        return {"shopping": _shopping_view(req.shopping)}
+
+    if name == "add_pantry_items":
+        items = _clean_items(args.get("items"), "expires_in_days")
+        if not items:
+            return {"ok": False, "error": "items must be a non-empty list of { name, quantity?, unit?, expires_in_days? }"}
+        actions.append({"type": "add_pantry_items", "items": items})
+        return {"ok": True, "added": [i["name"] for i in items]}
+
+    if name == "add_to_shopping_list":
+        items = _clean_items(args.get("items"), "note")
+        if not items:
+            return {"ok": False, "error": "items must be a non-empty list of { name, quantity?, unit?, note? }"}
+        actions.append({"type": "add_shopping_items", "items": items})
+        return {"ok": True, "added": [i["name"] for i in items]}
+
+    if name == "remove_from_shopping_list":
+        names = args.get("names")
+        if isinstance(names, str):
+            names = [names]
+        names = [n.strip() for n in (names if isinstance(names, list) else []) if isinstance(n, str) and n.strip()]
+        if not names:
+            return {"ok": False, "error": "names must be a non-empty list of item names"}
+        removed: list[str] = []
+        unknown: list[str] = []
+        for n in names:
+            hit = _match_shopping(n, req.shopping)
+            if hit is None:
+                unknown.append(n)
+            elif hit.name not in removed:
+                removed.append(hit.name)  # the name as it reads on the list, so the client can find it
+        if removed:
+            actions.append({"type": "remove_shopping_items", "names": removed})
+        return {"ok": bool(removed), "removed": removed, "unknown": unknown}
 
     return {"ok": False, "error": f"unknown tool: {name}"}
 

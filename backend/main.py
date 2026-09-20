@@ -1,6 +1,8 @@
 """
-Pantry AI backend — receipt OCR, recipe generation, and a photo of a dish → its
-recipe, all via Gemini (see recipes.py and identify.py).
+mise en feast backend — receipt OCR, recipe generation, a photo of a dish → its
+recipe, dish pictures and a week's meal plan, all via Gemini (see recipes.py,
+identify.py, images.py and meal_plan.py); the in-app assistant is Claude on
+Bedrock (chat.py).
 
 Pairs with the static frontend in ../frontend (Supabase for auth/persistence).
 
@@ -18,7 +20,7 @@ from datetime import date, timedelta
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
@@ -27,7 +29,9 @@ from pydantic import BaseModel, Field
 import bedrock
 import chat as cx
 import identify as ident
+import images
 import llm
+import meal_plan
 import recipes as rx
 import recipes_ai
 
@@ -52,7 +56,7 @@ def gemini():
     return _client
 
 
-app = FastAPI(title="Pantry AI")
+app = FastAPI(title="mise en feast API")
 
 # Frontend is served separately (e.g. localhost:4173); allow local + common hosts.
 _origins = [
@@ -69,6 +73,7 @@ app.add_middleware(
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$|https://[a-z0-9.-]+\.vercel\.app$",
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Dish-Slug"],  # so a cross-origin dev page (4173 -> 8000) can read /dish-image's slug
 )
 
 
@@ -389,6 +394,61 @@ async def identify_dish(file: UploadFile = File(...)):
     return dish.model_dump()
 
 
+@app.get("/dish-image")
+def dish_image(title: str = "", ingredients: str = "", seed: int = 0):
+    """A picture of a dish for its card (contract in images.py).
+
+    Query: `title` (required, at most 120 chars), `ingredients` (optional, comma
+    separated, at most 400 chars), `seed` (optional, a different take on the same
+    title). Answers image bytes with a year-long immutable Cache-Control and the
+    dish slug in X-Dish-Slug. Errors map like the other routes: 400 bad query,
+    503 no key, 502 the model call failed.
+    """
+    title = " ".join(title.split())
+    if not title:
+        raise HTTPException(400, "title is required.")
+    if len(title) > 120:
+        raise HTTPException(400, "title is too long (max 120 characters).")
+    if len(ingredients) > 400:
+        raise HTTPException(400, "ingredients is too long (max 400 characters).")
+    names = [n.strip() for n in ingredients.split(",") if n.strip()][:12]
+    seed = max(0, min(seed, 2**31 - 1))
+
+    try:
+        image = images.generate_dish_image(gemini(), title, names, seed)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(502, f"Could not generate dish image: {exc}") from exc
+
+    return Response(
+        content=image.data,
+        media_type=image.mime_type,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Dish-Slug": images.slug(title),
+        },
+    )
+
+
+@app.post("/meal-plan")
+def get_meal_plan(req: meal_plan.MealPlanRequest):
+    """Breakfast, lunch and dinner for each of `days` days from `start`, cooked
+    from the pantry (contract in meal_plan.py). Each meal is a step-less recipe
+    annotated with have/missing the same way /recipes and /chat cards are; a
+    meal is null when it tripped an allergy or diet rule. 400 empty pantry,
+    503 no key, 502 the model call failed.
+    """
+    try:
+        return meal_plan.generate(req, gemini(), MODEL)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        raise HTTPException(502, f"Meal plan generation failed: {exc}") from exc
+
+
 @app.get("/health")
 def health():
     """The models in use, and whether keys are present (never the keys themselves).
@@ -396,6 +456,7 @@ def health():
     return {
         "ok": True,
         "model": MODEL,
+        "image_model": images.current_model(),  # None until the first /dish-image picks one
         "key_set": bool(os.getenv("GEMINI_API_KEY")),
         "chat": {
             "engine": "bedrock",
@@ -411,8 +472,8 @@ def health():
 def root():
     return {
         "ok": True,
-        "service": "pantry-ai",
+        "service": "mise-en-feast",
         "health": "/health",
         "docs": "/docs",
-        "endpoints": ["/scan", "/recipes", "/chat", "/recipe-detail", "/cook", "/identify"],
+        "endpoints": ["/scan", "/recipes", "/chat", "/recipe-detail", "/cook", "/identify", "/dish-image", "/meal-plan"],
     }

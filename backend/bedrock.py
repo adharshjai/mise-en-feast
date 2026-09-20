@@ -1,5 +1,5 @@
 """
-Claude on AWS Bedrock — the reasoning engine for Pantry AI.
+Claude on AWS Bedrock — the reasoning engine for mise en feast.
 
 Gemini still reads receipts (backend/main.py /scan). Everything that needs real
 reasoning about the user's pantry, preferences and meals goes to Claude Sonnet

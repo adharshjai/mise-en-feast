@@ -1,5 +1,5 @@
-/* Pantry — FastAPI client (receipt scan, recipes, dish photo → recipe).
-   Base URL comes from window.PANTRY_CONFIG.apiBaseUrl (see shared/config.js). */
+/* mise en feast — FastAPI client (receipt scan, recipes, chat, weekly plan, dish photo → recipe,
+   generated dish images). Base URL comes from window.PANTRY_CONFIG.apiBaseUrl (see shared/config.js). */
 
 const cfg = () => (typeof window !== 'undefined' && window.PANTRY_CONFIG) || {};
 
@@ -13,8 +13,10 @@ const LOCAL_API = 'http://localhost:8000';   // uvicorn, when the page itself co
 function baseUrl() {
   const base = (cfg().apiBaseUrl || '').trim().replace(/\/$/, '');
   // '/api' means "same origin" (the Vercel Python function). A python http.server on
-  // localhost has no /api, so fall back to the local backend there.
-  if (base.startsWith('/') && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return LOCAL_API;
+  // localhost has no /api, so fall back to the local backend there. (`location` is
+  // guarded because the Node test harness imports this module with no page.)
+  const host = typeof location !== 'undefined' ? location.hostname : '';
+  if (base.startsWith('/') && /^(localhost|127\.0\.0\.1)$/.test(host)) return LOCAL_API;
   return base;
 }
 
@@ -67,24 +69,56 @@ export async function fetchRecipes(items, opts = {}) {
 }
 
 /**
+ * POST /meal-plan — a week of breakfast / lunch / dinner cooked from the pantry.
+ * body: { items, prefs, days, start?, request }.
+ *   items    the aggregated PantryItem array (same as fetchRecipes)
+ *   prefs    the v2 preferences object (or null)
+ *   days     1..14 (default 7; clamped here so a bad value cannot 422)
+ *   start    'YYYY-MM-DD' first day; omitted when null so the server picks today
+ *   request  plain-English wishes for the week (or null)
+ * Resolves to { start, days: [{ date, meals: { breakfast, lunch, dinner } }] } where each
+ * meal is a step-less recipe (the chat suggestion shape: title, cook_minutes, servings,
+ * difficulty, ingredients[{ name, amount, matched_name, servings_used, staple, have }],
+ * missing_count, coverage, urgency_days, uses_expiring, description?, steps: []) or null.
+ * Fetch steps with recipeDetail() when a meal is opened.
+ */
+export async function fetchMealPlan(items, { prefs = null, days = 7, start = null, request = null } = {}) {
+  if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
+  const body = { items, prefs, days: Math.min(14, Math.max(1, Math.round(Number(days)) || 7)), request };
+  if (start) body.start = start;
+  const res = await fetch(`${baseUrl()}/meal-plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/**
  * POST /chat — the in-app assistant (Claude via Bedrock, with controlled pantry tools).
- * body: { messages, pantry, prefs, recent_meals }.
+ * body: { messages, pantry, prefs, recent_meals, shopping }.
  *   messages    [{ role: 'user'|'assistant', content }]  the turn history
  *   pantry      the aggregated PantryItem array (same as fetchRecipes)
  *   prefs       the v2 preferences object
  *   recentMeals [{ title, cooked_at? }]  newest first (optional)
+ *   shopping    [{ name, quantity: number|null, unit, done }]  the shopping list (optional)
  * Resolves to { reply, actions, recipes }. Each action is one the client applies:
- *   { type: 'update_preference', field, value }
- *   { type: 'mark_food_gone',    id, name, key }
- *   { type: 'record_checkin',    id, name, key, percent }
+ *   { type: 'update_preference',     field, value }
+ *   { type: 'mark_food_gone',        id, name, key }
+ *   { type: 'record_checkin',        id, name, key, percent }
+ *   { type: 'add_pantry_items',      items: [{ name, quantity: number|null, unit, expires_in_days: number|null }] }
+ *   { type: 'add_shopping_items',    items: [{ name, quantity: number|null, unit, note }] }
+ *   { type: 'remove_shopping_items', names: string[] }   (only names that matched a `shopping` row)
+ * Units in actions are already canonical ('g', 'kg', 'ml', 'l', 'pcs', 'pack' or '').
  * `recipes` are step-less suggestion cards; fetch steps with recipeDetail() when opened.
  */
-export async function chat(messages, { pantry = [], prefs = null, recentMeals = [] } = {}) {
+export async function chat(messages, { pantry = [], prefs = null, recentMeals = [], shopping = [] } = {}) {
   if (!apiConfigured()) throw new Error('API base URL is not set in shared/config.js');
   const res = await fetch(`${baseUrl()}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, pantry, prefs, recent_meals: recentMeals }),
+    body: JSON.stringify({ messages, pantry, prefs, recent_meals: recentMeals, shopping }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -104,6 +138,20 @@ export async function recipeDetail({ title, servings = 2, ingredients = [], requ
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+/**
+ * GET /dish-image — the URL of a generated photo for a dish (image/jpeg, cached for a
+ * year by the server). This only builds the URL; shared/dish-images.js fetches and
+ * caches the bytes. `ingredients` is capped to the first 8 names so the query stays
+ * within the backend's 400-char limit. Returns '' when the API is not configured.
+ */
+export function dishImageUrl({ title, ingredients = [], seed = 0 } = {}) {
+  if (!apiConfigured()) return '';
+  const names = (Array.isArray(ingredients) ? ingredients : []).slice(0, 8).map(n => String(n ?? '').trim()).filter(Boolean);
+  return `${baseUrl()}/dish-image?title=${encodeURIComponent(String(title ?? ''))}`
+    + `&ingredients=${encodeURIComponent(names.join(','))}`
+    + `&seed=${encodeURIComponent(String(Number(seed) || 0))}`;
 }
 
 /**

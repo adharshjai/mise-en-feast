@@ -1,4 +1,4 @@
-# Pantry — frontend
+# mise en feast — frontend
 
 A pantry that fills itself from grocery receipts and tells you what to cook.
 This folder is the hand-built web frontend: a landing page, a login page and
