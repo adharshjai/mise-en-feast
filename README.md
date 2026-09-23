@@ -1,4 +1,4 @@
-# mise en feast
+# mise en feast - nowwere.cooking
 
 A pantry that fills itself from grocery receipts and tells you what to cook.
 
